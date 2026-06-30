@@ -263,22 +263,6 @@ static void addCarplayDeclarations(id lib) {
     } @catch(...) {}
     return orig;
 }
-
-- (long)effectivePolicyForAppDeclaration:(id)declaration inVehicleWithCertificateSerial:(id)serial {
-    long orig = %orig;
-    @try {
-        id bidObj = cb(declaration, "bundleIdentifier");
-        if (bidObj) {
-            const char *bid = ((const char*(*)(id,SEL))objc_msgSend)(bidObj,
-                sel_registerName("UTF8String"));
-            if (bid && CBIsEnabled(bid)) {
-                long allow = CBAllowedPolicyValue();
-                CBLogFmt("[CBR] policy2(%s) orig=%ld -> %ld", bid, orig, allow);
-                return allow;
-            }
-        }
-    } @catch(...) {}
-    return orig;
 }
 
 %end
