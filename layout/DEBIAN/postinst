@@ -1,0 +1,5 @@
+#!/bin/sh
+/var/jb/usr/bin/cbr-refresh-prefs 2>/dev/null || /usr/bin/cbr-refresh-prefs 2>/dev/null || true
+echo "[CBR v3.11.1] Installed. Re-bootstrap via NathanLR, then fully quit & reopen Settings."
+echo "[CBR] Installed apps later? Run: cbr-refresh-prefs  then reopen Settings."
+exit 0

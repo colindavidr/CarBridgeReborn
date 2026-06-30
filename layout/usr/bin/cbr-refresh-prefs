@@ -1,0 +1,62 @@
+#!/bin/sh
+# Regenerate the CarBridge Reborn preference panel's Root.plist from the list of
+# installed user apps (via uicache; plutil is absent on this device).
+ROOT="/var/jb/Library/PreferenceBundles/CarBridgeRebornPrefs.bundle/Root.plist"
+UICACHE=/var/jb/usr/bin/uicache
+[ -x "$UICACHE" ] || UICACHE=/usr/bin/uicache
+[ -x "$UICACHE" ] || UICACHE="$(command -v uicache 2>/dev/null)"
+TAB="$(printf '\t')"
+TMP="$(mktemp 2>/dev/null || echo /tmp/cbr_apps.$$)"; : > "$TMP"
+
+"$UICACHE" -l 2>/dev/null | while IFS= read -r line; do
+    bid="${line%% : *}"; path="${line#* : }"
+    case "$bid" in com.apple.*) continue;; esac
+    case "$path" in */Bundle/Application/*.app) ;; *) continue;; esac
+    name="$(basename "$path" .app)"
+    name="$(printf '%s' "$name" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')"
+    printf '%s%s%s\n' "$name" "$TAB" "$bid" >> "$TMP"
+done
+
+{
+cat <<'HDR'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>items</key>
+    <array>
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>footerText</key><string>Turn on the apps you want on the CarPlay dashboard, then reconnect CarPlay (killall -9 CarPlay).</string>
+        </dict>
+HDR
+if [ -s "$TMP" ]; then
+  sort -f "$TMP" | while IFS="$TAB" read -r name bid; do
+    [ -z "$bid" ] && continue
+cat <<ITEM
+        <dict>
+            <key>cell</key><string>PSSwitchCell</string>
+            <key>label</key><string>$name</string>
+            <key>key</key><string>$bid</string>
+            <key>defaults</key><string>com.carbridgereborn</string>
+            <key>default</key><false/>
+        </dict>
+ITEM
+  done
+else
+cat <<'EMPTY'
+        <dict>
+            <key>cell</key><string>PSStaticTextCell</string>
+            <key>label</key><string>No third-party apps found</string>
+        </dict>
+EMPTY
+fi
+cat <<'FTR'
+    </array>
+    <key>title</key><string>CarBridge Reborn</string>
+</dict>
+</plist>
+FTR
+} > "$ROOT"
+rm -f "$TMP"
+echo "[CBR] Root.plist regenerated with $(grep -c PSSwitchCell "$ROOT" 2>/dev/null || echo 0) app(s)."
