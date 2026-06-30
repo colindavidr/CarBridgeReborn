@@ -317,8 +317,8 @@ static void addCarplayDeclarations(id lib) {
 %hook DBApplicationLaunchInfo
 
 + (id)launchInfoForApplication:(id)appInfo withActivationSettings:(id)settings {
+    BOOL handled = NO;
     @try {
-        // Check for our tag using C string comparison
         NSArray *tags = cb(appInfo, "tags");
         if (!tags) tags = getIvar(appInfo, "_tags");
 
@@ -328,16 +328,21 @@ static void addCarplayDeclarations(id lib) {
                 sel_registerName("UTF8String"));
             if (t && strcmp(t, "CarPlayEnable") == 0) { isOurs = YES; break; }
         }
-        if (!isOurs) return %orig;
 
-        id bidObj = cb(appInfo, "bundleIdentifier");
-        if (!bidObj) return %orig;
-        const char *bid = ((const char*(*)(id,SEL))objc_msgSend)(bidObj,
-            sel_registerName("UTF8String"));
-        CBLogFmt("[CBR] Tapped bridged app: %s", bid ?: "?");
-        CBOpenApp(bid);
-        return nil;
-    } @catch(...) { return %orig; }
+        if (isOurs) {
+            id bidObj = cb(appInfo, "bundleIdentifier");
+            if (bidObj) {
+                const char *bid = ((const char*(*)(id,SEL))objc_msgSend)(bidObj,
+                    sel_registerName("UTF8String"));
+                CBLogFmt("[CBR] Tapped bridged app: %s", bid ?: "?");
+                CBOpenApp(bid);
+                handled = YES;
+            }
+        }
+    } @catch(...) { handled = NO; }
+
+    if (handled) return nil;
+    return %orig;
 }
 
 %end
