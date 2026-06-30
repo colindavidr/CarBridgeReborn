@@ -1,22 +1,20 @@
 name: Build CarBridgeReborn
-
 on:
   push:
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: macos-14
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Install Theos
         run: |
           export THEOS=$HOME/theos
           git clone --quiet --recursive https://github.com/theos/theos.git "$THEOS"
           echo "THEOS=$THEOS" >> "$GITHUB_ENV"
-
+      - name: Install ldid
+        run: brew install ldid
       - name: Install patched iOS 16.5 SDK (for private framework headers)
         run: |
           git clone -n --depth=1 --filter=tree:0 https://github.com/theos/sdks.git /tmp/sdks
@@ -26,12 +24,10 @@ jobs:
           mkdir -p "$THEOS/sdks"
           cp -R /tmp/sdks/iPhoneOS16.5.sdk "$THEOS/sdks/"
           ls "$THEOS/sdks"
-
       - name: Build (rootless)
         run: |
           make clean
           make THEOS_PACKAGE_SCHEME=rootless package FINALPACKAGE=1
-
       - name: Verify arm64e ABI is 0x80 (fail build if not)
         run: |
           BIN=$(find .theos -name CarBridgeRebornPrefs -path "*bundle*" | head -1)
@@ -40,7 +36,6 @@ jobs:
           CAP=$(lipo -detailed_info "$BIN" | awk '/architecture arm64e/{f=1} f&&/capabilities/{print $2; exit}')
           echo "arm64e capabilities = $CAP"
           if [ "$CAP" != "0x80" ]; then echo "::warning::arm64e capabilities is $CAP, expected 0x80"; fi
-
       - name: Upload .deb
         uses: actions/upload-artifact@v4
         with:
