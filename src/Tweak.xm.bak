@@ -244,18 +244,18 @@ static void addCarplayDeclarations(id lib) {
 // evaluation so we can confirm the iOS 17 enum values from a real device.
 %hook CRCarPlayAppPolicyEvaluator
 
-- (NSInteger)effectivePolicyForAppDeclaration:(id)declaration {
-    NSInteger orig = %orig;
+- (long)effectivePolicyForAppDeclaration:(id)declaration {
+    long orig = %orig;
     @try {
         id bidObj = cb(declaration, "bundleIdentifier");
         if (bidObj) {
             const char *bid = ((const char*(*)(id,SEL))objc_msgSend)(bidObj,
                 sel_registerName("UTF8String"));
             if (bid) {
-                CBLogFmt("[CBR] policy(%s) orig=%ld", bid, (long)orig);
+                CBLogFmt("[CBR] policy(%s) orig=%ld", bid, orig);
                 if (CBIsEnabled(bid)) {
-                    NSInteger allow = (NSInteger)CBAllowedPolicyValue();
-                    CBLogFmt("[CBR]   -> forcing policy=%ld for %s", (long)allow, bid);
+                    long allow = CBAllowedPolicyValue();
+                    CBLogFmt("[CBR]   -> forcing policy=%ld for %s", allow, bid);
                     return allow;
                 }
             }
@@ -264,20 +264,17 @@ static void addCarplayDeclarations(id lib) {
     return orig;
 }
 
-- (NSInteger)effectivePolicyForAppDeclaration:(id)declaration inVehicleWithCertificateSerial:(id)serial {
-    NSInteger orig = %orig;
+- (long)effectivePolicyForAppDeclaration:(id)declaration inVehicleWithCertificateSerial:(id)serial {
+    long orig = %orig;
     @try {
         id bidObj = cb(declaration, "bundleIdentifier");
         if (bidObj) {
             const char *bid = ((const char*(*)(id,SEL))objc_msgSend)(bidObj,
                 sel_registerName("UTF8String"));
-            if (bid) {
-                CBLogFmt("[CBR] policy2(%s) orig=%ld", bid, (long)orig);
-                if (CBIsEnabled(bid)) {
-                    NSInteger allow = (NSInteger)CBAllowedPolicyValue();
-                    CBLogFmt("[CBR]   -> forcing policy2=%ld for %s", (long)allow, bid);
-                    return allow;
-                }
+            if (bid && CBIsEnabled(bid)) {
+                long allow = CBAllowedPolicyValue();
+                CBLogFmt("[CBR] policy2(%s) orig=%ld -> %ld", bid, orig, allow);
+                return allow;
             }
         }
     } @catch(...) {}
