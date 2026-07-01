@@ -28,6 +28,7 @@ static void PLog(const char *m) {
 + (id)groupSpecifierWithName:(NSString *)name;
 + (id)preferenceSpecifierNamed:(NSString *)name target:(id)target set:(SEL)set get:(SEL)get detail:(Class)detail cell:(NSInteger)cell edit:(Class)edit;
 - (void)setProperty:(id)value forKey:(NSString *)key;
+- (id)propertyForKey:(NSString *)key;
 @end
 
 @interface PSListController : UIViewController
@@ -77,7 +78,7 @@ static NSMutableArray *cbrBuildManually(id target) {
 }
 
 - (id)specifiers {
-    PLog("[prefs] specifiers called (v3.11.6 bundle-override)");
+    PLog("[prefs] specifiers called (v3.11.7 with-getset)");
     @try {
         NSBundle *b = [(PSListController *)self bundle];
         char bb[320];
@@ -102,6 +103,31 @@ static NSMutableArray *cbrBuildManually(id target) {
         PLog([[e description] UTF8String] ?: "(no description)");
         return @[];
     }
+}
+
+
+- (id)readPreferenceValue:(PSSpecifier *)specifier {
+    NSString *key = [specifier propertyForKey:@"key"];
+    NSString *domain = [specifier propertyForKey:@"defaults"] ?: @"com.carbridgereborn";
+    if (!key) return @NO;
+    CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                    (__bridge CFStringRef)domain);
+    id val = v ? (__bridge_transfer id)v : nil;
+    if (val == nil) {
+        id def = [specifier propertyForKey:@"default"];
+        return def ?: @NO;
+    }
+    return val;
+}
+
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    NSString *key = [specifier propertyForKey:@"key"];
+    NSString *domain = [specifier propertyForKey:@"defaults"] ?: @"com.carbridgereborn";
+    if (!key) return;
+    CFPreferencesSetAppValue((__bridge CFStringRef)key,
+                             (__bridge CFPropertyListRef)value,
+                             (__bridge CFStringRef)domain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)domain);
 }
 
 %end
