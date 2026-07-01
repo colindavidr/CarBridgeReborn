@@ -1,14 +1,16 @@
 /*
- * CarBridgeReborn — Settings controller (v3.11.6)
+ * CarBridgeReborn — Settings controller (v3.11.8)
  *
- * Panel opens (ABI fixed) but lists 0 rows. Fixes:
- *  1. loadSpecifiersFromPlistName: finds Root.plist via [self bundle], which
- *     under a Logos %subclass doesn't resolve to our PreferenceBundle. Override
- *     -bundle to return our bundle explicitly.
- *  2. Manual fallback (ABI-safe now) builds specifiers directly from the plist
- *     at its absolute path, via a C helper to avoid %subclass self-typing.
+ * v3.11.7 built 96 specifiers but the table rendered blank. Cause: when you
+ * override -specifiers, PSListController's table data source reads the rows
+ * from its internal _specifiers ivar — NOT from your return value. The stock
+ * pattern (_specifiers = [self loadSpecifiers...]) assigns that ivar; ours
+ * returned the array without setting it, and loadSpecifiersFromPlistName does
+ * not populate the ivar on iOS 17, so the table saw 0 rows. Fix: write the
+ * built specifiers into _specifiers via the runtime. Also logs PSListController's
+ * ivar names once, so if the ivar isn't literally "_specifiers" we see the real
+ * name and correct it.
  */
-
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <fcntl.h>
@@ -37,7 +39,7 @@ static void PLog(const char *m) {
 - (NSBundle *)bundle;
 @end
 
-// C helper so we don't message `self` (a forward-declared %subclass type)
+// C helper (fallback) so nothing messages the forward-declared %subclass self
 static NSMutableArray *cbrBuildManually(id target) {
     NSMutableArray *out = [NSMutableArray array];
     @try {
@@ -77,35 +79,6 @@ static NSMutableArray *cbrBuildManually(id target) {
     return b ?: %orig;
 }
 
-- (id)specifiers {
-    PLog("[prefs] specifiers called (v3.11.7 with-getset)");
-    @try {
-        NSBundle *b = [(PSListController *)self bundle];
-        char bb[320];
-        snprintf(bb, sizeof(bb), "[prefs] [self bundle] -> %s",
-                 b ? [[b bundlePath] UTF8String] : "(nil)");
-        PLog(bb);
-
-        NSArray *specs = [(PSListController *)self loadSpecifiersFromPlistName:@"Root" target:self];
-        char buf[96];
-        snprintf(buf, sizeof(buf), "[prefs] loadSpecifiersFromPlistName -> %lu",
-                 (unsigned long)(specs ? specs.count : 0));
-        PLog(buf);
-        if (specs && specs.count > 0) return specs;
-
-        PLog("[prefs] loader gave 0 — building manually");
-        NSMutableArray *manual = cbrBuildManually(self);
-        snprintf(buf, sizeof(buf), "[prefs] manual build -> %lu", (unsigned long)manual.count);
-        PLog(buf);
-        return manual;
-    } @catch (NSException *e) {
-        PLog("[prefs] EXCEPTION in specifiers:");
-        PLog([[e description] UTF8String] ?: "(no description)");
-        return @[];
-    }
-}
-
-
 - (id)readPreferenceValue:(PSSpecifier *)specifier {
     NSString *key = [specifier propertyForKey:@"key"];
     NSString *domain = [specifier propertyForKey:@"defaults"] ?: @"com.carbridgereborn";
@@ -128,6 +101,60 @@ static NSMutableArray *cbrBuildManually(id target) {
                              (__bridge CFPropertyListRef)value,
                              (__bridge CFStringRef)domain);
     CFPreferencesAppSynchronize((__bridge CFStringRef)domain);
+}
+
+- (id)specifiers {
+    PLog("[prefs] specifiers called (v3.11.8 ivar-cache)");
+    Class pslc = %c(PSListController);
+
+    static BOOL logged = NO;
+    if (!logged) {
+        logged = YES;
+        unsigned int n = 0;
+        Ivar *ivars = class_copyIvarList(pslc, &n);
+        char hdr[80];
+        snprintf(hdr, sizeof(hdr), "[prefs] PSListController ivars (%u):", n);
+        PLog(hdr);
+        for (unsigned int i = 0; i < n; i++) {
+            const char *nm = ivar_getName(ivars[i]);
+            if (nm) {
+                char b[160];
+                snprintf(b, sizeof(b), "[prefs]   %s", nm);
+                PLog(b);
+            }
+        }
+        if (ivars) free(ivars);
+    }
+
+    @try {
+        NSArray *specs = [(PSListController *)self loadSpecifiersFromPlistName:@"Root" target:self];
+        char buf[96];
+        snprintf(buf, sizeof(buf), "[prefs] loaded -> %lu",
+                 (unsigned long)(specs ? specs.count : 0));
+        PLog(buf);
+
+        if (!specs || specs.count == 0) {
+            PLog("[prefs] loader gave 0 — building manually");
+            specs = cbrBuildManually(self);
+            snprintf(buf, sizeof(buf), "[prefs] manual -> %lu", (unsigned long)specs.count);
+            PLog(buf);
+        }
+
+        // Populate the framework's _specifiers ivar so the table shows the rows.
+        Ivar iv = class_getInstanceVariable(pslc, "_specifiers");
+        if (iv && specs) {
+            object_setIvar(self, iv, specs);
+            objc_setAssociatedObject(self, "cbrSpecs", specs, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            PLog("[prefs] _specifiers ivar set");
+        } else {
+            PLog("[prefs] _specifiers ivar NOT found — check ivar list above");
+        }
+        return specs;
+    } @catch (NSException *e) {
+        PLog("[prefs] EXCEPTION in specifiers:");
+        PLog([[e description] UTF8String] ?: "(no description)");
+        return @[];
+    }
 }
 
 %end
