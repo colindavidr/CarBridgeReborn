@@ -1,10 +1,10 @@
 /*
- * CarBridgeReborn — Settings controller (v3.11.10)
+ * CarBridgeReborn — Settings controller (v3.11.11)
  *
- * v3.11.9 got names + icons rendering. This adds:
- *  - Section header "Select Apps to Inject Into CarPlay:" set on the leading
- *    group specifier in code (the generated plist's group label wasn't showing).
- *  - Taller rows via heightForRowAtIndexPath so icon+name+switch aren't cramped.
+ * v3.11.10 got the code-set header working. This adds:
+ *  - Smaller app icons via transparent inset padding (tune CBR_ICON_INSET_FRAC).
+ *  - Removes the bottom footer by clearing footerText on the leading group.
+ *  - Drops the non-functional heightForRow delegate.
  */
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -21,7 +21,7 @@ static void PLog(const char *m) {
 #define ROOT_PLIST_PATH @"/var/jb/Library/PreferenceBundles/CarBridgeRebornPrefs.bundle/Root.plist"
 #define CBR_HEADER      @"Select Apps to Inject Into CarPlay:"
 #define CBR_PSSwitchCell 6
-#define CBR_ROW_HEIGHT   60.0
+#define CBR_ICON_INSET_FRAC 0.14   // fraction trimmed from EACH side; bigger = smaller icon
 
 @interface PSSpecifier : NSObject
 + (id)groupSpecifierWithName:(NSString *)name;
@@ -66,6 +66,24 @@ static UIImage *cbrIcon(NSString *bid) {
     } @catch (NSException *e) { return nil; }
 }
 
+// Redraw the icon smaller within a same-size transparent canvas so the visible
+// icon shrinks regardless of how the cell frames it.
+static UIImage *cbrShrinkIcon(UIImage *src) {
+    if (!src) return nil;
+    @try {
+        CGFloat scale = src.scale > 0.0 ? src.scale : [UIScreen mainScreen].scale;
+        CGSize sz = src.size;
+        if (sz.width <= 0.0 || sz.height <= 0.0) return src;
+        CGFloat ix = sz.width  * CBR_ICON_INSET_FRAC;
+        CGFloat iy = sz.height * CBR_ICON_INSET_FRAC;
+        UIGraphicsBeginImageContextWithOptions(sz, NO, scale);
+        [src drawInRect:CGRectMake(ix, iy, sz.width - ix * 2.0, sz.height - iy * 2.0)];
+        UIImage *out = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        return out ?: src;
+    } @catch (NSException *e) { return src; }
+}
+
 static NSMutableArray *cbrBuildManually(id target) {
     NSMutableArray *out = [NSMutableArray array];
     @try {
@@ -75,7 +93,6 @@ static NSMutableArray *cbrBuildManually(id target) {
             NSString *cell = item[@"cell"];
             if ([cell isEqualToString:@"PSGroupCell"]) {
                 PSSpecifier *g = [%c(PSSpecifier) groupSpecifierWithName:(item[@"label"] ?: @"")];
-                if (item[@"footerText"]) [g setProperty:item[@"footerText"] forKey:@"footerText"];
                 [out addObject:g];
             } else if ([cell isEqualToString:@"PSSwitchCell"]) {
                 PSSpecifier *s = [%c(PSSpecifier) preferenceSpecifierNamed:(item[@"label"] ?: @"")
@@ -110,6 +127,7 @@ static void cbrEnrich(NSArray *specs) {
         }
         UIImage *ic = cbrIcon(bid);
         if (ic) {
+            ic = cbrShrinkIcon(ic);
             @try { [spec setProperty:ic forKey:@"iconImage"]; } @catch (NSException *e) {}
             iconed++;
         }
@@ -127,10 +145,6 @@ static void cbrEnrich(NSArray *specs) {
 - (NSBundle *)bundle {
     NSBundle *b = [NSBundle bundleWithPath:BUNDLE_PATH];
     return b ?: %orig;
-}
-
-- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
-    return CBR_ROW_HEIGHT;
 }
 
 - (id)readPreferenceValue:(PSSpecifier *)specifier {
@@ -158,7 +172,7 @@ static void cbrEnrich(NSArray *specs) {
 }
 
 - (id)specifiers {
-    PLog("[prefs] specifiers called (v3.11.10 header+spacing)");
+    PLog("[prefs] specifiers called (v3.11.11 footer+smallicons)");
     Class pslc = %c(PSListController);
     @try {
         NSArray *specs = [(PSListController *)self loadSpecifiersFromPlistName:@"Root" target:self];
@@ -174,19 +188,12 @@ static void cbrEnrich(NSArray *specs) {
 
         cbrEnrich(specs);
 
-        // Force the section header onto the leading group specifier.
+        // Header on + footer off, on the leading group specifier.
         if (specs.count > 0) {
             PSSpecifier *hdr = specs[0];
-            @try {
-                char hb[128];
-                snprintf(hb, sizeof(hb), "[prefs] specs[0] cellType=%ld name=%s",
-                         (long)[hdr cellType], [[hdr name] UTF8String] ?: "(nil)");
-                PLog(hb);
-                [hdr setName:CBR_HEADER];
-                PLog("[prefs] header name set on specs[0]");
-            } @catch (NSException *e) {
-                PLog("[prefs] header set EXCEPTION");
-            }
+            @try { [hdr setName:CBR_HEADER]; } @catch (NSException *e) {}
+            @try { [hdr setProperty:@"" forKey:@"footerText"]; PLog("[prefs] footer cleared"); }
+            @catch (NSException *e) { PLog("[prefs] footer clear EXCEPTION"); }
         }
 
         Ivar iv = class_getInstanceVariable(pslc, "_specifiers");
