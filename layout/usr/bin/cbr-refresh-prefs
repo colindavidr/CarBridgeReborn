@@ -27,7 +27,8 @@ cat <<'HDR'
     <array>
         <dict>
             <key>cell</key><string>PSGroupCell</string>
-            <key>footerText</key><string>Turn on the apps you want on the CarPlay dashboard, then reconnect CarPlay (killall -9 CarPlay).</string>
+            <key>label</key><string>Select Apps to Inject Into CarPlay:</string>
+            <key>footerText</key><string>Turn on the apps you want, then reconnect CarPlay.</string>
         </dict>
 HDR
 if [ -s "$TMP" ]; then

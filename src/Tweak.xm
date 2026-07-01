@@ -56,6 +56,46 @@ static void CBLogFmt(const char *fmt, ...) {
     CBLog(buf);
 }
 
+// ---- Stage 2 (CarPlay->SpringBoard) diagnostics: separate log + Darwin post ----
+static int gCPFD = -1;
+static void CBCarLog(const char *msg) {
+    if (gCPFD < 0)
+        gCPFD = open("/var/mobile/CBR_carplay_live.txt",
+                     O_WRONLY|O_CREAT|O_APPEND, 0644);
+    if (gCPFD >= 0) { write(gCPFD, msg, strlen(msg)); write(gCPFD, "\n", 1); }
+    write(2, msg, strlen(msg)); write(2, "\n", 1);
+}
+static void CBCarLogFmt(const char *fmt, ...) {
+    char buf[512];
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    CBCarLog(buf);
+}
+static void CBPostLaunch(const char *bid_cstr) {
+    if (!bid_cstr) return;
+    @try {
+        CFStringRef bid = CFStringCreateWithCString(kCFAllocatorDefault,
+                              bid_cstr, kCFStringEncodingUTF8);
+        CFStringRef keys[1]   = { CFSTR("bundleID") };
+        CFStringRef values[1] = { bid };
+        CFDictionaryRef info = CFDictionaryCreate(kCFAllocatorDefault,
+                                   (const void **)keys, (const void **)values, 1,
+                                   &kCFTypeDictionaryKeyCallBacks,
+                                   &kCFTypeDictionaryValueCallBacks);
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            CFSTR("com.carbridgereborn.launch"),
+            NULL, info, TRUE);
+        CBCarLogFmt("[CBR-CP] posted launch notif -> %s", bid_cstr);
+        if (info) CFRelease(info);
+        if (bid)  CFRelease(bid);
+    } @catch(...) {
+        CBCarLog("[CBR-CP] post EXCEPTION");
+    }
+}
+
+
 // ─── Saved library — void* to avoid ANY ARC at store time ────────────────────
 static void *gLibraryPtr = NULL;
 
@@ -334,6 +374,8 @@ static void addCarplayDeclarations(id lib) {
             if (bidObj) {
                 const char *bid = ((const char*(*)(id,SEL))objc_msgSend)(bidObj,
                     sel_registerName("UTF8String"));
+                CBCarLogFmt("[CBR-CP] tap(launchInfo) -> %s", bid ?: "?");
+                CBPostLaunch(bid);
                 CBLogFmt("[CBR] Tapped bridged app: %s", bid ?: "?");
                 CBOpenApp(bid);
                 handled = YES;
@@ -373,6 +415,8 @@ static void addCarplayDeclarations(id lib) {
         if (!bidObj) return;
         const char *bid = ((const char*(*)(id,SEL))objc_msgSend)(bidObj,
             sel_registerName("UTF8String"));
+        CBCarLogFmt("[CBR-CP] tap(longpress) -> %s", bid ?: "?");
+        CBPostLaunch(bid);
         CBLogFmt("[CBR] Long press: %s", bid ?: "?");
         CBOpenApp(bid);
     } @catch(...) {}
