@@ -272,6 +272,7 @@ static NSArray *cbrEnabledBundleIDs(void) {
 
 static void cbrInjectEnabledApps(id lib) {
     if (!lib) return;
+    CBLibDump("INJECTION DISABLED (diagnostic build)"); return;
     CBLibDump("==== INJECT PASS ====");
 
     NSArray *apps = cb(lib, "allInstalledApplications");
@@ -319,9 +320,61 @@ static void cbrInjectEnabledApps(id lib) {
     CBLibDump("==== END INJECT ====");
 }
 
+static void cbrDumpPolicyInfo(id lib) {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+    CBLibDump("==== POLICY DIAGNOSTIC ====");
+
+    Class envClass = objc_getClass("DBEnvironmentConfiguration");
+    if (envClass) {
+        Method m = class_getInstanceMethod(envClass, sel_registerName("policyForApplicationInfo:"));
+        if (m) {
+            char ret[128] = {0};
+            method_getReturnType(m, ret, sizeof(ret));
+            CBLibDumpFmt("policyForApplicationInfo: RETURNS '%s'", ret);
+        } else {
+            CBLibDump("policyForApplicationInfo: NOT on DBEnvironmentConfiguration");
+        }
+        Class c = envClass;
+        while (c && strcmp(class_getName(c), "NSObject") != 0) {
+            CBLibDumpFmt("  env class chain: %s", class_getName(c));
+            c = class_getSuperclass(c);
+        }
+    } else {
+        CBLibDump("DBEnvironmentConfiguration class NOT FOUND");
+    }
+
+    NSArray *apps = cb(lib, "allInstalledApplications");
+    if (apps.count > 0) {
+        id first = apps[0];
+        id bidObj = cb(first, "bundleIdentifier");
+        CBLibDumpFmt("-- FULL ivars of a NORMAL app-info (%s) --",
+                     bidObj ? [bidObj UTF8String] : "?");
+        Class ac = object_getClass(first);
+        while (ac && strcmp(class_getName(ac), "NSObject") != 0) {
+            unsigned int n = 0;
+            Ivar *iv = class_copyIvarList(ac, &n);
+            CBLibDumpFmt("  [%s] %u ivars:", class_getName(ac), n);
+            for (unsigned int i = 0; i < n; i++) {
+                const char *nm = ivar_getName(iv[i]);
+                const char *tp = ivar_getTypeEncoding(iv[i]);
+                CBLibDumpFmt("     %s : %s", nm ? nm : "?", tp ? tp : "?");
+            }
+            if (iv) free(iv);
+            ac = class_getSuperclass(ac);
+        }
+        id decl = cb(first, "carPlayDeclaration");
+        CBLibDumpFmt("normal carPlayDeclaration: %s ptr=%p",
+                     decl ? class_getName(object_getClass(decl)) : "nil", (__bridge void *)decl);
+    }
+    CBLibDump("==== END POLICY DIAGNOSTIC ====");
+}
+
 static void addCarplayDeclarations(id lib) {
     if (!lib) { CBLog("[CBR] addDeclarations: lib nil"); return; }
     cbrDumpLibrary(lib);
+    cbrDumpPolicyInfo(lib);
     cbrInjectEnabledApps(lib);
 
     Class declClass = objc_getClass("CRCarPlayAppDeclaration");
@@ -573,7 +626,7 @@ static void addCarplayDeclarations(id lib) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.12.5 init — library injection build\n";
+        const char msg[] = "[CBR] v3.12.6 init — policy diagnostic (injection off)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
