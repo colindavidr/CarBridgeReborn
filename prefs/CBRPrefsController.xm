@@ -39,6 +39,15 @@ static void PLog(const char *m) {
 - (NSBundle *)bundle;
 @end
 
+@interface SBSRelaunchAction : NSObject
++ (instancetype)actionWithReason:(NSString *)reason options:(NSUInteger)options targetURL:(NSURL *)url;
+@end
+
+@interface FBSSystemService : NSObject
++ (instancetype)sharedService;
+- (void)sendActions:(NSSet *)actions withResult:(id)result;
+@end
+
 @interface LSApplicationProxy : NSObject
 + (instancetype)applicationProxyForIdentifier:(NSString *)identifier;
 @property (nonatomic, readonly) NSString *localizedName;
@@ -138,6 +147,18 @@ static void cbrEnrich(NSArray *specs) {
     PLog(b);
 }
 
+static void cbrRespring(void) {
+    @try {
+        NSUInteger opts = (1 << 2); // fade-to-black respring
+        SBSRelaunchAction *action =
+            [%c(SBSRelaunchAction) actionWithReason:@"CarBridgeReborn toggle"
+                                            options:opts
+                                          targetURL:nil];
+        NSSet *actions = [NSSet setWithObject:action];
+        [[%c(FBSSystemService) sharedService] sendActions:actions withResult:nil];
+    } @catch (NSException *e) {}
+}
+
 %subclass CBRPrefsController : PSListController
 
 - (id)navigationTitle { return @"CarBridge Reborn"; }
@@ -169,6 +190,20 @@ static void cbrEnrich(NSArray *specs) {
                              (__bridge CFPropertyListRef)value,
                              (__bridge CFStringRef)domain);
     CFPreferencesAppSynchronize((__bridge CFStringRef)domain);
+
+    @try {
+        UIAlertController *a = [UIAlertController
+            alertControllerWithTitle:@"Respring Needed"
+                             message:@"Respring to apply the change to CarPlay."
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"Respring Now"
+                                              style:UIAlertActionStyleDestructive
+                                            handler:^(UIAlertAction *x){ cbrRespring(); }]];
+        [a addAction:[UIAlertAction actionWithTitle:@"Later"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+        [(UIViewController *)self presentViewController:a animated:YES completion:nil];
+    } @catch (NSException *e) {}
 }
 
 - (id)specifiers {
