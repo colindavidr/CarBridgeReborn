@@ -158,19 +158,23 @@ static void CBOpenApp(const char *bundleID_cstr) {
 // Settings UI stores per-bundle-id BOOLs in NSUserDefaults suite com.carbridgereborn.
 static BOOL CBIsEnabled(const char *bid_cstr) {
     if (!bid_cstr) return NO;
-    // Bridge an app onto the CarPlay dashboard iff its Settings toggle is ON.
-    // The panel's PSSwitchCells persist to the com.carbridgereborn domain;
-    // CFPreferencesCopyAppValue searches both host scopes so the read matches
-    // however Settings wrote it. Default NO (user opts apps in via the panel).
+    // Rootless split-brain fix: the Settings panel (running in Preferences) writes
+    // com.carbridgereborn prefs to the rootless path, but CFPreferencesCopyAppValue
+    // inside CarPlayApp resolves the same domain to the NON-jailbreak path (empty).
+    // So read the real plist file directly, trying rootless first, then non-jb.
     NSString *bid = [NSString stringWithUTF8String:bid_cstr];
-    CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)bid,
-                                                    CFSTR("com.carbridgereborn"));
-    BOOL on = NO;
-    if (v) {
-        if (CFGetTypeID(v)==CFBooleanGetTypeID()) on = CFBooleanGetValue((CFBooleanRef)v);
-        CFRelease(v);
-    }
-    return on;
+    if (!bid) return NO;
+
+    static NSString *kRootless = @"/var/jb/var/mobile/Library/Preferences/com.carbridgereborn.plist";
+    static NSString *kLegacy   = @"/var/mobile/Library/Preferences/com.carbridgereborn.plist";
+
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kRootless];
+    if (!d) d = [NSDictionary dictionaryWithContentsOfFile:kLegacy];
+    if (!d) return NO;
+
+    id val = d[bid];
+    if ([val isKindOfClass:[NSNumber class]]) return [val boolValue];
+    return NO;
 }
 
 // CarPlay app-policy "allowed" enum value. iOS typically uses 1 == allowed.
