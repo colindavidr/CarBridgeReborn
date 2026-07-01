@@ -217,6 +217,7 @@ static void cbrUpdateApplyButton(id ctrl) {
     cbrUpdateApplyButton(self);
 }
 
+%new
 - (void)cbrRespringTapped {
     cbrRespring();
 }
