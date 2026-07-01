@@ -24,6 +24,7 @@
  */
 
 #import <UIKit/UIKit.h>
+#import <strings.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <string.h>
@@ -185,8 +186,80 @@ static long CBAllowedPolicyValue(void) {
     return v ? [v longValue] : 1;
 }
 
+static int gDumpFD = -1;
+static void CBLibDump(const char *m) {
+    if (gDumpFD < 0)
+        gDumpFD = open("/var/mobile/CBR_libdump.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+    if (gDumpFD >= 0) { write(gDumpFD, m, strlen(m)); write(gDumpFD, "\n", 1); }
+}
+static void CBLibDumpFmt(const char *fmt, ...) {
+    char buf[400]; va_list ap; va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
+    CBLibDump(buf);
+}
+
+static void cbrDumpLibrary(id lib) {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+
+    CBLibDump("======== CBR LIBRARY DUMP (iOS17) ========");
+    if (!lib) { CBLibDump("lib is NIL"); return; }
+
+    Class libClass = object_getClass(lib);
+    CBLibDumpFmt("library class: %s", class_getName(libClass));
+    Class c = libClass;
+    while (c && strcmp(class_getName(c), "NSObject") != 0) {
+        unsigned int n = 0;
+        Ivar *ivars = class_copyIvarList(c, &n);
+        CBLibDumpFmt("-- ivars of %s (%u) --", class_getName(c), n);
+        for (unsigned int i = 0; i < n; i++) {
+            const char *nm = ivar_getName(ivars[i]);
+            const char *tp = ivar_getTypeEncoding(ivars[i]);
+            CBLibDumpFmt("   %s : %s", nm ? nm : "?", tp ? tp : "?");
+        }
+        if (ivars) free(ivars);
+        c = class_getSuperclass(c);
+    }
+
+    unsigned int lm = 0;
+    Method *lmeth = class_copyMethodList(libClass, &lm);
+    CBLibDump("-- library methods (add/register/insert/application/install) --");
+    for (unsigned int i = 0; i < lm; i++) {
+        const char *sn = sel_getName(method_getName(lmeth[i]));
+        if (strcasestr(sn,"add")||strcasestr(sn,"register")||strcasestr(sn,"insert")||
+            strcasestr(sn,"application")||strcasestr(sn,"install"))
+            CBLibDumpFmt("   -%s", sn);
+    }
+    if (lmeth) free(lmeth);
+
+    NSArray *apps = cb(lib, "allInstalledApplications");
+    CBLibDumpFmt("allInstalledApplications count: %lu", (unsigned long)[apps count]);
+    if (apps.count > 0) {
+        id first = apps[0];
+        Class appClass = object_getClass(first);
+        CBLibDumpFmt("app-info class: %s", class_getName(appClass));
+        unsigned int mn = 0;
+        Method *am = class_copyMethodList(appClass, &mn);
+        CBLibDump("-- app-info methods (carplay/declaration/bundle/tag) --");
+        for (unsigned int i = 0; i < mn; i++) {
+            const char *sn = sel_getName(method_getName(am[i]));
+            if (strcasestr(sn,"carplay")||strcasestr(sn,"declaration")||
+                strcasestr(sn,"bundle")||strcasestr(sn,"tag"))
+                CBLibDumpFmt("   -%s", sn);
+        }
+        if (am) free(am);
+    }
+
+    CBLibDumpFmt("FBSApplicationLibrary avail: %s", %c(FBSApplicationLibrary) ? "YES" : "no");
+    CBLibDumpFmt("LSApplicationWorkspace avail: %s", %c(LSApplicationWorkspace) ? "YES" : "no");
+    CBLibDumpFmt("CRCarPlayAppDeclaration avail: %s", objc_getClass("CRCarPlayAppDeclaration") ? "YES" : "no");
+    CBLibDump("======== END DUMP ========");
+}
+
 static void addCarplayDeclarations(id lib) {
     if (!lib) { CBLog("[CBR] addDeclarations: lib nil"); return; }
+    cbrDumpLibrary(lib);
 
     Class declClass = objc_getClass("CRCarPlayAppDeclaration");
     if (!declClass) { CBLog("[CBR] CRCarPlayAppDeclaration not found"); return; }
@@ -437,7 +510,7 @@ static void addCarplayDeclarations(id lib) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.6.1 init — NSUserDefaults prefs + Settings UI\n";
+        const char msg[] = "[CBR] v3.12.4 init — library inspection build\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
