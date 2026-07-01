@@ -384,6 +384,60 @@ static BOOL cbrHasValidDeclaration(id appInfo) {
     } @catch (NSException *e) { return NO; }
 }
 
+static void cbrDeclDump(const char *m) {
+    static int fd = -1;
+    if (fd < 0) fd = open("/var/mobile/CBR_decldump.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+    if (fd >= 0) { write(fd, m, strlen(m)); write(fd, "\n", 1); }
+}
+static void cbrDeclDumpFmt(const char *fmt, ...) {
+    char buf[512]; va_list ap; va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
+    cbrDeclDump(buf);
+}
+static void cbrDumpOneClass(const char *clsname) {
+    Class dc = objc_getClass(clsname);
+    if (!dc) { cbrDeclDumpFmt("%s NOT FOUND", clsname); return; }
+    Class c = dc;
+    while (c && strcmp(class_getName(c), "NSObject") != 0) {
+        unsigned int n = 0;
+        Ivar *iv = class_copyIvarList(c, &n);
+        cbrDeclDumpFmt("-- [%s] %u ivars --", class_getName(c), n);
+        for (unsigned int i = 0; i < n; i++) {
+            const char *nm = ivar_getName(iv[i]);
+            const char *tp = ivar_getTypeEncoding(iv[i]);
+            cbrDeclDumpFmt("   %s : %s", nm ? nm : "?", tp ? tp : "?");
+        }
+        if (iv) free(iv);
+        c = class_getSuperclass(c);
+    }
+    unsigned int mn = 0;
+    Method *mm = class_copyMethodList(dc, &mn);
+    cbrDeclDumpFmt("-- [%s] methods (%u) --", clsname, mn);
+    for (unsigned int i = 0; i < mn; i++)
+        cbrDeclDumpFmt("   -%s", sel_getName(method_getName(mm[i])));
+    if (mm) free(mm);
+}
+static void cbrDumpDeclClass(void) {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+    cbrDeclDump("==== CLASS DUMP ====");
+    cbrDumpOneClass("CRCarPlayAppDeclaration");
+    cbrDumpOneClass("CRCarPlayAppPolicy");
+    cbrDeclDump("==== END CLASS DUMP ====");
+}
+static BOOL cbrIsOurApp(id appInfo) {
+    if (!appInfo) return NO;
+    @try {
+        id bidObj = cb(appInfo, "bundleIdentifier");
+        if (!bidObj) return NO;
+        const char *bid = ((const char*(*)(id,SEL))objc_msgSend)(bidObj,
+            sel_registerName("UTF8String"));
+        if (!bid) return NO;
+        return CBIsEnabled(bid);
+    } @catch (NSException *e) { return NO; }
+}
+
 static void addCarplayDeclarations(id lib) {
     if (!lib) { CBLog("[CBR] addDeclarations: lib nil"); return; }
     cbrDumpLibrary(lib);
@@ -401,6 +455,7 @@ static void addCarplayDeclarations(id lib) {
     CBLog(msg);
 
     NSUInteger injected = 0;
+    cbrDumpDeclClass();
     for (id appInfo in apps) {
         @try {
             // Get bundleIdentifier as const char* — no NSString parameter
@@ -427,7 +482,7 @@ static void addCarplayDeclarations(id lib) {
 
             id decl = [[declClass alloc] init];
             cb1b(decl, "setSupportsTemplates:", NO);   // NO = 0
-            cb1b(decl, "setSupportsMaps:", YES);        // YES = 1
+            cb1b(decl, "setSupportsMaps:", NO);        // YES = 1
             cb1(decl, "setBundleIdentifier:", bidObj);
             id bundleURL = cb(appInfo, "bundleURL");
             if (bundleURL) cb1(decl, "setBundlePath:", bundleURL);
@@ -486,8 +541,12 @@ static void addCarplayDeclarations(id lib) {
 
 %hook DBEnvironmentConfiguration
 - (id)policyForApplicationInfo:(id)appInfo {
+    if (cbrIsOurApp(appInfo)) {
+        CBLog("[CBR] policy: our enabled app -> nil (skip orig, no crash)");
+        return nil;
+    }
     if (appInfo && !cbrHasValidDeclaration(appInfo)) {
-        CBLog("[CBR] policy: guarded app with invalid declaration -> nil");
+        CBLog("[CBR] policy: invalid decl -> nil");
         return nil;
     }
     return %orig;
@@ -650,7 +709,7 @@ static void addCarplayDeclarations(id lib) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.12.7 init — injection + policy guard\n";
+        const char msg[] = "[CBR] v3.13.0 init — class dump + enabled-guard\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
