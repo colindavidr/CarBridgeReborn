@@ -1,15 +1,11 @@
 /*
- * CarBridgeReborn — Settings controller (v3.11.8)
+ * CarBridgeReborn — Settings controller (v3.11.9)
  *
- * v3.11.7 built 96 specifiers but the table rendered blank. Cause: when you
- * override -specifiers, PSListController's table data source reads the rows
- * from its internal _specifiers ivar — NOT from your return value. The stock
- * pattern (_specifiers = [self loadSpecifiers...]) assigns that ivar; ours
- * returned the array without setting it, and loadSpecifiersFromPlistName does
- * not populate the ivar on iOS 17, so the table saw 0 rows. Fix: write the
- * built specifiers into _specifiers via the runtime. Also logs PSListController's
- * ivar names once, so if the ivar isn't literally "_specifiers" we see the real
- * name and correct it.
+ * Panel renders (v3.11.8 set the _specifiers ivar). Polish:
+ *  - Real display names via LSApplicationProxy (folder basename was showing
+ *    "AlexaMobileiOS-prod" etc.); folder name stays as fallback.
+ *  - App icons on the left via UIKit's private per-bundle-id icon API.
+ * Header text is added to the plist by the generator (PSGroupCell label).
  */
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -31,6 +27,7 @@ static void PLog(const char *m) {
 + (id)preferenceSpecifierNamed:(NSString *)name target:(id)target set:(SEL)set get:(SEL)get detail:(Class)detail cell:(NSInteger)cell edit:(Class)edit;
 - (void)setProperty:(id)value forKey:(NSString *)key;
 - (id)propertyForKey:(NSString *)key;
+- (void)setName:(NSString *)name;
 @end
 
 @interface PSListController : UIViewController
@@ -39,7 +36,33 @@ static void PLog(const char *m) {
 - (NSBundle *)bundle;
 @end
 
-// C helper (fallback) so nothing messages the forward-declared %subclass self
+@interface LSApplicationProxy : NSObject
++ (instancetype)applicationProxyForIdentifier:(NSString *)identifier;
+@property (nonatomic, readonly) NSString *localizedName;
+@end
+
+@interface UIImage (CBRPrivate)
++ (UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bid format:(int)fmt scale:(CGFloat)scale;
+@end
+
+static NSString *cbrDisplayName(NSString *bid) {
+    @try {
+        Class LSAP = %c(LSApplicationProxy);
+        if (!LSAP) return nil;
+        id proxy = [LSAP applicationProxyForIdentifier:bid];
+        NSString *nm = [proxy localizedName];
+        return (nm.length ? nm : nil);
+    } @catch (NSException *e) { return nil; }
+}
+
+static UIImage *cbrIcon(NSString *bid) {
+    @try {
+        CGFloat scale = [UIScreen mainScreen].scale;
+        if (scale < 1.0) scale = 2.0;
+        return [%c(UIImage) _applicationIconImageForBundleIdentifier:bid format:2 scale:scale];
+    } @catch (NSException *e) { return nil; }
+}
+
 static NSMutableArray *cbrBuildManually(id target) {
     NSMutableArray *out = [NSMutableArray array];
     @try {
@@ -68,6 +91,30 @@ static NSMutableArray *cbrBuildManually(id target) {
         PLog([[e description] UTF8String] ?: "(no description)");
     }
     return out;
+}
+
+static void cbrEnrich(NSArray *specs) {
+    NSUInteger named = 0, iconed = 0;
+    for (PSSpecifier *spec in specs) {
+        NSString *bid = nil;
+        @try { bid = [spec propertyForKey:@"key"]; } @catch (NSException *e) { bid = nil; }
+        if (!bid.length) continue;
+        NSString *nm = cbrDisplayName(bid);
+        if (nm.length) {
+            @try { [spec setName:nm]; } @catch (NSException *e) {}
+            @try { [spec setProperty:nm forKey:@"label"]; } @catch (NSException *e) {}
+            named++;
+        }
+        UIImage *ic = cbrIcon(bid);
+        if (ic) {
+            @try { [spec setProperty:ic forKey:@"iconImage"]; } @catch (NSException *e) {}
+            iconed++;
+        }
+    }
+    char b[96];
+    snprintf(b, sizeof(b), "[prefs] enriched: %lu names, %lu icons",
+             (unsigned long)named, (unsigned long)iconed);
+    PLog(b);
 }
 
 %subclass CBRPrefsController : PSListController
@@ -104,28 +151,8 @@ static NSMutableArray *cbrBuildManually(id target) {
 }
 
 - (id)specifiers {
-    PLog("[prefs] specifiers called (v3.11.8 ivar-cache)");
+    PLog("[prefs] specifiers called (v3.11.9 names+icons)");
     Class pslc = %c(PSListController);
-
-    static BOOL logged = NO;
-    if (!logged) {
-        logged = YES;
-        unsigned int n = 0;
-        Ivar *ivars = class_copyIvarList(pslc, &n);
-        char hdr[80];
-        snprintf(hdr, sizeof(hdr), "[prefs] PSListController ivars (%u):", n);
-        PLog(hdr);
-        for (unsigned int i = 0; i < n; i++) {
-            const char *nm = ivar_getName(ivars[i]);
-            if (nm) {
-                char b[160];
-                snprintf(b, sizeof(b), "[prefs]   %s", nm);
-                PLog(b);
-            }
-        }
-        if (ivars) free(ivars);
-    }
-
     @try {
         NSArray *specs = [(PSListController *)self loadSpecifiersFromPlistName:@"Root" target:self];
         char buf[96];
@@ -136,18 +163,17 @@ static NSMutableArray *cbrBuildManually(id target) {
         if (!specs || specs.count == 0) {
             PLog("[prefs] loader gave 0 — building manually");
             specs = cbrBuildManually(self);
-            snprintf(buf, sizeof(buf), "[prefs] manual -> %lu", (unsigned long)specs.count);
-            PLog(buf);
         }
 
-        // Populate the framework's _specifiers ivar so the table shows the rows.
+        cbrEnrich(specs);
+
         Ivar iv = class_getInstanceVariable(pslc, "_specifiers");
         if (iv && specs) {
             object_setIvar(self, iv, specs);
             objc_setAssociatedObject(self, "cbrSpecs", specs, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             PLog("[prefs] _specifiers ivar set");
         } else {
-            PLog("[prefs] _specifiers ivar NOT found — check ivar list above");
+            PLog("[prefs] _specifiers ivar NOT found");
         }
         return specs;
     } @catch (NSException *e) {
