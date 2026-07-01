@@ -438,6 +438,29 @@ static BOOL cbrIsOurApp(id appInfo) {
     } @catch (NSException *e) { return NO; }
 }
 
+// Build a CRCarPlayAppPolicy directly so we never call %orig on our (mangled) apps.
+static id cbrMakePolicy(id appInfo) {
+    Class polClass = objc_getClass("CRCarPlayAppPolicy");
+    if (!polClass) return nil;
+    id pol = [[polClass alloc] init];
+    if (!pol) return nil;
+    cb1b(pol, "setCarPlaySupported:", YES);
+    cb1b(pol, "setCanDisplayOnCarScreen:", YES);
+    cb1b(pol, "setLaunchUsingTemplateUI:", NO);
+    cb1b(pol, "setLaunchUsingSiri:", NO);
+    cb1b(pol, "setLaunchNotificationsUsingSiri:", NO);
+    cb1b(pol, "setLaunchUsingMusicUIService:", NO);
+    cb1b(pol, "setBadgesAppIcon:", NO);
+    cb1b(pol, "setShowsNotifications:", NO);
+    cb1b(pol, "setHandlesCarIntents:", NO);
+    @try {
+        id bURL = cb(appInfo, "bundleURL");
+        id bPath = bURL ? cb(bURL, "path") : nil;   // NSString, not NSURL
+        if (bPath) cb1(pol, "setBundlePath:", bPath);
+    } @catch (NSException *e) {}
+    return pol;
+}
+
 static void addCarplayDeclarations(id lib) {
     if (!lib) { CBLog("[CBR] addDeclarations: lib nil"); return; }
     cbrDumpLibrary(lib);
@@ -485,7 +508,8 @@ static void addCarplayDeclarations(id lib) {
             cb1b(decl, "setSupportsMaps:", NO);        // YES = 1
             cb1(decl, "setBundleIdentifier:", bidObj);
             id bundleURL = cb(appInfo, "bundleURL");
-            if (bundleURL) cb1(decl, "setBundlePath:", bundleURL);
+            id declPath = bundleURL ? cb(bundleURL, "path") : nil;
+            if (declPath) cb1(decl, "setBundlePath:", declPath);
 
             BOOL set = setIvar(appInfo, "_carPlayDeclaration", decl);
             if (!set) {
@@ -542,7 +566,9 @@ static void addCarplayDeclarations(id lib) {
 %hook DBEnvironmentConfiguration
 - (id)policyForApplicationInfo:(id)appInfo {
     if (cbrIsOurApp(appInfo)) {
-        CBLog("[CBR] policy: our enabled app -> nil (skip orig, no crash)");
+        id pol = cbrMakePolicy(appInfo);
+        if (pol) { CBLog("[CBR] policy: our app -> synth canDisplay=YES"); return pol; }
+        CBLog("[CBR] policy: synth failed -> nil");
         return nil;
     }
     if (appInfo && !cbrHasValidDeclaration(appInfo)) {
@@ -709,7 +735,7 @@ static void addCarplayDeclarations(id lib) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.13.0 init — class dump + enabled-guard\n";
+        const char msg[] = "[CBR] v3.13.1 init — synthesized policy (canDisplay)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
