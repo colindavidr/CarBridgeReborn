@@ -481,15 +481,106 @@ static BOOL cbrBidIsNative(const char *bid_cstr) {
     } @catch (NSException *e) { return NO; }
 }
 
+// ---- v3.13.5: static, timing-independent native-CarPlay detection ----
+// v3.13.4's snapshot missed Spotify: the OS builds _carPlayDeclaration
+// LAZILY, only once policy is actually queried for that app -- so at
+// cbrSnapshotNativeSet() time (during _newApplicationLibrary) Spotify had
+// no declaration yet and never made it into gNativeCarPlaySet. Fix: read
+// the app's OWN Info.plist straight from disk. Any app that supports
+// CarPlay MUST declare a scene under UIApplicationSceneManifest -- a
+// static file, so there is zero timing dependency. A small hardcoded set
+// is kept as a backstop for apps (Spotify chief among them) that have
+// burned us; it needs no filesystem access at all, so it always works.
+static NSSet *gCBRManualNativeSet = nil;
+
+static BOOL cbrBundleDeclaresCarPlayInInfoPlist(NSString *bundlePath) {
+    if (!bundlePath.length) return NO;
+    @try {
+        NSString *infoPath = [bundlePath stringByAppendingPathComponent:@"Info.plist"];
+        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+        if (![info isKindOfClass:[NSDictionary class]]) return NO;
+        id manifest = info[@"UIApplicationSceneManifest"];
+        id configs = [manifest isKindOfClass:[NSDictionary class]] ? manifest[@"UISceneConfigurations"] : nil;
+        if (![configs isKindOfClass:[NSDictionary class]]) return NO;
+        for (NSString *key in configs) {
+            if ([key isKindOfClass:[NSString class]] &&
+                ([key rangeOfString:@"CarPlay" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                 [key hasPrefix:@"CPTemplateApplication"])) {
+                return YES;
+            }
+        }
+        return NO;
+    } @catch (NSException *e) { return NO; }
+}
+
+static BOOL cbrBundleIsNativeCarPlay(NSString *bid, NSString *bundlePath) {
+    if (bid.length) {
+        if (!gCBRManualNativeSet) {
+            gCBRManualNativeSet = [NSSet setWithObjects:
+                @"com.spotify.client", @"com.apple.Music", @"com.apple.podcasts",
+                @"com.apple.Maps", @"com.audible.iphone", @"com.waze.iphone",
+                @"com.google.Maps", @"tunein.player", @"com.amazon.musicplayer",
+                @"com.iheart.iHeartRadioIntl", @"com.aspiro.tidal",
+                @"com.pandora.radio", nil];
+        }
+        if ([gCBRManualNativeSet containsObject:bid]) return YES;
+    }
+    if (bundlePath.length) {
+        return cbrBundleDeclaresCarPlayInInfoPlist(bundlePath);
+    }
+    return NO;
+}
+
+static BOOL cbrAppHasNativeCarPlay(id appInfo) {
+    if (!appInfo) return NO;
+    @try {
+        id bidObj = cb(appInfo, "bundleIdentifier");
+        id bundleURL = cb(appInfo, "bundleURL");
+        id pathObj = bundleURL ? cb(bundleURL, "path") : nil;
+        NSString *bid = [bidObj isKindOfClass:[NSString class]] ? bidObj : nil;
+        NSString *bundlePath = [pathObj isKindOfClass:[NSString class]] ? pathObj : nil;
+        return cbrBundleIsNativeCarPlay(bid, bundlePath);
+    } @catch (NSException *e) { return NO; }
+}
+
+static BOOL cbrDeclarationIsForNativeCarPlayApp(id declaration) {
+    if (!declaration) return NO;
+    @try {
+        id bidObj = cb(declaration, "bundleIdentifier");
+        id pathObj = cb(declaration, "bundlePath");
+        NSString *bid = [bidObj isKindOfClass:[NSString class]] ? bidObj : nil;
+        NSString *bundlePath = [pathObj isKindOfClass:[NSString class]] ? pathObj : nil;
+        return cbrBundleIsNativeCarPlay(bid, bundlePath);
+    } @catch (NSException *e) { return NO; }
+}
+
+// Only flags genuinely CORRUPTED pointers (tiny/misaligned non-null values,
+// the exact 0x1-style garbage from the original SIGSEGV). A nil pointer is
+// NOT corruption -- it just means the OS hasn't lazily built this app's
+// declaration yet, and %orig must be allowed to run so it can.
+static BOOL cbrDeclarationPointerLooksCorrupted(id appInfo) {
+    if (!appInfo) return NO;
+    Ivar iv = class_getInstanceVariable(objc_getClass("DBApplicationInfo"), "_carPlayDeclaration");
+    if (!iv) return NO;
+    id decl = object_getIvar(appInfo, iv);
+    if (!decl) return NO;
+    uintptr_t p = (uintptr_t)decl;
+    if (p < 0x1000) return YES;
+    if (p & 0x7) return YES;
+    return NO;
+}
+
 static BOOL cbrIsOurApp(id appInfo) {
     if (!appInfo) return NO;
     @try {
         id bidObj = cb(appInfo, "bundleIdentifier");
-        if (!bidObj) return NO;
-        const char *bid = ((const char*(*)(id,SEL))objc_msgSend)(bidObj,
-            sel_registerName("UTF8String"));
+        const char *bid = bidObj ? ((const char*(*)(id,SEL))objc_msgSend)(bidObj,
+            sel_registerName("UTF8String")) : NULL;
+        if (cbrAppHasNativeCarPlay(appInfo)) {
+            if (bid) CBLogFmt("[CBR] cbrIsOurApp(%s): native CarPlay -> not ours", bid);
+            return NO;
+        }
         if (!bid) return NO;
-        if (cbrBidIsNative(bid)) return NO;   // native CarPlay app -> never ours
         return CBIsEnabled(bid);
     } @catch (NSException *e) { return NO; }
 }
@@ -628,8 +719,8 @@ static void addCarplayDeclarations(id lib) {
         CBLog("[CBR] policy: synth failed -> nil");
         return nil;
     }
-    if (appInfo && !cbrHasValidDeclaration(appInfo)) {
-        CBLog("[CBR] policy: invalid decl -> nil");
+    if (appInfo && cbrDeclarationPointerLooksCorrupted(appInfo)) {
+        CBLog("[CBR] policy: corrupted decl ptr -> nil (avoid crash)");
         return nil;
     }
     return %orig;
@@ -652,7 +743,7 @@ static void addCarplayDeclarations(id lib) {
                 sel_registerName("UTF8String"));
             if (bid) {
                 CBLogFmt("[CBR] policy(%s) orig=%ld", bid, (long)orig);
-                if (CBIsEnabled(bid) && !cbrBidIsNative(bid)) {
+                if (CBIsEnabled(bid) && !cbrDeclarationIsForNativeCarPlayApp(declaration)) {
                     NSInteger allow = (NSInteger)CBAllowedPolicyValue();
                     CBLogFmt("[CBR]   -> forcing policy=%ld for %s", (long)allow, bid);
                     return allow;
@@ -672,7 +763,7 @@ static void addCarplayDeclarations(id lib) {
                 sel_registerName("UTF8String"));
             if (bid) {
                 CBLogFmt("[CBR] policy2(%s) orig=%ld", bid, (long)orig);
-                if (CBIsEnabled(bid) && !cbrBidIsNative(bid)) {
+                if (CBIsEnabled(bid) && !cbrDeclarationIsForNativeCarPlayApp(declaration)) {
                     NSInteger allow = (NSInteger)CBAllowedPolicyValue();
                     CBLogFmt("[CBR]   -> forcing policy2=%ld for %s", (long)allow, bid);
                     return allow;
@@ -792,7 +883,7 @@ static void addCarplayDeclarations(id lib) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.13.4 init - snapshot native set (Spotify fix)\n";
+        const char msg[] = "[CBR] v3.13.5 init - static native-CarPlay detection + lazy-decl fix\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
