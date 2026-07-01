@@ -159,6 +159,24 @@ static void cbrRespring(void) {
     } @catch (NSException *e) {}
 }
 
+static BOOL gCBRChanged = NO;
+
+static void cbrUpdateApplyButton(id ctrl) {
+    @try {
+        UIViewController *vc = (UIViewController *)ctrl;
+        if (gCBRChanged) {
+            if (!vc.navigationItem.rightBarButtonItem) {
+                UIBarButtonItem *b = [[UIBarButtonItem alloc]
+                    initWithTitle:@"Respring"
+                            style:UIBarButtonItemStyleDone
+                           target:ctrl
+                           action:@selector(cbrRespringTapped)];
+                vc.navigationItem.rightBarButtonItem = b;
+            }
+        }
+    } @catch (NSException *e) {}
+}
+
 %subclass CBRPrefsController : PSListController
 
 - (id)navigationTitle { return @"CarBridge Reborn"; }
@@ -190,20 +208,17 @@ static void cbrRespring(void) {
                              (__bridge CFPropertyListRef)value,
                              (__bridge CFStringRef)domain);
     CFPreferencesAppSynchronize((__bridge CFStringRef)domain);
+    gCBRChanged = YES;
+    cbrUpdateApplyButton(self);
+}
 
-    @try {
-        UIAlertController *a = [UIAlertController
-            alertControllerWithTitle:@"Respring Needed"
-                             message:@"Respring to apply the change to CarPlay."
-                      preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"Respring Now"
-                                              style:UIAlertActionStyleDestructive
-                                            handler:^(UIAlertAction *x){ cbrRespring(); }]];
-        [a addAction:[UIAlertAction actionWithTitle:@"Later"
-                                              style:UIAlertActionStyleCancel
-                                            handler:nil]];
-        [(UIViewController *)self presentViewController:a animated:YES completion:nil];
-    } @catch (NSException *e) {}
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    cbrUpdateApplyButton(self);
+}
+
+- (void)cbrRespringTapped {
+    cbrRespring();
 }
 
 - (id)specifiers {
