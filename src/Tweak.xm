@@ -257,9 +257,72 @@ static void cbrDumpLibrary(id lib) {
     CBLibDump("======== END DUMP ========");
 }
 
+static NSArray *cbrEnabledBundleIDs(void) {
+    static NSString *kRootless = @"/var/jb/var/mobile/Library/Preferences/com.carbridgereborn.plist";
+    static NSString *kLegacy   = @"/var/mobile/Library/Preferences/com.carbridgereborn.plist";
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kRootless];
+    if (!d) d = [NSDictionary dictionaryWithContentsOfFile:kLegacy];
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *k in d) {
+        id v = d[k];
+        if ([v isKindOfClass:[NSNumber class]] && [v boolValue]) [out addObject:k];
+    }
+    return out;
+}
+
+static void cbrInjectEnabledApps(id lib) {
+    if (!lib) return;
+    CBLibDump("==== INJECT PASS ====");
+
+    NSArray *apps = cb(lib, "allInstalledApplications");
+    NSMutableSet *have = [NSMutableSet set];
+    for (id ai in apps) {
+        id bidObj = cb(ai, "bundleIdentifier");
+        if (bidObj) [have addObject:bidObj];
+    }
+    NSUInteger before = [apps count];
+    CBLibDumpFmt("library before: %lu apps", (unsigned long)before);
+
+    NSArray *enabled = cbrEnabledBundleIDs();
+    CBLibDumpFmt("enabled apps: %lu", (unsigned long)[enabled count]);
+
+    SEL addProxySel = sel_registerName("addApplicationProxy:withOverrideURL:");
+    SEL addRecSel   = sel_registerName("addApplicationRecord:");
+    SEL proxyForSel = sel_registerName("applicationProxyForIdentifier:");
+
+    for (NSString *bid in enabled) {
+        if ([have containsObject:bid]) {
+            CBLibDumpFmt("  skip (already present): %s", [bid UTF8String]);
+            continue;
+        }
+        @try {
+            id proxy = ((id(*)(Class,SEL,id))objc_msgSend)(
+                objc_getClass("LSApplicationProxy"), proxyForSel, bid);
+            if (!proxy) { CBLibDumpFmt("  NO proxy: %s", [bid UTF8String]); continue; }
+
+            if ([lib respondsToSelector:addProxySel]) {
+                ((void(*)(id,SEL,id,id))objc_msgSend)(lib, addProxySel, proxy, nil);
+                CBLibDumpFmt("  addApplicationProxy -> %s", [bid UTF8String]);
+            } else if ([lib respondsToSelector:addRecSel]) {
+                CBLibDumpFmt("  (proxy sel missing; addApplicationRecord available) %s", [bid UTF8String]);
+            } else {
+                CBLibDumpFmt("  NO insertion method for %s", [bid UTF8String]);
+            }
+        } @catch (NSException *e) {
+            CBLibDumpFmt("  EXC %s: %s", [bid UTF8String], [[e description] UTF8String] ?: "?");
+        }
+    }
+
+    NSUInteger after = [cb(lib, "allInstalledApplications") count];
+    CBLibDumpFmt("library after: %lu apps (was %lu, delta %ld)",
+                 (unsigned long)after, (unsigned long)before, (long)after - (long)before);
+    CBLibDump("==== END INJECT ====");
+}
+
 static void addCarplayDeclarations(id lib) {
     if (!lib) { CBLog("[CBR] addDeclarations: lib nil"); return; }
     cbrDumpLibrary(lib);
+    cbrInjectEnabledApps(lib);
 
     Class declClass = objc_getClass("CRCarPlayAppDeclaration");
     if (!declClass) { CBLog("[CBR] CRCarPlayAppDeclaration not found"); return; }
@@ -510,7 +573,7 @@ static void addCarplayDeclarations(id lib) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.12.4 init — library inspection build\n";
+        const char msg[] = "[CBR] v3.12.5 init — library injection build\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
