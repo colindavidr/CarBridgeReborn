@@ -272,7 +272,6 @@ static NSArray *cbrEnabledBundleIDs(void) {
 
 static void cbrInjectEnabledApps(id lib) {
     if (!lib) return;
-    CBLibDump("INJECTION DISABLED (diagnostic build)"); return;
     CBLibDump("==== INJECT PASS ====");
 
     NSArray *apps = cb(lib, "allInstalledApplications");
@@ -369,6 +368,20 @@ static void cbrDumpPolicyInfo(id lib) {
                      decl ? class_getName(object_getClass(decl)) : "nil", (__bridge void *)decl);
     }
     CBLibDump("==== END POLICY DIAGNOSTIC ====");
+}
+
+static BOOL cbrHasValidDeclaration(id appInfo) {
+    if (!appInfo) return NO;
+    Ivar iv = class_getInstanceVariable(objc_getClass("DBApplicationInfo"), "_carPlayDeclaration");
+    if (!iv) return NO;
+    id decl = object_getIvar(appInfo, iv);
+    if (!decl) return NO;
+    uintptr_t p = (uintptr_t)decl;
+    if (p < 0x1000) return NO;
+    if (p & 0x7) return NO;
+    @try {
+        return [decl isKindOfClass:objc_getClass("CRCarPlayAppDeclaration")];
+    } @catch (NSException *e) { return NO; }
 }
 
 static void addCarplayDeclarations(id lib) {
@@ -468,6 +481,17 @@ static void addCarplayDeclarations(id lib) {
     return lib;
 }
 
+%end
+
+
+%hook DBEnvironmentConfiguration
+- (id)policyForApplicationInfo:(id)appInfo {
+    if (appInfo && !cbrHasValidDeclaration(appInfo)) {
+        CBLog("[CBR] policy: guarded app with invalid declaration -> nil");
+        return nil;
+    }
+    return %orig;
+}
 %end
 
 
@@ -626,7 +650,7 @@ static void addCarplayDeclarations(id lib) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.12.6 init — policy diagnostic (injection off)\n";
+        const char msg[] = "[CBR] v3.12.7 init — injection + policy guard\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
