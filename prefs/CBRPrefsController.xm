@@ -1,11 +1,10 @@
 /*
- * CarBridgeReborn — Settings controller (v3.11.9)
+ * CarBridgeReborn — Settings controller (v3.11.10)
  *
- * Panel renders (v3.11.8 set the _specifiers ivar). Polish:
- *  - Real display names via LSApplicationProxy (folder basename was showing
- *    "AlexaMobileiOS-prod" etc.); folder name stays as fallback.
- *  - App icons on the left via UIKit's private per-bundle-id icon API.
- * Header text is added to the plist by the generator (PSGroupCell label).
+ * v3.11.9 got names + icons rendering. This adds:
+ *  - Section header "Select Apps to Inject Into CarPlay:" set on the leading
+ *    group specifier in code (the generated plist's group label wasn't showing).
+ *  - Taller rows via heightForRowAtIndexPath so icon+name+switch aren't cramped.
  */
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -20,7 +19,9 @@ static void PLog(const char *m) {
 
 #define BUNDLE_PATH     @"/var/jb/Library/PreferenceBundles/CarBridgeRebornPrefs.bundle"
 #define ROOT_PLIST_PATH @"/var/jb/Library/PreferenceBundles/CarBridgeRebornPrefs.bundle/Root.plist"
+#define CBR_HEADER      @"Select Apps to Inject Into CarPlay:"
 #define CBR_PSSwitchCell 6
+#define CBR_ROW_HEIGHT   60.0
 
 @interface PSSpecifier : NSObject
 + (id)groupSpecifierWithName:(NSString *)name;
@@ -28,6 +29,8 @@ static void PLog(const char *m) {
 - (void)setProperty:(id)value forKey:(NSString *)key;
 - (id)propertyForKey:(NSString *)key;
 - (void)setName:(NSString *)name;
+- (NSString *)name;
+- (NSInteger)cellType;
 @end
 
 @interface PSListController : UIViewController
@@ -126,6 +129,10 @@ static void cbrEnrich(NSArray *specs) {
     return b ?: %orig;
 }
 
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    return CBR_ROW_HEIGHT;
+}
+
 - (id)readPreferenceValue:(PSSpecifier *)specifier {
     NSString *key = [specifier propertyForKey:@"key"];
     NSString *domain = [specifier propertyForKey:@"defaults"] ?: @"com.carbridgereborn";
@@ -151,7 +158,7 @@ static void cbrEnrich(NSArray *specs) {
 }
 
 - (id)specifiers {
-    PLog("[prefs] specifiers called (v3.11.9 names+icons)");
+    PLog("[prefs] specifiers called (v3.11.10 header+spacing)");
     Class pslc = %c(PSListController);
     @try {
         NSArray *specs = [(PSListController *)self loadSpecifiersFromPlistName:@"Root" target:self];
@@ -166,6 +173,21 @@ static void cbrEnrich(NSArray *specs) {
         }
 
         cbrEnrich(specs);
+
+        // Force the section header onto the leading group specifier.
+        if (specs.count > 0) {
+            PSSpecifier *hdr = specs[0];
+            @try {
+                char hb[128];
+                snprintf(hb, sizeof(hb), "[prefs] specs[0] cellType=%ld name=%s",
+                         (long)[hdr cellType], [[hdr name] UTF8String] ?: "(nil)");
+                PLog(hb);
+                [hdr setName:CBR_HEADER];
+                PLog("[prefs] header name set on specs[0]");
+            } @catch (NSException *e) {
+                PLog("[prefs] header set EXCEPTION");
+            }
+        }
 
         Ivar iv = class_getInstanceVariable(pslc, "_specifiers");
         if (iv && specs) {
