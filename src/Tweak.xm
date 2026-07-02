@@ -924,6 +924,68 @@ static void cbrSBRegisterListener(void) {
 // v3.15.2: probe the CarPlayApp process's own scenes/screens. The car window
 // scene is NOT in SpringBoard's connectedScenes (CarPlay UI runs in this
 // process, com.apple.CarPlayApp). Find where the car scene actually lives.
+static id gCBRCarTestWindow = nil;
+static void cbrCPRenderTest(void) {
+    static int done = 0; if (done) return; done = 1;
+    CBLog("[CBR-CP] render-test: START (CarPlayApp side)");
+    @try {
+        // Get the car window scene in THIS (CarPlayApp) process.
+        Class appCls = objc_getClass("UIApplication");
+        id app = ((id(*)(id,SEL))objc_msgSend)(appCls, sel_registerName("sharedApplication"));
+        id conns = app ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("connectedScenes")) : nil;
+        id all = conns ? ((id(*)(id,SEL))objc_msgSend)(conns, sel_registerName("allObjects")) : nil;
+        NSUInteger cnt = all ? [all count] : 0;
+        id carScene = nil;
+        for (NSUInteger i = 0; i < cnt; i++) {
+            id s = [all objectAtIndex:i];
+            id scr = cb(s, "screen");
+            if (scr && ((BOOL(*)(id,SEL))objc_msgSend)(scr, sel_registerName("_isCarScreen"))) { carScene = s; break; }
+        }
+        if (!carScene) { CBLog("[CBR-CP] render-test: no car scene -> abort"); return; }
+        CBLog("[CBR-CP] render-test: got car scene");
+
+        id scr = cb(carScene, "screen");
+        CGRect b = ((CGRect(*)(id,SEL))objc_msgSend)(scr, sel_registerName("bounds"));
+
+        // Build a window bound to the car window scene.
+        CBLog("[CBR-CP] render-test: alloc window");
+        Class UIWindowCls = objc_getClass("UIWindow");
+        id win = ((id(*)(id,SEL))objc_msgSend)(UIWindowCls, sel_registerName("alloc"));
+
+        // initWithWindowScene: is the iOS-13+ correct initializer.
+        SEL initScene = sel_registerName("initWithWindowScene:");
+        if ([win respondsToSelector:initScene]) {
+            CBLog("[CBR-CP] render-test: initWithWindowScene:");
+            win = ((id(*)(id,SEL,id))objc_msgSend)(win, initScene, carScene);
+        } else {
+            CBLog("[CBR-CP] render-test: initWithFrame (fallback)");
+            win = ((id(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("initWithFrame:"), b);
+        }
+        if (!win) { CBLog("[CBR-CP] render-test: win nil -> abort"); return; }
+        ((void(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("setFrame:"), b);
+
+        // Root VC with a bright view (dashboard has a rootVC; bare windows may not show).
+        CBLog("[CBR-CP] render-test: build rootVC + red view");
+        Class VCCls = objc_getClass("UIViewController");
+        id vc = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(VCCls, sel_registerName("alloc")), sel_registerName("init"));
+        id view = cb(vc, "view");
+        Class UIColorCls = objc_getClass("UIColor");
+        id red = ((id(*)(id,SEL))objc_msgSend)(UIColorCls, sel_registerName("redColor"));
+        ((void(*)(id,SEL,id))objc_msgSend)(view, sel_registerName("setBackgroundColor:"), red);
+        ((void(*)(id,SEL,id))objc_msgSend)(win, sel_registerName("setRootViewController:"), vc);
+
+        CBLog("[CBR-CP] render-test: setWindowLevel");
+        ((void(*)(id,SEL,double))objc_msgSend)(win, sel_registerName("setWindowLevel:"), (double)10000.0);
+        CBLog("[CBR-CP] render-test: makeKeyAndVisible");
+        ((void(*)(id,SEL))objc_msgSend)(win, sel_registerName("makeKeyAndVisible"));
+        ((void(*)(id,SEL,BOOL))objc_msgSend)(win, sel_registerName("setHidden:"), NO);
+
+        gCBRCarTestWindow = win;
+        CBLog("[CBR-CP] render-test: DONE - red should be on CAR screen now");
+    } @catch (NSException *e) {
+        char eb[300]; snprintf(eb,sizeof(eb),"[CBR-CP] render-test EXC: %s",[[e reason] UTF8String]?:"?"); CBLog(eb);
+    }
+}
 static void cbrCPProbeCarSceneGuts(void) {
     static int done = 0; if (done) return; done = 1;
     int fd = open("/var/mobile/CBR_cp_scene_guts.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
@@ -1123,6 +1185,7 @@ static void cbrCPProbeScenes(void) {
 - (void)_setupIconModel {
     cbrCPProbeScenes();
     cbrCPProbeCarSceneGuts();
+    cbrCPRenderTest();
     CBLog("[CBR] _setupIconModel called");
 
     if (gLibraryPtr) {
@@ -1223,7 +1286,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.15.3 init - probe car scene internals\n";
+        const char msg[] = "[CBR] v3.16.0 init - render test window on CAR scene (CarPlayApp)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
