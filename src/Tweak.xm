@@ -24,6 +24,7 @@
  */
 
 #import <UIKit/UIKit.h>
+#import <dlfcn.h>
 #import <strings.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -1150,6 +1151,44 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 }
             } else { HH("appVC has no _createSceneUpdateTransaction -> cannot launch\n"); }
         } @catch (NSException *e) { HHF("transaction EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+        // --- v3.18.1: unblank + foreground + orientation (from carplay-cast source) ---
+        @try {
+            // Unblank the display (source: required for video/animation to render).
+            void *bks = dlsym(RTLD_DEFAULT, "BKSDisplayServicesSetScreenBlanked");
+            if (bks) { ((void(*)(int))bks)(0); HH("BKSDisplayServicesSetScreenBlanked(0)\n"); }
+            else HH("BKS symbol not found (continuing)\n");
+        } @catch(...) {}
+        // Force the scene to foreground so it actually renders.
+        @try {
+            id sceneNow = ((id(*)(id,SEL))objc_msgSend)(handle, sel_registerName("sceneIfExists"));
+            HHF("sceneIfExists: %s\n", sceneNow ? class_getName(object_getClass(sceneNow)) : "nil");
+            if (sceneNow) {
+                id mset = ((id(*)(id,SEL))objc_msgSend)(sceneNow, sel_registerName("mutableSettings"));
+                if (mset) {
+                    // foreground = YES, set landscape interface orientation (3).
+                    @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mset, sel_registerName("setForeground:"), YES); } @catch(...) {}
+                    @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(mset, sel_registerName("setInterfaceOrientation:"), (NSInteger)3); } @catch(...) {}
+                    @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mset, sel_registerName("setDeactivated:"), NO); } @catch(...) {}
+                    // apply the mutated settings back onto the scene.
+                    @try {
+                        SEL upd = sel_registerName("updateSettings:");
+                        if ([sceneNow respondsToSelector:upd]) { ((void(*)(id,SEL,id))objc_msgSend)(sceneNow, upd, mset); HH("scene settings updated (fg+landscape)\n"); }
+                    } @catch (NSException *e) { HHF("updateSettings EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+                }
+            }
+        } @catch (NSException *e) { HHF("foreground EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+        // Force the app VC view + scene content container to fill the car screen.
+        @try {
+            id devVC = getIvar(appVC, "_deviceAppViewController");
+            id sceneView = devVC ? getIvar(devVC, "_sceneView") : nil;
+            HHF("appVC._deviceAppViewController._sceneView: %s\n", sceneView ? class_getName(object_getClass(sceneView)) : "nil");
+            if (sceneView) {
+                CGRect wf = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("frame"));
+                ((void(*)(id,SEL,CGRect))objc_msgSend)(sceneView, sel_registerName("setFrame:"), CGRectMake(0,0,wf.size.width,wf.size.height));
+                HH("forced sceneView frame to full car screen\n");
+            }
+        } @catch (NSException *e) { HHF("sceneView frame EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+
         @try { ((void(*)(id,SEL,double))objc_msgSend)(rootWindow, sel_registerName("setAlpha:"), (double)1.0); ((void(*)(id,SEL,BOOL))objc_msgSend)(rootWindow, sel_registerName("setHidden:"), NO); } @catch(...) {}
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBHostDismiss(); });
         HH("SUCCESS: port host complete (30s) - watch car screen\n");
@@ -1709,7 +1748,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.18.0 init - PORT: SBAppViewController + UIRootSceneWindow\n";
+        const char msg[] = "[CBR] v3.18.1 init - foreground + unblank + landscape\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
