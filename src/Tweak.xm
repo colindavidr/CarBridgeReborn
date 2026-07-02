@@ -924,6 +924,65 @@ static void cbrSBRegisterListener(void) {
 // v3.15.2: probe the CarPlayApp process's own scenes/screens. The car window
 // scene is NOT in SpringBoard's connectedScenes (CarPlay UI runs in this
 // process, com.apple.CarPlayApp). Find where the car scene actually lives.
+static void cbrCPProbeCarSceneGuts(void) {
+    static int done = 0; if (done) return; done = 1;
+    int fd = open("/var/mobile/CBR_cp_scene_guts.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    if (fd < 0) return;
+    #define GP(s) do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
+    #define GPF(...) do{ char _b[500]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
+    GP("==== CAR SCENE GUTS ====\n");
+    @try {
+        Class appCls = objc_getClass("UIApplication");
+        id app = ((id(*)(id,SEL))objc_msgSend)(appCls, sel_registerName("sharedApplication"));
+        id conns = app ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("connectedScenes")) : nil;
+        id all = conns ? ((id(*)(id,SEL))objc_msgSend)(conns, sel_registerName("allObjects")) : nil;
+        NSUInteger cnt = all ? [all count] : 0;
+        id carScene = nil;
+        for (NSUInteger i = 0; i < cnt; i++) {
+            id s = [all objectAtIndex:i];
+            id scr = cb(s, "screen");
+            if (scr && ((BOOL(*)(id,SEL))objc_msgSend)(scr, sel_registerName("_isCarScreen"))) { carScene = s; break; }
+        }
+        if (!carScene) { GP("no car scene\n"); close(fd); return; }
+        GPF("car scene: %s\n", class_getName(object_getClass(carScene)));
+
+        // The scene's delegate - this is who manages hosting.
+        id delegate = cb(carScene, "delegate");
+        GPF("scene.delegate: %s\n", delegate ? class_getName(object_getClass(delegate)) : "nil");
+
+        // Walk the windows and their root VCs / view hierarchy top level.
+        id wins = cb(carScene, "windows");
+        NSUInteger wc = wins ? [wins count] : 0;
+        GPF("windows: %lu\n", (unsigned long)wc);
+        for (NSUInteger i = 0; i < wc; i++) {
+            id w = [wins objectAtIndex:i];
+            GPF("  window[%lu] %s\n", (unsigned long)i, class_getName(object_getClass(w)));
+            id rvc = cb(w, "rootViewController");
+            GPF("     rootVC: %s\n", rvc ? class_getName(object_getClass(rvc)) : "nil");
+            id cv = cb(w, "contentView");
+            if (cv) GPF("     contentView: %s\n", class_getName(object_getClass(cv)));
+            // top-level subviews of the root view
+            id rv = rvc ? cb(rvc, "view") : nil;
+            id subs = rv ? cb(rv, "subviews") : nil;
+            NSUInteger svc = subs ? [subs count] : 0;
+            GPF("     rootView subviews: %lu\n", (unsigned long)svc);
+            for (NSUInteger j = 0; j < svc && j < 8; j++)
+                GPF("        subview[%lu] %s\n", (unsigned long)j,
+                    class_getName(object_getClass([subs objectAtIndex:j])));
+        }
+
+        // Does the scene expose a hosting/scene-manager-ish API?
+        const char *probes[] = {"sceneManager","_sceneManager","sceneHandle","_sceneHandle",
+                                "sceneManagerCoordinator","displayIdentity", NULL};
+        for (int k = 0; probes[k]; k++) {
+            id r = cb(carScene, probes[k]);
+            GPF("  carScene.%s -> %s\n", probes[k], r ? class_getName(object_getClass(r)) : "nil/none");
+        }
+    } @catch (NSException *e) { GPF("EXC: %s\n", [[e reason] UTF8String] ?: "?"); }
+    GP("==== END CAR SCENE GUTS ====\n");
+    close(fd);
+    CBLog("[CBR] car scene guts written to CBR_cp_scene_guts.txt");
+}
 static void cbrCPProbeScenes(void) {
     static int done = 0; if (done) return; done = 1;
     int fd = open("/var/mobile/CBR_cp_scenes.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
@@ -1063,6 +1122,7 @@ static void cbrCPProbeScenes(void) {
 
 - (void)_setupIconModel {
     cbrCPProbeScenes();
+    cbrCPProbeCarSceneGuts();
     CBLog("[CBR] _setupIconModel called");
 
     if (gLibraryPtr) {
@@ -1163,7 +1223,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.15.2 init - probe CarPlayApp scenes\n";
+        const char msg[] = "[CBR] v3.15.3 init - probe car scene internals\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
