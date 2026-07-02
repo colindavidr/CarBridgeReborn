@@ -1015,10 +1015,22 @@ static void cbrSBRegisterListener(void) {
 // v3.15.2: probe the CarPlayApp process's own scenes/screens. The car window
 // scene is NOT in SpringBoard's connectedScenes (CarPlay UI runs in this
 // process, com.apple.CarPlayApp). Find where the car scene actually lives.
-static id gCBRCarTestWindow = nil;
+static id gCBRCarTestWindow;  // forward decl (defined below)
+static void cbrCPDismissWindow(void) {
+    @try {
+        if (gCBRCarTestWindow) {
+            ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRCarTestWindow, sel_registerName("setHidden:"), YES);
+            ((void(*)(id,SEL))objc_msgSend)(gCBRCarTestWindow, sel_registerName("resignKeyWindow"));
+            gCBRCarTestWindow = nil;  // ARC releases -> window gone, dashboard returns
+            CBLog("[CBR-CP] dismiss: window removed");
+        }
+    } @catch(...) {}
+}
+// gCBRCarTestWindow defined above (defaults nil)
 // marker: cbrCPShowPendingApp
 static void cbrCPRenderTest(void) {
     CBLog("[CBR-CP] render-test: START (CarPlayApp side)");
+    if (gCBRCarTestWindow) { cbrCPDismissWindow(); return; }  // tap again = dismiss
     @try {
         // Get the car window scene in THIS (CarPlayApp) process.
         Class appCls = objc_getClass("UIApplication");
@@ -1121,6 +1133,15 @@ static void cbrCPRenderTest(void) {
         ((void(*)(id,SEL,BOOL))objc_msgSend)(win, sel_registerName("setHidden:"), NO);
 
         gCBRCarTestWindow = win;
+        // Tap anywhere on our view dismisses (return to dashboard). Gesture target is the
+        // window; selector implemented via a hooked class below is overkill, so use a
+        // simple approach: auto-remove after 15s no matter what, plus the toggle above.
+        @try {
+            // schedule auto-dismiss: perform cbrCPDismissWindow via a timer block.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)),
+                dispatch_get_main_queue(), ^{ cbrCPDismissWindow(); });
+            CBLog("[CBR-CP] render-test: 15s auto-dismiss armed");
+        } @catch(...) {}
         CBLog("[CBR-CP] render-test: DONE - red should be on CAR screen now");
     } @catch (NSException *e) {
         char eb[300]; snprintf(eb,sizeof(eb),"[CBR-CP] render-test EXC: %s",[[e reason] UTF8String]?:"?"); CBLog(eb);
@@ -1325,7 +1346,6 @@ static void cbrCPProbeScenes(void) {
 - (void)_setupIconModel {
     cbrCPProbeScenes();
     cbrCPProbeCarSceneGuts();
-    cbrCPRenderTest();
     CBLog("[CBR] _setupIconModel called");
 
     if (gLibraryPtr) {
@@ -1370,7 +1390,7 @@ static void cbrCPProbeScenes(void) {
                 CBCarLogFmt("[CBR-CP] tap(launchInfo) -> %s", bid ?: "?");
                 CBPostLaunch(bid);
                 CBLogFmt("[CBR] Tapped bridged app: %s", bid ?: "?");
-                CBOpenApp(bid);
+                cbrCPRenderTest();   // render placeholder on tap (not on connect)
                 handled = YES;
             }
         }
@@ -1426,7 +1446,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.16.2 init - probe SpringBoard scene handle\n";
+        const char msg[] = "[CBR] v3.16.3 init - tap-triggered render + dismiss + auto-timeout\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
