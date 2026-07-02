@@ -1140,14 +1140,57 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
             ((void(*)(id,SEL,id))objc_msgSend)(container, sel_registerName("addSubview:"), vcView);
             HH("mounted appVC.view\n");
         } @catch (NSException *e) { HHF("mount EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+        // --- v3.18.3: drive the transaction EXACTLY like the source ---
         @try {
             SEL mkTxn = sel_registerName("_createSceneUpdateTransactionForApplicationSceneEntity:deliveringActions:");
             if ([appVC respondsToSelector:mkTxn]) {
                 id txn = ((id(*)(id,SEL,id,BOOL))objc_msgSend)(appVC, mkTxn, appSceneEntity, YES);
                 HHF("sceneUpdateTransaction: %s\n", txn ? class_getName(object_getClass(txn)) : "nil");
                 if (txn) {
-                    @try { gCBRActiveTxns = getIvar(appVC, "_activeTransitions"); } @catch(...) {}
-                    @try { SEL beginSel = sel_registerName("begin"); if ([txn respondsToSelector:beginSel]) { ((void(*)(id,SEL))objc_msgSend)(txn, beginSel); HH("txn begin called\n"); } } @catch (NSException *e) { HHF("txn begin EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+                    id activeTxns = getIvar(appVC, "_activeTransitions");
+                    HHF("_activeTransitions: %s\n", activeTxns ? class_getName(object_getClass(activeTxns)) : "nil");
+                    gCBRActiveTxns = activeTxns;
+                    __block id bTxn = txn;
+                    __block id bAppVC = appVC;
+                    __block id bHandle = handle;
+                    void (^completion)(int) = ^(int arg1) {
+                        int cfd = open("/var/mobile/CBR_sb_host.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+                        #define CH(s) do{ if(cfd>=0) write(cfd,(s),strlen(s)); }while(0)
+                        #define CHF(...) do{ char _b[400]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(cfd>=0)write(cfd,_b,_n);}while(0)
+                        CH("---- txn COMPLETION fired ----\n");
+                        @try {
+                            id at = getIvar(bAppVC, "_activeTransitions");
+                            if (at) ((void(*)(id,SEL,id))objc_msgSend)(at, sel_registerName("removeObject:"), bTxn);
+                        } @catch(...) {}
+                        @try {
+                            id scn = ((id(*)(id,SEL))objc_msgSend)(bHandle, sel_registerName("sceneIfExists"));
+                            CHF("scene in completion: %s\n", scn ? class_getName(object_getClass(scn)) : "STILL nil");
+                            if (scn) {
+                                id ms = ((id(*)(id,SEL))objc_msgSend)(scn, sel_registerName("mutableSettings"));
+                                if (ms) {
+                                    @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(ms, sel_registerName("setForeground:"), YES); } @catch(...) {}
+                                    @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(ms, sel_registerName("setInterfaceOrientation:"), (NSInteger)3); } @catch(...) {}
+                                    @try { SEL u=sel_registerName("updateSettings:"); if([scn respondsToSelector:u]){ ((void(*)(id,SEL,id))objc_msgSend)(scn,u,ms); CH("completion: fg+landscape applied\n"); } } @catch(...) {}
+                                }
+                            }
+                            id dvc = getIvar(bAppVC, "_deviceAppViewController");
+                            id sv = dvc ? getIvar(dvc, "_sceneView") : nil;
+                            CHF("completion _sceneView: %s\n", sv ? class_getName(object_getClass(sv)) : "STILL nil");
+                            if (sv && gCBRRootWindow) {
+                                CGRect wf = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("frame"));
+                                ((void(*)(id,SEL,CGRect))objc_msgSend)(sv, sel_registerName("setFrame:"), CGRectMake(0,0,wf.size.width,wf.size.height));
+                                ((void(*)(id,SEL,double))objc_msgSend)(gCBRRootWindow, sel_registerName("setAlpha:"), (double)1.0);
+                                CH("completion: sized scene view + window shown\n");
+                            }
+                        } @catch (NSException *e) { CHF("completion EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+                        CH("---- end completion ----\n");
+                        if(cfd>=0) close(cfd);
+                    };
+                    @try { ((void(*)(id,SEL,id))objc_msgSend)(txn, sel_registerName("setCompletionBlock:"), completion); HH("completion block set\n"); }
+                    @catch (NSException *e) { HHF("setCompletionBlock EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+                    @try { if (activeTxns) ((void(*)(id,SEL,id))objc_msgSend)(activeTxns, sel_registerName("addObject:"), txn); HH("added to _activeTransitions\n"); } @catch(...) {}
+                    @try { ((void(*)(id,SEL))objc_msgSend)(txn, sel_registerName("begin")); HH("txn begin called\n"); }
+                    @catch (NSException *e) { HHF("txn begin EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                 }
             } else { HH("appVC has no _createSceneUpdateTransaction -> cannot launch\n"); }
         } @catch (NSException *e) { HHF("transaction EXC: %s\n", [[e reason] UTF8String]?:"?"); }
@@ -1791,7 +1834,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.18.2 init - delayed post-launch scene foreground\n";
+        const char msg[] = "[CBR] v3.18.3 init - transaction completion block + activeTransitions\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
