@@ -805,6 +805,64 @@ static void cbrSBProbeDisplays(void) {
     close(fd);
     cbrSBLog("[CBR-SB] display/scenemgr probe written to CBR_sb_probe.txt");
 }
+// v3.15.0: STEP 1 of rendering - just prove we can own a window on the car screen.
+// No scene, no app hosting yet. A solid-color window appearing on the CarPlay
+// display means the riskiest unknown (SpringBoard accepting our window on the
+// external car screen) is solved. Logs before/after every call so a respring
+// points at the exact failing operation.
+static id gCBRCarWindow = nil;  // retain so ARC doesn't release it
+static void cbrSBRenderWindow(void) {
+    static int done = 0; if (done) return; done = 1;
+    cbrSBLog("[CBR-SB] render-window: START");
+
+    @try {
+        // Find the car screen.
+        Class UIScreenCls = objc_getClass("UIScreen");
+        id screens = ((id(*)(id,SEL))objc_msgSend)(UIScreenCls, sel_registerName("screens"));
+        id carScreen = nil;
+        NSUInteger sc = screens ? [screens count] : 0;
+        for (NSUInteger i = 0; i < sc; i++) {
+            id scr = [screens objectAtIndex:i];
+            if (((BOOL(*)(id,SEL))objc_msgSend)(scr, sel_registerName("_isCarScreen"))) {
+                carScreen = scr; break;
+            }
+        }
+        if (!carScreen) { cbrSBLog("[CBR-SB] render-window: NO car screen -> abort"); return; }
+        CGRect b = ((CGRect(*)(id,SEL))objc_msgSend)(carScreen, sel_registerName("bounds"));
+        char bb[128]; snprintf(bb, sizeof(bb), "[CBR-SB] render-window: car screen %.0fx%.0f",
+                               b.size.width, b.size.height); cbrSBLog(bb);
+
+        // Allocate a UIWindow bound to the car screen.
+        cbrSBLog("[CBR-SB] render-window: alloc UIWindow");
+        Class UIWindowCls = objc_getClass("UIWindow");
+        id win = ((id(*)(id,SEL))objc_msgSend)(UIWindowCls, sel_registerName("alloc"));
+
+        cbrSBLog("[CBR-SB] render-window: initWithFrame");
+        win = ((id(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("initWithFrame:"), b);
+        if (!win) { cbrSBLog("[CBR-SB] render-window: init nil -> abort"); return; }
+
+        cbrSBLog("[CBR-SB] render-window: setScreen");
+        ((void(*)(id,SEL,id))objc_msgSend)(win, sel_registerName("setScreen:"), carScreen);
+
+        // Bright background so it's unmistakable on the dash.
+        cbrSBLog("[CBR-SB] render-window: set backgroundColor");
+        Class UIColorCls = objc_getClass("UIColor");
+        id red = ((id(*)(id,SEL))objc_msgSend)(UIColorCls, sel_registerName("redColor"));
+        ((void(*)(id,SEL,id))objc_msgSend)(win, sel_registerName("setBackgroundColor:"), red);
+
+        cbrSBLog("[CBR-SB] render-window: setWindowLevel");
+        ((void(*)(id,SEL,double))objc_msgSend)(win, sel_registerName("setWindowLevel:"), (double)1000.0);
+
+        cbrSBLog("[CBR-SB] render-window: makeKeyAndVisible");
+        ((void(*)(id,SEL))objc_msgSend)(win, sel_registerName("makeKeyAndVisible"));
+
+        gCBRCarWindow = win;  // retain
+        cbrSBLog("[CBR-SB] render-window: DONE - red window should be on car screen");
+    } @catch (NSException *e) {
+        char eb[300]; snprintf(eb, sizeof(eb), "[CBR-SB] render-window EXC: %s",
+                               [[e reason] UTF8String] ?: "?"); cbrSBLog(eb);
+    }
+}
 static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
                                 CFStringRef name, const void *object,
                                 CFDictionaryRef userInfo) {
@@ -821,6 +879,7 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     cbrSBLog(line);
     cbrSBDumpSceneClasses();
     cbrSBProbeDisplays();
+    cbrSBRenderWindow();
 }
 static void cbrSBRegisterListener(void) {
     cbrSBLog("[CBR-SB] v3.14.0 listener registering in SpringBoard");
@@ -1021,7 +1080,7 @@ static void cbrSBRegisterListener(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.14.2 init - CarPlay hooks + SB listener + display probe\n";
+        const char msg[] = "[CBR] v3.15.0 init - first render: window on car screen\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
