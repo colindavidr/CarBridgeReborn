@@ -1190,6 +1190,49 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         } @catch (NSException *e) { HHF("sceneView frame EXC: %s\n", [[e reason] UTF8String]?:"?"); }
 
         @try { ((void(*)(id,SEL,double))objc_msgSend)(rootWindow, sel_registerName("setAlpha:"), (double)1.0); ((void(*)(id,SEL,BOOL))objc_msgSend)(rootWindow, sel_registerName("setHidden:"), NO); } @catch(...) {}
+        // --- v3.18.2: the scene is created ASYNC after launch. Re-run foreground +
+        //     sceneView grab on a delay so the scene actually exists. ---
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            int fd2 = open("/var/mobile/CBR_sb_host.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+            #define DH(s)  do{ if(fd2>=0) write(fd2,(s),strlen(s)); }while(0)
+            #define DHF(...) do{ char _b[420]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd2>=0)write(fd2,_b,_n);}while(0)
+            DH("---- delayed (post-launch) pass ----\n");
+            @try {
+                id sceneNow = ((id(*)(id,SEL))objc_msgSend)(handle, sel_registerName("sceneIfExists"));
+                DHF("sceneIfExists (delayed): %s\n", sceneNow ? class_getName(object_getClass(sceneNow)) : "STILL nil");
+                if (sceneNow) {
+                    id mset = ((id(*)(id,SEL))objc_msgSend)(sceneNow, sel_registerName("mutableSettings"));
+                    if (mset) {
+                        @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mset, sel_registerName("setForeground:"), YES); } @catch(...) {}
+                        @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(mset, sel_registerName("setInterfaceOrientation:"), (NSInteger)3); } @catch(...) {}
+                        @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mset, sel_registerName("setDeactivated:"), NO); } @catch(...) {}
+                        @try {
+                            SEL upd = sel_registerName("updateSettings:");
+                            if ([sceneNow respondsToSelector:upd]) { ((void(*)(id,SEL,id))objc_msgSend)(sceneNow, upd, mset); DH("delayed: scene fg+landscape applied\n"); }
+                        } @catch (NSException *e) { DHF("delayed updateSettings EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+                    }
+                }
+                // Grab the now-live scene view and size it to the car screen.
+                id devVC = getIvar(gCBRAppVC, "_deviceAppViewController");
+                id sceneView = devVC ? getIvar(devVC, "_sceneView") : nil;
+                DHF("delayed _sceneView: %s\n", sceneView ? class_getName(object_getClass(sceneView)) : "STILL nil");
+                if (sceneView && gCBRRootWindow) {
+                    CGRect wf = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("frame"));
+                    ((void(*)(id,SEL,CGRect))objc_msgSend)(sceneView, sel_registerName("setFrame:"), CGRectMake(0,0,wf.size.width,wf.size.height));
+                    id container = getIvar(sceneView, "_sceneContentContainerView");
+                    DHF("sceneContentContainerView: %s\n", container ? class_getName(object_getClass(container)) : "nil");
+                    DH("delayed: sized live scene view to car screen\n");
+                }
+                // Re-assert window visible on top.
+                @try {
+                    ((void(*)(id,SEL,double))objc_msgSend)(gCBRRootWindow, sel_registerName("setAlpha:"), (double)1.0);
+                    ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRRootWindow, sel_registerName("setHidden:"), NO);
+                } @catch(...) {}
+            } @catch (NSException *e) { DHF("delayed EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+            DH("---- end delayed pass ----\n");
+            if (fd2>=0) close(fd2);
+        });
+
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBHostDismiss(); });
         HH("SUCCESS: port host complete (30s) - watch car screen\n");
     } @catch (NSException *e) { HHF("HOST EXC: %s\n", [[e reason] UTF8String] ?: "?"); }
@@ -1748,7 +1791,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.18.1 init - foreground + unblank + landscape\n";
+        const char msg[] = "[CBR] v3.18.2 init - delayed post-launch scene foreground\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
