@@ -895,6 +895,96 @@ static void cbrSBRenderWindow(void) {
                                [[e reason] UTF8String] ?: "?"); cbrSBLog(eb);
     }
 }
+// v3.16.2: can SpringBoard hand us an application scene handle for the tapped app?
+// This is the decisive Option-A test. Query + log only. Creating a scene handle
+// MAY spin up the app's scene, so this is run parked with disable staged.
+static void cbrSBProbeSceneHandle(const char *bid_cstr) {
+    int fd = open("/var/mobile/CBR_sb_handle.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+    #define HP(s) do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
+    #define HPF(...) do{ char _b[400]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
+    HP("==== SCENE HANDLE PROBE ====\n");
+    if (!bid_cstr || !bid_cstr[0]) { HP("no bid\n"); if(fd>=0)close(fd); return; }
+    HPF("bid: %s\n", bid_cstr);
+
+    @try {
+        NSString *bid = [NSString stringWithUTF8String:bid_cstr];
+
+        // 1) Reach a scene manager via the coordinator.
+        Class coordCls = objc_getClass("SBSceneManagerCoordinator");
+        id coord = nil;
+        if (coordCls) {
+            // Common singletons.
+            for (const char *acc : (const char*[]){"sharedInstance","mainDisplaySceneManagerCoordinator", NULL}) {
+                if (!acc) break;
+                SEL s = sel_registerName(acc);
+                if ([coordCls respondsToSelector:s]) { coord = ((id(*)(id,SEL))objc_msgSend)(coordCls, s); if (coord) break; }
+            }
+        }
+        HPF("coordinator: %s\n", coord ? class_getName(object_getClass(coord)) : "nil");
+
+        // 2) Get the app for the bundle id (SBApplicationController).
+        id sbApp = nil;
+        @try {
+            Class acCls = objc_getClass("SBApplicationController");
+            id ac = acCls ? ((id(*)(id,SEL))objc_msgSend)(acCls, sel_registerName("sharedInstance")) : nil;
+            if (ac) {
+                SEL appForBID = sel_registerName("applicationWithBundleIdentifier:");
+                if ([ac respondsToSelector:appForBID])
+                    sbApp = ((id(*)(id,SEL,id))objc_msgSend)(ac, appForBID, bid);
+            }
+        } @catch (NSException *e) {}
+        HPF("SBApplication: %s\n", sbApp ? class_getName(object_getClass(sbApp)) : "nil");
+
+        // 3) Main-display scene manager: try the coordinator's per-display lookup,
+        //    or fall back to a shared SBMainDisplaySceneManager if exposed.
+        id mgr = nil;
+        @try {
+            // Try to get main display identity from UIScreen.mainScreen.
+            Class UIScreenCls = objc_getClass("UIScreen");
+            id mainScreen = ((id(*)(id,SEL))objc_msgSend)(UIScreenCls, sel_registerName("mainScreen"));
+            id dispIdentity = cb(mainScreen, "displayIdentity");
+            HPF("main displayIdentity: %s\n", dispIdentity ? class_getName(object_getClass(dispIdentity)) : "nil");
+            if (coord && dispIdentity) {
+                SEL sMgr = sel_registerName("sceneManagerForDisplayIdentity:");
+                if ([coord respondsToSelector:sMgr])
+                    mgr = ((id(*)(id,SEL,id))objc_msgSend)(coord, sMgr, dispIdentity);
+            }
+        } @catch (NSException *e) {}
+        HPF("scene manager: %s\n", mgr ? class_getName(object_getClass(mgr)) : "nil");
+
+        if (!mgr) { HP("no scene manager -> cannot probe handle\n"); HP("==== END ====\n"); if(fd>=0)close(fd); return; }
+
+        // 4) sceneIdentityForApplication: (needs the SBApplication object).
+        id identity = nil;
+        @try {
+            SEL sid = sel_registerName("sceneIdentityForApplication:");
+            if (sbApp && [mgr respondsToSelector:sid])
+                identity = ((id(*)(id,SEL,id))objc_msgSend)(mgr, sid, sbApp);
+        } @catch (NSException *e) { HPF("sceneIdentityForApplication EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+        HPF("sceneIdentity: %s\n", identity ? class_getName(object_getClass(identity)) : "nil");
+
+        // 5) existingSceneHandleForSceneIdentity: (non-creating - safest).
+        id handle = nil;
+        @try {
+            SEL esh = sel_registerName("existingSceneHandleForSceneIdentity:");
+            if (identity && [mgr respondsToSelector:esh])
+                handle = ((id(*)(id,SEL,id))objc_msgSend)(mgr, esh, identity);
+        } @catch (NSException *e) { HPF("existingSceneHandle EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+        HPF("existing handle: %s\n", handle ? class_getName(object_getClass(handle)) : "nil");
+
+        // 6) Report whether the creating API exists (do NOT call it yet - creating
+        //    may launch the app scene; we just confirm it's reachable).
+        SEL fc = sel_registerName("fetchOrCreateApplicationSceneHandleForRequest:");
+        HPF("fetchOrCreate available on mgr: %s\n", [mgr respondsToSelector:fc] ? "YES" : "no");
+        SEL scForApp = sel_registerName("sceneIdentityForApplication:createPrimaryIfRequired:sceneSessionRole:");
+        HPF("createPrimary variant available: %s\n", [mgr respondsToSelector:scForApp] ? "YES" : "no");
+
+    } @catch (NSException *e) {
+        HPF("PROBE EXC: %s\n", [[e reason] UTF8String] ?: "?");
+    }
+    HP("==== END ====\n");
+    if (fd>=0) close(fd);
+}
 static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
                                 CFStringRef name, const void *object,
                                 CFDictionaryRef userInfo) {
@@ -909,6 +999,7 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     snprintf(line, sizeof(line), "[CBR-SB] received launch signal -> %s",
              bid[0] ? bid : "(no pending file)");
     cbrSBLog(line);
+    cbrSBProbeSceneHandle(bid);
     cbrSBDumpSceneClasses();
     cbrSBProbeDisplays();
     cbrSBRenderWindow();
@@ -1335,7 +1426,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.16.1 init - per-app icon+name on car screen\n";
+        const char msg[] = "[CBR] v3.16.2 init - probe SpringBoard scene handle\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
