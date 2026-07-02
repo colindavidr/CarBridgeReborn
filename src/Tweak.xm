@@ -1073,33 +1073,24 @@ static void cbrSBHostDismiss(void) {
 // v3.17.7: launch the app so its scene instantiates (scene:0x0 = app not running).
 // cbrLaunchApp marker
 static void cbrLaunchApp(const char *bid_cstr, id mgr, id handle, int fd) {
-    if (!bid_cstr) return;
+    if (!handle) return;
+    #define LF(...) do{ char _b[300]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
     @try {
-        // Try scene-manager activation entry points (these create+foreground the scene).
-        const char *sels[] = {"activateSceneHandle:","_activateSceneHandle:","foregroundSceneHandle:", (const char*)0};
-        for (int i=0; sels[i]; i++) {
-            SEL se = sel_registerName(sels[i]);
-            if (mgr && [mgr respondsToSelector:se]) {
-                @try { ((void(*)(id,SEL,id))objc_msgSend)(mgr, se, handle);
-                    char b[200]; int n=snprintf(b,sizeof(b),"mgr.%s called\n",sels[i]); if(fd>=0)write(fd,b,n); }
-                @catch (NSException *e) { char b[240]; int n=snprintf(b,sizeof(b),"mgr.%s EXC: %s\n",sels[i],[[e reason] UTF8String]?:"?"); if(fd>=0)write(fd,b,n); }
-            }
-        }
-        // FBSSystemService open (forces the app process to run).
-        @try {
-            Class svcCls = objc_getClass("FBSSystemService");
-            id svc = svcCls ? ((id(*)(id,SEL))objc_msgSend)(svcCls, sel_registerName("sharedService")) : nil;
-            if (svc) {
-                NSString *bid = [NSString stringWithUTF8String:bid_cstr];
-                SEL openSel = sel_registerName("openApplication:options:clientPort:withResult:");
-                if ([svc respondsToSelector:openSel]) {
-                    unsigned int port = ((unsigned int(*)(id,SEL))objc_msgSend)(svc, sel_registerName("createClientPort"));
-                    ((void(*)(id,SEL,id,id,unsigned int,id))objc_msgSend)(svc, openSel, bid, @{}, port, nil);
-                    if(fd>=0){const char*m="FBSSystemService openApplication called\n";write(fd,m,strlen(m));}
-                }
-            }
-        } @catch (NSException *e) { if(fd>=0){const char*m="FBSSystemService EXC\n";write(fd,m,strlen(m));} }
-    } @catch (NSException *e) {}
+        // Dump the handle activation methods that take a transition context (once).
+        static int dmp=0;
+        if(!dmp){ dmp=1; int df=open("/var/mobile/CBR_activation.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
+            Class hc=object_getClass(handle); int d=0;
+            while(hc && strcmp(class_getName(hc),"NSObject")!=0 && d<4){ unsigned int n=0; Method *m=class_copyMethodList(hc,&n);
+                for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i]));
+                    if(strcasestr(sn,"activat")||strcasestr(sn,"transitioncontext")||strcasestr(sn,"foreground")){ char lb[220]; int ln=snprintf(lb,sizeof(lb),"-%s\n",sn); if(df>=0)write(df,lb,ln);} }
+                if(m)free(m); hc=class_getSuperclass(hc); d++; }
+            if(df>=0)close(df); }
+        // Build a transition context and activate the scene entity.
+        SEL actEntity = sel_registerName("additionalActionsForActivatingSceneEntity:withTransitionContext:");
+        LF("handle has additionalActionsForActivatingSceneEntity: %s\n", [handle respondsToSelector:actEntity]?"YES":"no");
+        // Try to make the handle foreground/activate via UIApplication scene request.
+        // (Filled in next build from the activation dump.)
+    } @catch (NSException *e) { LF("launch EXC: %s\n", [[e reason] UTF8String]?:"?"); }
 }
 static void cbrSBHostScene(const char *bid_cstr, id handle) {
     int fd = open("/var/mobile/CBR_sb_host.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
@@ -1126,10 +1117,9 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         // Launch the app so its scene instantiates, then mint the view with a real
         // hostRequester (nil never triggers scene creation).
         cbrLaunchApp(bid_cstr, gCBRLastMgr, handle, fd);
-        Class _vcCls = objc_getClass("UIViewController");
-        id hostVC = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(_vcCls, sel_registerName("alloc")), sel_registerName("init"));
-        HH("minting scene view (hostRequester=VC)...\n");
-        id sceneView = ((id(*)(id,SEL,CGSize,NSInteger,NSInteger,id))objc_msgSend)(handle, mkView, b.size, (NSInteger)3, (NSInteger)3, hostVC);
+        HH("minting scene view (nil requester)...\n");
+        id hostVC = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIViewController"), sel_registerName("alloc")), sel_registerName("init"));
+        id sceneView = ((id(*)(id,SEL,CGSize,NSInteger,NSInteger,id))objc_msgSend)(handle, mkView, b.size, (NSInteger)3, (NSInteger)3, nil);
         HHF("scene view: %s\n", sceneView ? class_getName(object_getClass(sceneView)) : "nil");
         if (!sceneView) { HH("no scene view -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
         gCBRHostSceneView = sceneView;
@@ -1783,7 +1773,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.17.7 init - launch app + hostRequester=VC\n";
+        const char msg[] = "[CBR] v3.17.8 init - nil requester + dump scene activation\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
