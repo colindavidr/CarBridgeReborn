@@ -1208,6 +1208,17 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                             @try { if(!sv2) sv2=getIvar(bAppVC,"_sceneView"); } @catch(...) {}
                             @try { if(!sv2){ id cv=cb(bAppVC,"view"); id subs=cv?cb(cv,"subviews"):nil; if(subs && [subs count]>0){ CHF("appVC.view has %lu subviews\n",(unsigned long)[subs count]); for(id sub in subs){ CHF("  subview: %s\n", class_getName(object_getClass(sub))); } } } } @catch(...) {}
                             CHF("resolved sceneView (multi-path): %s\n", sv2 ? class_getName(object_getClass(sv2)) : "STILL nil");
+                            // Scene is live + foregrounded. Show the window UNCONDITIONALLY. The old show was
+                            // gated behind finding sv/sv2, which stays nil every run - so the window never
+                            // actually appeared. The scene view is a subview of appVC.view once the scene
+                            // connects, so showing the window + sizing appVC.view should reveal the app.
+                            if (gCBRRootWindow) {
+                                CGRect wb = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds"));
+                                @try { id av = cb(bAppVC, "view"); if (av) ((void(*)(id,SEL,CGRect))objc_msgSend)(av, sel_registerName("setFrame:"), CGRectMake(0,0,wb.size.width,wb.size.height)); } @catch(...) {}
+                                ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRRootWindow, sel_registerName("setHidden:"), NO);
+                                ((void(*)(id,SEL,double))objc_msgSend)(gCBRRootWindow, sel_registerName("setAlpha:"), (double)1.0);
+                                CH("window shown + appVC sized (forced)\n");
+                            }
                             if (sv2 && gCBRRootWindow) {
                                 CGRect wf = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("frame"));
                                 ((void(*)(id,SEL,CGRect))objc_msgSend)(sv2, sel_registerName("setFrame:"), CGRectMake(0,0,wf.size.width,wf.size.height));
@@ -1864,7 +1875,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.18.5 init - resolve scene view (multi-path) + activate\n";
+        const char msg[] = "[CBR] v3.18.6 init - force window visible + size appVC.view\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
