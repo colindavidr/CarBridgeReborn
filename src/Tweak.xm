@@ -1058,171 +1058,107 @@ static id cbrSBCreateSceneHandle(const char *bid_cstr) {
 }
 // Host a live scene handle's view in a window on the CAR screen. Dismiss-on-timeout
 // so it can't lock you out. This is the render step.
-static id gCBRHostWindow = nil;
-static id gCBRHostSceneView = nil;
+static id cbrGetCarplayCADisplay(void) {
+    @try {
+        Class avExt = objc_getClass("AVExternalDevice");
+        id dev = avExt ? ((id(*)(id,SEL))objc_msgSend)(avExt, sel_registerName("currentCarPlayExternalDevice")) : nil;
+        if (!dev) return nil;
+        id screenIDs = ((id(*)(id,SEL))objc_msgSend)(dev, sel_registerName("screenIDs"));
+        if (!screenIDs || [screenIDs count] == 0) return nil;
+        NSString *uid = [screenIDs objectAtIndex:0];
+        Class caDisp = objc_getClass("CADisplay");
+        id displays = ((id(*)(id,SEL))objc_msgSend)(caDisp, sel_registerName("displays"));
+        for (id d in displays) {
+            id dUid = ((id(*)(id,SEL))objc_msgSend)(d, sel_registerName("uniqueId"));
+            if ([uid isEqualToString:dUid]) return d;
+        }
+    } @catch (NSException *e) {}
+    return nil;
+}
+static id gCBRRootWindow = nil;
+static id gCBRAppVC = nil;
+static id gCBRActiveTxns = nil;
 static void cbrSBHostDismiss(void) {
     @try {
-        if (gCBRHostWindow) {
-            ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRHostWindow, sel_registerName("setHidden:"), YES);
-            gCBRHostWindow = nil; gCBRHostSceneView = nil;
-            int fd=open("/var/mobile/CBR_sb_host.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
-            if(fd>=0){const char*m="[host] dismissed\n";write(fd,m,strlen(m));close(fd);}
-        }
+        if (gCBRRootWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRRootWindow, sel_registerName("setHidden:"), YES); }
+        gCBRRootWindow = nil; gCBRAppVC = nil; gCBRActiveTxns = nil;
+        int fd=open("/var/mobile/CBR_sb_host.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
+        if(fd>=0){const char*m="[host] dismissed\n";write(fd,m,strlen(m));close(fd);}
     } @catch(...) {}
-}
-// v3.17.7: launch the app so its scene instantiates (scene:0x0 = app not running).
-// cbrLaunchApp marker
-static void cbrLaunchApp(const char *bid_cstr, id mgr, id handle, int fd) {
-    if (!handle) return;
-    #define LF(...) do{ char _b[300]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
-    @try {
-        // Dump the handle activation methods that take a transition context (once).
-        static int dmp=0;
-        if(!dmp){ dmp=1; int df=open("/var/mobile/CBR_activation.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-            Class hc=object_getClass(handle); int d=0;
-            while(hc && strcmp(class_getName(hc),"NSObject")!=0 && d<4){ unsigned int n=0; Method *m=class_copyMethodList(hc,&n);
-                for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i]));
-                    if(strcasestr(sn,"activat")||strcasestr(sn,"transitioncontext")||strcasestr(sn,"foreground")){ char lb[220]; int ln=snprintf(lb,sizeof(lb),"-%s\n",sn); if(df>=0)write(df,lb,ln);} }
-                if(m)free(m); hc=class_getSuperclass(hc); d++; }
-            if(df>=0)close(df); }
-        // Build a transition context and activate the scene entity.
-        SEL actEntity = sel_registerName("additionalActionsForActivatingSceneEntity:withTransitionContext:");
-        LF("handle has additionalActionsForActivatingSceneEntity: %s\n", [handle respondsToSelector:actEntity]?"YES":"no");
-        // Try to make the handle foreground/activate via UIApplication scene request.
-        // (Filled in next build from the activation dump.)
-    } @catch (NSException *e) { LF("launch EXC: %s\n", [[e reason] UTF8String]?:"?"); }
 }
 static void cbrSBHostScene(const char *bid_cstr, id handle) {
     int fd = open("/var/mobile/CBR_sb_host.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
-    #define HH(s) do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
-    #define HHF(...) do{ char _b[400]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
-    HH("==== HOST SCENE ====\n");
+    #define HH(s)  do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
+    #define HHF(...) do{ char _b[420]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
+    HH("==== HOST SCENE v3.18.0 (port) ====\n");
+    if (!bid_cstr || !bid_cstr[0]) { HH("no bid\n"); if(fd>=0)close(fd); return; }
     if (!handle) { HH("no handle -> abort\n"); if(fd>=0)close(fd); return; }
-    HHF("bid: %s\n", bid_cstr ?: "?");
-    if (gCBRHostWindow) { HH("already hosting -> dismiss\n"); if(fd>=0)close(fd); cbrSBHostDismiss(); return; }
+    if (gCBRRootWindow) { HH("already hosting -> dismiss\n"); if(fd>=0)close(fd); cbrSBHostDismiss(); return; }
+    HHF("bid: %s\n", bid_cstr);
     @try {
-        // Car screen.
-        Class UIScreenCls = objc_getClass("UIScreen");
-        id screens = ((id(*)(id,SEL))objc_msgSend)(UIScreenCls, sel_registerName("screens"));
-        id carScreen = nil; NSUInteger sc = screens ? [screens count] : 0;
-        for (NSUInteger i=0;i<sc;i++){ id s=[screens objectAtIndex:i];
-            if (((BOOL(*)(id,SEL))objc_msgSend)(s, sel_registerName("_isCarScreen"))){ carScreen=s; break; } }
-        if (!carScreen) { HH("no car screen -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
-        CGRect b = ((CGRect(*)(id,SEL))objc_msgSend)(carScreen, sel_registerName("bounds"));
-        HHF("car screen: %.0fx%.0f\n", b.size.width, b.size.height);
-
-        // Mint the scene view from the handle. orientation 3 = landscape.
-        SEL mkView = sel_registerName("newSceneViewWithReferenceSize:contentOrientation:containerOrientation:hostRequester:");
-        if (![handle respondsToSelector:mkView]) { HH("handle can't mint view -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
-        // Launch the app so its scene instantiates, then mint the view with a real
-        // hostRequester (nil never triggers scene creation).
-        cbrLaunchApp(bid_cstr, gCBRLastMgr, handle, fd);
-        HH("minting scene view (nil requester)...\n");
-        id hostVC = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIViewController"), sel_registerName("alloc")), sel_registerName("init"));
-        id sceneView = ((id(*)(id,SEL,CGSize,NSInteger,NSInteger,id))objc_msgSend)(handle, mkView, b.size, (NSInteger)3, (NSInteger)3, nil);
-        HHF("scene view: %s\n", sceneView ? class_getName(object_getClass(sceneView)) : "nil");
-        if (!sceneView) { HH("no scene view -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
-        gCBRHostSceneView = sceneView;
-        ((void(*)(id,SEL,CGRect))objc_msgSend)(sceneView, sel_registerName("setFrame:"), CGRectMake(0,0,b.size.width,b.size.height));
-
-        // Window on the car screen.
-        HH("building car window...\n");
-        Class UIWindowCls = objc_getClass("UIWindow");
-        id win = ((id(*)(id,SEL))objc_msgSend)(UIWindowCls, sel_registerName("alloc"));
-        win = ((id(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("initWithFrame:"), b);
-        ((void(*)(id,SEL,id))objc_msgSend)(win, sel_registerName("setScreen:"), carScreen);
-        id root = cb(hostVC, "view");
-        ((void(*)(id,SEL,id))objc_msgSend)(root, sel_registerName("addSubview:"), sceneView);
-        ((void(*)(id,SEL,id))objc_msgSend)(win, sel_registerName("setRootViewController:"), hostVC);
-        ((void(*)(id,SEL,double))objc_msgSend)(win, sel_registerName("setWindowLevel:"), (double)10000.0);
-        HH("makeKeyAndVisible...\n");
-        ((void(*)(id,SEL))objc_msgSend)(win, sel_registerName("makeKeyAndVisible"));
-        gCBRHostWindow = win;
-
+        NSString *bid = [NSString stringWithUTF8String:bid_cstr];
+        Class acCls = objc_getClass("SBApplicationController");
+        id ac = ((id(*)(id,SEL))objc_msgSend)(acCls, sel_registerName("sharedInstance"));
+        id application = ((id(*)(id,SEL,id))objc_msgSend)(ac, sel_registerName("applicationWithBundleIdentifier:"), bid);
+        HHF("application: %s\n", application ? class_getName(object_getClass(application)) : "nil");
+        if (!application) { HH("no application -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
+        id caDisplay = cbrGetCarplayCADisplay();
+        HHF("carplay CADisplay: %s\n", caDisplay ? class_getName(object_getClass(caDisplay)) : "nil");
+        if (!caDisplay) { HH("no carplay CADisplay -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
+        Class fbsCfgCls = objc_getClass("FBSDisplayConfiguration");
+        id dispCfg = ((id(*)(id,SEL,id,BOOL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(fbsCfgCls, sel_registerName("alloc")), sel_registerName("initWithCADisplay:isMainDisplay:"), caDisplay, NO);
+        HHF("displayConfiguration: %s\n", dispCfg ? class_getName(object_getClass(dispCfg)) : "nil");
+        if (!dispCfg) { HH("no displayConfiguration -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
+        Class rootWinCls = objc_getClass("UIRootSceneWindow");
+        id rootWindow = ((id(*)(id,SEL,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(rootWinCls, sel_registerName("alloc")), sel_registerName("initWithDisplayConfiguration:"), dispCfg);
+        HHF("rootWindow: %s\n", rootWindow ? class_getName(object_getClass(rootWindow)) : "nil");
+        if (!rootWindow) { HH("no rootWindow -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
+        gCBRRootWindow = rootWindow;
+        @try { id layer = cb(rootWindow, "layer"); ((void(*)(id,SEL,CGFloat))objc_msgSend)(layer, sel_registerName("setCornerRadius:"), (CGFloat)13.0); ((void(*)(id,SEL,BOOL))objc_msgSend)(layer, sel_registerName("setMasksToBounds:"), YES); } @catch(...) {}
+        Class entCls = objc_getClass("SBDeviceApplicationSceneEntity");
+        id appSceneEntity = ((id(*)(id,SEL,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(entCls, sel_registerName("alloc")), sel_registerName("initWithApplicationSceneHandle:"), handle);
+        HHF("appSceneEntity: %s\n", appSceneEntity ? class_getName(object_getClass(appSceneEntity)) : "nil");
+        if (!appSceneEntity) { HH("no entity -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
+        Class avcCls = objc_getClass("SBAppViewController");
+        id appVC = ((id(*)(id,SEL,id,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(avcCls, sel_registerName("alloc")), sel_registerName("initWithIdentifier:andApplicationSceneEntity:"), bid, appSceneEntity);
+        HHF("appViewController: %s\n", appVC ? class_getName(object_getClass(appVC)) : "nil");
+        if (!appVC) { HH("no appVC -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
+        gCBRAppVC = appVC;
+        @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(appVC, sel_registerName("setIgnoresOcclusions:"), NO); } @catch(...) {}
+        @try { Ivar mIv = class_getInstanceVariable(object_getClass(appVC), "_currentMode"); if (mIv) object_setIvar(appVC, mIv, @(2)); } @catch(...) {}
+        @try { id actSettings = getIvar(appVC, "_activationSettings"); if (actSettings) ((void(*)(id,SEL))objc_msgSend)(actSettings, sel_registerName("clearActivationSettings")); } @catch(...) {}
         @try {
-            SEL enableHost = sel_registerName("_enableHostingIfPossible");
-            if ([sceneView respondsToSelector:enableHost]) { ((void(*)(id,SEL))objc_msgSend)(sceneView, enableHost); HH("enabled hosting\n"); }
-        } @catch(...) {}
-
-        // ---- v3.17.6: activate the HANDLE so it instantiates its scene ----
-        // cbrActivateHandle marker
+            CGRect wf = ((CGRect(*)(id,SEL))objc_msgSend)(rootWindow, sel_registerName("frame"));
+            Class UIViewCls = objc_getClass("UIView");
+            id container = ((id(*)(id,SEL,CGRect))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(UIViewCls, sel_registerName("alloc")), sel_registerName("initWithFrame:"), wf);
+            id clear = ((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIColor"), sel_registerName("clearColor"));
+            ((void(*)(id,SEL,id))objc_msgSend)(container, sel_registerName("setBackgroundColor:"), clear);
+            ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("addSubview:"), container);
+            id vcView = cb(appVC, "view");
+            ((void(*)(id,SEL,CGRect))objc_msgSend)(vcView, sel_registerName("setFrame:"), wf);
+            ((void(*)(id,SEL,id))objc_msgSend)(container, sel_registerName("addSubview:"), vcView);
+            HH("mounted appVC.view\n");
+        } @catch (NSException *e) { HHF("mount EXC: %s\n", [[e reason] UTF8String]?:"?"); }
         @try {
-            // One-time: dump the handle's activation/foreground methods.
-            static int dumped = 0;
-            if (!dumped) {
-                dumped = 1;
-                int df = open("/var/mobile/CBR_handle_methods.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
-                Class hc = object_getClass(handle); int depth=0;
-                while (hc && strcmp(class_getName(hc),"NSObject")!=0 && depth<4) {
-                    unsigned int n=0; Method *m=class_copyMethodList(hc,&n);
-                    for (unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i]));
-                        if (strcasestr(sn,"activat")||strcasestr(sn,"foreground")||strcasestr(sn,"launch")||
-                            strcasestr(sn,"createscene")||strcasestr(sn,"buildscene")||strcasestr(sn,"scene")||
-                            strcasestr(sn,"connect")||strcasestr(sn,"request")){
-                            char lb[220]; int ln=snprintf(lb,sizeof(lb),"-%s\n",sn); if(df>=0)write(df,lb,ln);} }
-                    if(m)free(m); hc=class_getSuperclass(hc); depth++;
+            SEL mkTxn = sel_registerName("_createSceneUpdateTransactionForApplicationSceneEntity:deliveringActions:");
+            if ([appVC respondsToSelector:mkTxn]) {
+                id txn = ((id(*)(id,SEL,id,BOOL))objc_msgSend)(appVC, mkTxn, appSceneEntity, YES);
+                HHF("sceneUpdateTransaction: %s\n", txn ? class_getName(object_getClass(txn)) : "nil");
+                if (txn) {
+                    @try { gCBRActiveTxns = getIvar(appVC, "_activeTransitions"); } @catch(...) {}
+                    @try { SEL beginSel = sel_registerName("begin"); if ([txn respondsToSelector:beginSel]) { ((void(*)(id,SEL))objc_msgSend)(txn, beginSel); HH("txn begin called\n"); } } @catch (NSException *e) { HHF("txn begin EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                 }
-                if(df>=0)close(df);
-            }
-            // Try common handle-activation calls (whichever exists).
-            for (const char *sel : (const char*[]){"activate","foreground","activateScene",
-                    "buildScene","createScene","connect", NULL}) {
-                if (!sel) break;
-                SEL s = sel_registerName(sel);
-                if ([handle respondsToSelector:s]) {
-                    @try { ((void(*)(id,SEL))objc_msgSend)(handle, s); HHF("handle.%s called\n", sel); }
-                    @catch (NSException *e) { HHF("handle.%s EXC: %s\n", sel, [[e reason] UTF8String]?:"?"); }
-                }
-            }
-            // Re-check whether a scene now exists.
-            id scNow = cb(handle, "scene");
-            HHF("scene after handle-activate: %s\n", scNow ? class_getName(object_getClass(scNow)) : "still nil");
-        } @catch (NSException *e) { HHF("handle-activate EXC: %s\n", [[e reason] UTF8String]?:"?"); }
-
-        // ---- v3.17.5: force the scene live + set display mode + activate ----
-        // #define cbrForceSceneLive marker
-        @try {
-            // Log scene view display mode + available modes.
-            SEL dispMode = sel_registerName("displayMode");
-            if ([sceneView respondsToSelector:dispMode]) {
-                NSInteger dm = ((NSInteger(*)(id,SEL))objc_msgSend)(sceneView, dispMode);
-                HHF("displayMode (current): %ld\n", (long)dm);
-            }
-            // Set display mode to live/hosted. On SBSceneView, mode 2 is typically "live host".
-            SEL setDispMode = sel_registerName("setDisplayMode:animationFactory:completion:");
-            if ([sceneView respondsToSelector:setDispMode]) {
-                ((void(*)(id,SEL,NSInteger,id,id))objc_msgSend)(sceneView, setDispMode, (NSInteger)2, nil, nil);
-                HH("set displayMode=2 (live host)\n");
-            }
-        } @catch (NSException *e) { HHF("displayMode EXC: %s\n", [[e reason] UTF8String]?:"?"); }
-
-        // Activate/foreground the scene so the app actually renders.
-        @try {
-            id scene = cb(handle, "scene");
-            HHF("scene obj: %s\n", scene ? class_getName(object_getClass(scene)) : "nil");
-            if (scene) {
-                // FBScene activateWithTransitionContext: brings it live.
-                SEL act = sel_registerName("activateWithTransitionContext:");
-                if ([scene respondsToSelector:act]) {
-                    ((void(*)(id,SEL,id))objc_msgSend)(scene, act, nil);
-                    HH("scene activated\n");
-                }
-            }
-            // Also try to foreground via the handle's application.
-            id app = cb(handle, "application");
-            if (!app) app = cb(scene, "application");
-            HHF("app for foreground: %s\n", app ? class_getName(object_getClass(app)) : "nil");
-        } @catch (NSException *e) { HHF("activate EXC: %s\n", [[e reason] UTF8String]?:"?"); }
-
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBHostDismiss(); });
-        HH("SUCCESS: hosted scene view on car screen (20s auto-dismiss)\n");
-    } @catch (NSException *e) {
-        HHF("HOST EXC: %s\n", [[e reason] UTF8String] ?: "?");
-    }
+            } else { HH("appVC has no _createSceneUpdateTransaction -> cannot launch\n"); }
+        } @catch (NSException *e) { HHF("transaction EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+        @try { ((void(*)(id,SEL,double))objc_msgSend)(rootWindow, sel_registerName("setAlpha:"), (double)1.0); ((void(*)(id,SEL,BOOL))objc_msgSend)(rootWindow, sel_registerName("setHidden:"), NO); } @catch(...) {}
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBHostDismiss(); });
+        HH("SUCCESS: port host complete (30s) - watch car screen\n");
+    } @catch (NSException *e) { HHF("HOST EXC: %s\n", [[e reason] UTF8String] ?: "?"); }
     HH("==== END ====\n");
     if (fd>=0) close(fd);
 }
+
+
 static void cbrSBProbeSceneHandle(const char *bid_cstr) {
     int fd = open("/var/mobile/CBR_sb_handle.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
     #define HP(s) do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
@@ -1773,7 +1709,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.17.8 init - nil requester + dump scene activation\n";
+        const char msg[] = "[CBR] v3.18.0 init - PORT: SBAppViewController + UIRootSceneWindow\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
