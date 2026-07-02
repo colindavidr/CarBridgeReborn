@@ -921,6 +921,56 @@ static void cbrSBRegisterListener(void) {
     cbrSBLog("[CBR-SB] observer registered for com.carbridgereborn.launch");
 }
 
+// v3.15.2: probe the CarPlayApp process's own scenes/screens. The car window
+// scene is NOT in SpringBoard's connectedScenes (CarPlay UI runs in this
+// process, com.apple.CarPlayApp). Find where the car scene actually lives.
+static void cbrCPProbeScenes(void) {
+    static int done = 0; if (done) return; done = 1;
+    int fd = open("/var/mobile/CBR_cp_scenes.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    if (fd < 0) return;
+    #define CPP(s) do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
+    #define CPPF(...) do{ char _b[400]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
+    CPP("==== CARPLAYAPP SCENE/SCREEN PROBE ====\n");
+
+    @try {
+        Class appCls = objc_getClass("UIApplication");
+        id app = ((id(*)(id,SEL))objc_msgSend)(appCls, sel_registerName("sharedApplication"));
+        id conns = app ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("connectedScenes")) : nil;
+        id all = conns ? ((id(*)(id,SEL))objc_msgSend)(conns, sel_registerName("allObjects")) : nil;
+        NSUInteger cnt = all ? [all count] : 0;
+        CPPF("connectedScenes: %lu\n", (unsigned long)cnt);
+        for (NSUInteger i = 0; i < cnt; i++) {
+            id s = [all objectAtIndex:i];
+            id scr = cb(s, "screen");
+            BOOL isCar = scr ? ((BOOL(*)(id,SEL))objc_msgSend)(scr, sel_registerName("_isCarScreen")) : NO;
+            CGRect b = scr ? ((CGRect(*)(id,SEL))objc_msgSend)(scr, sel_registerName("bounds")) : CGRectZero;
+            CPPF("  scene[%lu] %s car=%d screen=%.0fx%.0f\n", (unsigned long)i,
+                 class_getName(object_getClass(s)), isCar, b.size.width, b.size.height);
+            // list windows in this scene
+            id wins = cb(s, "windows");
+            NSUInteger wc = wins ? [wins count] : 0;
+            CPPF("     windows: %lu\n", (unsigned long)wc);
+        }
+    } @catch (NSException *e) { CPPF("scenes EXC: %s\n", [[e reason] UTF8String] ?: "?"); }
+
+    // Also list this process's UIScreens.
+    @try {
+        Class UIScreenCls = objc_getClass("UIScreen");
+        id screens = ((id(*)(id,SEL))objc_msgSend)(UIScreenCls, sel_registerName("screens"));
+        NSUInteger sc = screens ? [screens count] : 0;
+        CPPF("UIScreen.screens: %lu\n", (unsigned long)sc);
+        for (NSUInteger i = 0; i < sc; i++) {
+            id scr = [screens objectAtIndex:i];
+            BOOL isCar = ((BOOL(*)(id,SEL))objc_msgSend)(scr, sel_registerName("_isCarScreen"));
+            CGRect b = ((CGRect(*)(id,SEL))objc_msgSend)(scr, sel_registerName("bounds"));
+            CPPF("  screen[%lu] car=%d %.0fx%.0f\n", (unsigned long)i, isCar, b.size.width, b.size.height);
+        }
+    } @catch (NSException *e) { CPPF("screens EXC: %s\n", [[e reason] UTF8String] ?: "?"); }
+
+    CPP("==== END CARPLAYAPP PROBE ====\n");
+    close(fd);
+    CBLog("[CBR] CarPlayApp scene probe written to CBR_cp_scenes.txt");
+}
 %group CARPLAY
 
 // ── Phase 1: DashBoard._newApplicationLibrary ─────────────────────────────────
@@ -1012,6 +1062,7 @@ static void cbrSBRegisterListener(void) {
 %hook DBDashboardHomeViewController
 
 - (void)_setupIconModel {
+    cbrCPProbeScenes();
     CBLog("[CBR] _setupIconModel called");
 
     if (gLibraryPtr) {
@@ -1112,7 +1163,7 @@ static void cbrSBRegisterListener(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.15.1 init - window attached to car windowScene\n";
+        const char msg[] = "[CBR] v3.15.2 init - probe CarPlayApp scenes\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
