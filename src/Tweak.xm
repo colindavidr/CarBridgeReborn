@@ -1388,9 +1388,9 @@ static void cbrCPProbeScenes(void) {
                 const char *bid = ((const char*(*)(id,SEL))objc_msgSend)(bidObj,
                     sel_registerName("UTF8String"));
                 CBCarLogFmt("[CBR-CP] tap(launchInfo) -> %s", bid ?: "?");
-                CBPostLaunch(bid);
+                CBPostLaunch(bid);   // PROBE-ONLY v3.16.4: posts to SpringBoard scene-handle probe
                 CBLogFmt("[CBR] Tapped bridged app: %s", bid ?: "?");
-                cbrCPRenderTest();   // render placeholder on tap (not on connect)
+                // cbrCPRenderTest();  // placeholder disabled - no car-screen window this build
                 handled = YES;
             }
         }
@@ -1446,7 +1446,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.16.3 init - tap-triggered render + dismiss + auto-timeout\n";
+        const char msg[] = "[CBR] v3.16.4 init - PROBE-ONLY (no car window), scene-handle probe\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
