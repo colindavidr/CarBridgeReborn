@@ -1166,12 +1166,30 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                             id scn = ((id(*)(id,SEL))objc_msgSend)(bHandle, sel_registerName("sceneIfExists"));
                             CHF("scene in completion: %s\n", scn ? class_getName(object_getClass(scn)) : "STILL nil");
                             if (scn) {
-                                id ms = ((id(*)(id,SEL))objc_msgSend)(scn, sel_registerName("mutableSettings"));
-                                if (ms) {
-                                    @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(ms, sel_registerName("setForeground:"), YES); } @catch(...) {}
-                                    @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(ms, sel_registerName("setInterfaceOrientation:"), (NSInteger)3); } @catch(...) {}
-                                    @try { SEL u=sel_registerName("updateSettings:"); if([scn respondsToSelector:u]){ ((void(*)(id,SEL,id))objc_msgSend)(scn,u,ms); CH("completion: fg+landscape applied\n"); } } @catch(...) {}
-                                }
+                                // Dump FBScene settings methods once so we use the right one.
+                                static int fbd=0;
+                                if(!fbd){ fbd=1; int df=open("/var/mobile/CBR_fbscene.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
+                                    Class sc=object_getClass(scn); int d=0;
+                                    while(sc && strcmp(class_getName(sc),"NSObject")!=0 && d<4){ unsigned int n=0; Method *m=class_copyMethodList(sc,&n);
+                                        for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i]));
+                                            if(strcasestr(sn,"setting")||strcasestr(sn,"update")||strcasestr(sn,"foreground")||strcasestr(sn,"activat")){ char lb[200]; int ln=snprintf(lb,sizeof(lb),"-%s\n",sn); if(df>=0)write(df,lb,ln);} }
+                                        if(m)free(m); sc=class_getSuperclass(sc); d++; }
+                                    if(df>=0)close(df); }
+                                // Update scene settings via the scene's updateSettings:withTransitionContext: using a settings-diff block.
+                                @try {
+                                    SEL updBlk = sel_registerName("updateSettingsWithBlock:");
+                                    if ([scn respondsToSelector:updBlk]) {
+                                        void (^diff)(id) = ^(id mutableSettings) {
+                                            @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mutableSettings, sel_registerName("setForeground:"), YES); } @catch(...) {}
+                                            @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(mutableSettings, sel_registerName("setInterfaceOrientation:"), (NSInteger)3); } @catch(...) {}
+                                            @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mutableSettings, sel_registerName("setDeactivated:"), NO); } @catch(...) {}
+                                        };
+                                        ((void(*)(id,SEL,id))objc_msgSend)(scn, updBlk, diff);
+                                        CH("scene updateSettingsWithBlock: applied (fg+landscape)\n");
+                                    } else {
+                                        CH("no updateSettingsWithBlock: - see CBR_fbscene.txt\n");
+                                    }
+                                } @catch (NSException *e) { CHF("updateSettingsWithBlock EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                             }
                             id dvc = getIvar(bAppVC, "_deviceAppViewController");
                             id sv = dvc ? getIvar(dvc, "_sceneView") : nil;
@@ -1244,8 +1262,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 id sceneNow = ((id(*)(id,SEL))objc_msgSend)(handle, sel_registerName("sceneIfExists"));
                 DHF("sceneIfExists (delayed): %s\n", sceneNow ? class_getName(object_getClass(sceneNow)) : "STILL nil");
                 if (sceneNow) {
-                    id mset = ((id(*)(id,SEL))objc_msgSend)(sceneNow, sel_registerName("mutableSettings"));
-                    if (mset) {
+                    id mset = nil; if (0) {
                         @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mset, sel_registerName("setForeground:"), YES); } @catch(...) {}
                         @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(mset, sel_registerName("setInterfaceOrientation:"), (NSInteger)3); } @catch(...) {}
                         @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mset, sel_registerName("setDeactivated:"), NO); } @catch(...) {}
@@ -1834,7 +1851,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.18.3 init - transaction completion block + activeTransitions\n";
+        const char msg[] = "[CBR] v3.18.4 init - FBScene updateSettingsWithBlock (fg+landscape)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
