@@ -810,7 +810,8 @@ static void cbrSBProbeDisplays(void) {
 // display means the riskiest unknown (SpringBoard accepting our window on the
 // external car screen) is solved. Logs before/after every call so a respring
 // points at the exact failing operation.
-static id gCBRCarWindow = nil;  // retain so ARC doesn't release it
+static id gCBRCarWindow = nil;
+// cbrFindCarWindowScene: scene-attach variant  // retain so ARC doesn't release it
 static void cbrSBRenderWindow(void) {
     static int done = 0; if (done) return; done = 1;
     cbrSBLog("[CBR-SB] render-window: START");
@@ -844,14 +845,45 @@ static void cbrSBRenderWindow(void) {
         cbrSBLog("[CBR-SB] render-window: setScreen");
         ((void(*)(id,SEL,id))objc_msgSend)(win, sel_registerName("setScreen:"), carScreen);
 
+        // iOS 17: associate the window with the car screen's UIWindowScene, or it
+        // renders nowhere. Find a window scene whose screen is the car screen.
+        cbrSBLog("[CBR-SB] render-window: searching for car UIWindowScene");
+        id carScene = nil;
+        @try {
+            Class appCls = objc_getClass("UIApplication");
+            id app = ((id(*)(id,SEL))objc_msgSend)(appCls, sel_registerName("sharedApplication"));
+            id conns = app ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("connectedScenes")) : nil;
+            id all = conns ? ((id(*)(id,SEL))objc_msgSend)(conns, sel_registerName("allObjects")) : nil;
+            NSUInteger cnt = all ? [all count] : 0;
+            char cb0[96]; snprintf(cb0,sizeof(cb0),"[CBR-SB] connectedScenes: %lu",(unsigned long)cnt); cbrSBLog(cb0);
+            for (NSUInteger i = 0; i < cnt; i++) {
+                id s = [all objectAtIndex:i];
+                if (![s isKindOfClass:objc_getClass("UIWindowScene")]) continue;
+                id scr = cb(s, "screen");
+                BOOL isCar = scr ? ((BOOL(*)(id,SEL))objc_msgSend)(scr, sel_registerName("_isCarScreen")) : NO;
+                char sl[160]; snprintf(sl,sizeof(sl),"[CBR-SB]   scene[%lu] %s car=%d",
+                    (unsigned long)i, class_getName(object_getClass(s)), isCar); cbrSBLog(sl);
+                if (isCar) { carScene = s; break; }
+            }
+        } @catch (NSException *e) {
+            char eb[200]; snprintf(eb,sizeof(eb),"[CBR-SB] scene search EXC: %s",[[e reason] UTF8String]?:"?"); cbrSBLog(eb);
+        }
+
+        if (carScene) {
+            cbrSBLog("[CBR-SB] render-window: attaching to car windowScene");
+            ((void(*)(id,SEL,id))objc_msgSend)(win, sel_registerName("setWindowScene:"), carScene);
+        } else {
+            cbrSBLog("[CBR-SB] render-window: NO car windowScene found (will try screen-only)");
+        }
+
         // Bright background so it's unmistakable on the dash.
         cbrSBLog("[CBR-SB] render-window: set backgroundColor");
         Class UIColorCls = objc_getClass("UIColor");
         id red = ((id(*)(id,SEL))objc_msgSend)(UIColorCls, sel_registerName("redColor"));
         ((void(*)(id,SEL,id))objc_msgSend)(win, sel_registerName("setBackgroundColor:"), red);
 
-        cbrSBLog("[CBR-SB] render-window: setWindowLevel");
-        ((void(*)(id,SEL,double))objc_msgSend)(win, sel_registerName("setWindowLevel:"), (double)1000.0);
+        cbrSBLog("[CBR-SB] render-window: setHidden:NO");
+        ((void(*)(id,SEL,BOOL))objc_msgSend)(win, sel_registerName("setHidden:"), NO);
 
         cbrSBLog("[CBR-SB] render-window: makeKeyAndVisible");
         ((void(*)(id,SEL))objc_msgSend)(win, sel_registerName("makeKeyAndVisible"));
@@ -1080,7 +1112,7 @@ static void cbrSBRegisterListener(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.15.0 init - first render: window on car screen\n";
+        const char msg[] = "[CBR] v3.15.1 init - window attached to car windowScene\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
