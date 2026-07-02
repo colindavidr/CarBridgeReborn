@@ -1118,6 +1118,41 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
             if ([sceneView respondsToSelector:enableHost]) { ((void(*)(id,SEL))objc_msgSend)(sceneView, enableHost); HH("enabled hosting\n"); }
         } @catch(...) {}
 
+        // ---- v3.17.6: activate the HANDLE so it instantiates its scene ----
+        // cbrActivateHandle marker
+        @try {
+            // One-time: dump the handle's activation/foreground methods.
+            static int dumped = 0;
+            if (!dumped) {
+                dumped = 1;
+                int df = open("/var/mobile/CBR_handle_methods.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+                Class hc = object_getClass(handle); int depth=0;
+                while (hc && strcmp(class_getName(hc),"NSObject")!=0 && depth<4) {
+                    unsigned int n=0; Method *m=class_copyMethodList(hc,&n);
+                    for (unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i]));
+                        if (strcasestr(sn,"activat")||strcasestr(sn,"foreground")||strcasestr(sn,"launch")||
+                            strcasestr(sn,"createscene")||strcasestr(sn,"buildscene")||strcasestr(sn,"scene")||
+                            strcasestr(sn,"connect")||strcasestr(sn,"request")){
+                            char lb[220]; int ln=snprintf(lb,sizeof(lb),"-%s\n",sn); if(df>=0)write(df,lb,ln);} }
+                    if(m)free(m); hc=class_getSuperclass(hc); depth++;
+                }
+                if(df>=0)close(df);
+            }
+            // Try common handle-activation calls (whichever exists).
+            for (const char *sel : (const char*[]){"activate","foreground","activateScene",
+                    "buildScene","createScene","connect", NULL}) {
+                if (!sel) break;
+                SEL s = sel_registerName(sel);
+                if ([handle respondsToSelector:s]) {
+                    @try { ((void(*)(id,SEL))objc_msgSend)(handle, s); HHF("handle.%s called\n", sel); }
+                    @catch (NSException *e) { HHF("handle.%s EXC: %s\n", sel, [[e reason] UTF8String]?:"?"); }
+                }
+            }
+            // Re-check whether a scene now exists.
+            id scNow = cb(handle, "scene");
+            HHF("scene after handle-activate: %s\n", scNow ? class_getName(object_getClass(scNow)) : "still nil");
+        } @catch (NSException *e) { HHF("handle-activate EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+
         // ---- v3.17.5: force the scene live + set display mode + activate ----
         // #define cbrForceSceneLive marker
         @try {
@@ -1712,7 +1747,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.17.5 init - force scene live + activate\n";
+        const char msg[] = "[CBR] v3.17.6 init - activate handle to instantiate scene\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
