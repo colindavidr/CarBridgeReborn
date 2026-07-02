@@ -925,8 +925,8 @@ static void cbrSBRegisterListener(void) {
 // scene is NOT in SpringBoard's connectedScenes (CarPlay UI runs in this
 // process, com.apple.CarPlayApp). Find where the car scene actually lives.
 static id gCBRCarTestWindow = nil;
+// marker: cbrCPShowPendingApp
 static void cbrCPRenderTest(void) {
-    static int done = 0; if (done) return; done = 1;
     CBLog("[CBR-CP] render-test: START (CarPlayApp side)");
     @try {
         // Get the car window scene in THIS (CarPlayApp) process.
@@ -964,15 +964,64 @@ static void cbrCPRenderTest(void) {
         if (!win) { CBLog("[CBR-CP] render-test: win nil -> abort"); return; }
         ((void(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("setFrame:"), b);
 
-        // Root VC with a bright view (dashboard has a rootVC; bare windows may not show).
-        CBLog("[CBR-CP] render-test: build rootVC + red view");
+        // Root VC whose view shows the tapped app's icon + name (proves per-app routing).
+        CBLog("[CBR-CP] render-test: build rootVC + per-app content");
         Class VCCls = objc_getClass("UIViewController");
         id vc = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(VCCls, sel_registerName("alloc")), sel_registerName("init"));
         id view = cb(vc, "view");
         Class UIColorCls = objc_getClass("UIColor");
-        id red = ((id(*)(id,SEL))objc_msgSend)(UIColorCls, sel_registerName("redColor"));
-        ((void(*)(id,SEL,id))objc_msgSend)(view, sel_registerName("setBackgroundColor:"), red);
+        id black = ((id(*)(id,SEL))objc_msgSend)(UIColorCls, sel_registerName("blackColor"));
+        ((void(*)(id,SEL,id))objc_msgSend)(view, sel_registerName("setBackgroundColor:"), black);
         ((void(*)(id,SEL,id))objc_msgSend)(win, sel_registerName("setRootViewController:"), vc);
+
+        // Read the pending bundle id written by the CarPlay tap.
+        char pend[256] = {0};
+        int pfd = open("/var/mobile/CBR_pending_launch.txt", O_RDONLY);
+        if (pfd >= 0) { ssize_t n = read(pfd, pend, sizeof(pend)-1); close(pfd);
+            if (n > 0) { pend[n]=0; for (int i=0;pend[i];i++) if(pend[i]=='\n'||pend[i]=='\r'){pend[i]=0;break;} } }
+        NSString *bid = pend[0] ? [NSString stringWithUTF8String:pend] : @"(none)";
+        CBLogFmt("[CBR-CP] render-test: pending bid = %s", pend[0]?pend:"(none)");
+
+        // App display name via LSApplicationProxy.
+        NSString *name = bid;
+        @try {
+            Class LSAP = objc_getClass("LSApplicationProxy");
+            id proxy = pend[0] ? ((id(*)(id,SEL,id))objc_msgSend)(LSAP, sel_registerName("applicationProxyForIdentifier:"), bid) : nil;
+            id ln = proxy ? cb(proxy, "localizedName") : nil;
+            if ([ln isKindOfClass:objc_getClass("NSString")] && [ln length]) name = ln;
+        } @catch (NSException *e) {}
+
+        // App icon via UIImage private API.
+        id icon = nil;
+        @try {
+            Class UIImageCls = objc_getClass("UIImage");
+            SEL iconSel = sel_registerName("_applicationIconImageForBundleIdentifier:format:scale:");
+            if (pend[0] && [UIImageCls respondsToSelector:iconSel])
+                icon = ((id(*)(id,SEL,id,int,double))objc_msgSend)(UIImageCls, iconSel, bid, 2, (double)2.0);
+        } @catch (NSException *e) {}
+
+        // Icon image view, centered-ish.
+        @try {
+            if (icon) {
+                Class IVCls = objc_getClass("UIImageView");
+                id iv = ((id(*)(id,SEL,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(IVCls, sel_registerName("alloc")), sel_registerName("initWithImage:"), icon);
+                ((void(*)(id,SEL,CGRect))objc_msgSend)(iv, sel_registerName("setFrame:"), CGRectMake(b.size.width/2.0-40, 50, 80, 80));
+                ((void(*)(id,SEL,id))objc_msgSend)(view, sel_registerName("addSubview:"), iv);
+            }
+        } @catch (NSException *e) {}
+
+        // Name label.
+        @try {
+            Class LblCls = objc_getClass("UILabel");
+            id lbl = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(LblCls, sel_registerName("alloc")), sel_registerName("init"));
+            ((void(*)(id,SEL,CGRect))objc_msgSend)(lbl, sel_registerName("setFrame:"), CGRectMake(0, 150, b.size.width, 40));
+            NSString *disp = [@"Bridged: " stringByAppendingString:name];
+            ((void(*)(id,SEL,id))objc_msgSend)(lbl, sel_registerName("setText:"), disp);
+            id white = ((id(*)(id,SEL))objc_msgSend)(UIColorCls, sel_registerName("whiteColor"));
+            ((void(*)(id,SEL,id))objc_msgSend)(lbl, sel_registerName("setTextColor:"), white);
+            ((void(*)(id,SEL,NSInteger))objc_msgSend)(lbl, sel_registerName("setTextAlignment:"), (NSInteger)1);
+            ((void(*)(id,SEL,id))objc_msgSend)(view, sel_registerName("addSubview:"), lbl);
+        } @catch (NSException *e) {}
 
         CBLog("[CBR-CP] render-test: setWindowLevel");
         ((void(*)(id,SEL,double))objc_msgSend)(win, sel_registerName("setWindowLevel:"), (double)10000.0);
@@ -1286,7 +1335,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.16.0 init - render test window on CAR scene (CarPlayApp)\n";
+        const char msg[] = "[CBR] v3.16.1 init - per-app icon+name on car screen\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
