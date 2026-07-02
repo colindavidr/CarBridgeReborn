@@ -756,6 +756,55 @@ static void cbrSBDumpSceneClasses(void) {
     close(fd);
     cbrSBLog("[CBR-SB] scene/display class dump written to CBR_sb_classes.txt");
 }
+static void cbrSBProbeDisplays(void) {
+    static int done = 0; if (done) return; done = 1;
+    int fd = open("/var/mobile/CBR_sb_probe.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    if (fd < 0) return;
+    #define PB(s) do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
+    #define PBF(...) do{ char _b[400]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
+    PB("==== SB DISPLAY/SCENEMGR PROBE ====\n");
+
+    // 1) Enumerate UIScreens, flag the car screen.
+    @try {
+        Class UIScreenCls = objc_getClass("UIScreen");
+        id screens = ((id(*)(id,SEL))objc_msgSend)(UIScreenCls, sel_registerName("screens"));
+        NSUInteger sc = screens ? [screens count] : 0;
+        PBF("UIScreen.screens count: %lu\n", (unsigned long)sc);
+        for (NSUInteger i = 0; i < sc; i++) {
+            id scr = [screens objectAtIndex:i];
+            BOOL isCar = ((BOOL(*)(id,SEL))objc_msgSend)(scr, sel_registerName("_isCarScreen"));
+            BOOL isMain = ((BOOL(*)(id,SEL))objc_msgSend)(scr, sel_registerName("_isMainScreen"));
+            BOOL isExt  = ((BOOL(*)(id,SEL))objc_msgSend)(scr, sel_registerName("_isExternal"));
+            CGRect b = ((CGRect(*)(id,SEL))objc_msgSend)(scr, sel_registerName("bounds"));
+            PBF("  screen[%lu] car=%d main=%d ext=%d bounds=%.0fx%.0f class=%s\n",
+                (unsigned long)i, isCar, isMain, isExt, b.size.width, b.size.height,
+                class_getName(object_getClass(scr)));
+            id ident = cb(scr, "displayIdentity");
+            PBF("     displayIdentity: %s (%s)\n",
+                ident ? "present" : "nil",
+                ident ? class_getName(object_getClass(ident)) : "-");
+            id cfg = cb(scr, "displayConfiguration");
+            if (cfg) {
+                BOOL dCar = ((BOOL(*)(id,SEL))objc_msgSend)(cfg, sel_registerName("isCarDisplay"));
+                PBF("     displayConfiguration.isCarDisplay=%d class=%s\n",
+                    dCar, class_getName(object_getClass(cfg)));
+            }
+        }
+    } @catch (NSException *e) { PBF("screen probe EXC: %s\n", [[e reason] UTF8String] ?: "?"); }
+
+    // 2) Can we reach a scene manager / coordinator?
+    @try {
+        Class coordCls = objc_getClass("SBSceneManagerCoordinator");
+        PBF("SBSceneManagerCoordinator class: %s\n", coordCls ? "present" : "MISSING");
+        Class sbbCls = objc_getClass("SBApplicationController");
+        id shared = sbbCls ? ((id(*)(id,SEL))objc_msgSend)(sbbCls, sel_registerName("sharedInstance")) : nil;
+        PBF("SBApplicationController.sharedInstance: %s\n", shared ? "present" : "nil");
+    } @catch (NSException *e) { PBF("scenemgr probe EXC: %s\n", [[e reason] UTF8String] ?: "?"); }
+
+    PB("==== END PROBE ====\n");
+    close(fd);
+    cbrSBLog("[CBR-SB] display/scenemgr probe written to CBR_sb_probe.txt");
+}
 static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
                                 CFStringRef name, const void *object,
                                 CFDictionaryRef userInfo) {
@@ -771,6 +820,7 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
              bid[0] ? bid : "(no pending file)");
     cbrSBLog(line);
     cbrSBDumpSceneClasses();
+    cbrSBProbeDisplays();
 }
 static void cbrSBRegisterListener(void) {
     cbrSBLog("[CBR-SB] v3.14.0 listener registering in SpringBoard");
@@ -971,7 +1021,7 @@ static void cbrSBRegisterListener(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.14.1 init - CarPlay hooks + SB listener + scene dump\n";
+        const char msg[] = "[CBR] v3.14.2 init - CarPlay hooks + SB listener + display probe\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
