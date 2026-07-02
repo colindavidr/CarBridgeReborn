@@ -1054,6 +1054,78 @@ static id cbrSBCreateSceneHandle(const char *bid_cstr) {
     if (fd>=0) close(fd);
     return handle;
 }
+// Host a live scene handle's view in a window on the CAR screen. Dismiss-on-timeout
+// so it can't lock you out. This is the render step.
+static id gCBRHostWindow = nil;
+static id gCBRHostSceneView = nil;
+static void cbrSBHostDismiss(void) {
+    @try {
+        if (gCBRHostWindow) {
+            ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRHostWindow, sel_registerName("setHidden:"), YES);
+            gCBRHostWindow = nil; gCBRHostSceneView = nil;
+            int fd=open("/var/mobile/CBR_sb_host.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
+            if(fd>=0){const char*m="[host] dismissed\n";write(fd,m,strlen(m));close(fd);}
+        }
+    } @catch(...) {}
+}
+static void cbrSBHostScene(const char *bid_cstr, id handle) {
+    int fd = open("/var/mobile/CBR_sb_host.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+    #define HH(s) do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
+    #define HHF(...) do{ char _b[400]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
+    HH("==== HOST SCENE ====\n");
+    if (!handle) { HH("no handle -> abort\n"); if(fd>=0)close(fd); return; }
+    HHF("bid: %s\n", bid_cstr ?: "?");
+    if (gCBRHostWindow) { HH("already hosting -> dismiss\n"); if(fd>=0)close(fd); cbrSBHostDismiss(); return; }
+    @try {
+        // Car screen.
+        Class UIScreenCls = objc_getClass("UIScreen");
+        id screens = ((id(*)(id,SEL))objc_msgSend)(UIScreenCls, sel_registerName("screens"));
+        id carScreen = nil; NSUInteger sc = screens ? [screens count] : 0;
+        for (NSUInteger i=0;i<sc;i++){ id s=[screens objectAtIndex:i];
+            if (((BOOL(*)(id,SEL))objc_msgSend)(s, sel_registerName("_isCarScreen"))){ carScreen=s; break; } }
+        if (!carScreen) { HH("no car screen -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
+        CGRect b = ((CGRect(*)(id,SEL))objc_msgSend)(carScreen, sel_registerName("bounds"));
+        HHF("car screen: %.0fx%.0f\n", b.size.width, b.size.height);
+
+        // Mint the scene view from the handle. orientation 3 = landscape.
+        SEL mkView = sel_registerName("newSceneViewWithReferenceSize:contentOrientation:containerOrientation:hostRequester:");
+        if (![handle respondsToSelector:mkView]) { HH("handle can't mint view -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
+        HH("minting scene view...\n");
+        id sceneView = ((id(*)(id,SEL,CGSize,NSInteger,NSInteger,id))objc_msgSend)(handle, mkView, b.size, (NSInteger)3, (NSInteger)3, nil);
+        HHF("scene view: %s\n", sceneView ? class_getName(object_getClass(sceneView)) : "nil");
+        if (!sceneView) { HH("no scene view -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
+        gCBRHostSceneView = sceneView;
+        ((void(*)(id,SEL,CGRect))objc_msgSend)(sceneView, sel_registerName("setFrame:"), CGRectMake(0,0,b.size.width,b.size.height));
+
+        // Window on the car screen.
+        HH("building car window...\n");
+        Class UIWindowCls = objc_getClass("UIWindow");
+        id win = ((id(*)(id,SEL))objc_msgSend)(UIWindowCls, sel_registerName("alloc"));
+        win = ((id(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("initWithFrame:"), b);
+        ((void(*)(id,SEL,id))objc_msgSend)(win, sel_registerName("setScreen:"), carScreen);
+        Class VCCls = objc_getClass("UIViewController");
+        id vc = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(VCCls, sel_registerName("alloc")), sel_registerName("init"));
+        id root = cb(vc, "view");
+        ((void(*)(id,SEL,id))objc_msgSend)(root, sel_registerName("addSubview:"), sceneView);
+        ((void(*)(id,SEL,id))objc_msgSend)(win, sel_registerName("setRootViewController:"), vc);
+        ((void(*)(id,SEL,double))objc_msgSend)(win, sel_registerName("setWindowLevel:"), (double)10000.0);
+        HH("makeKeyAndVisible...\n");
+        ((void(*)(id,SEL))objc_msgSend)(win, sel_registerName("makeKeyAndVisible"));
+        gCBRHostWindow = win;
+
+        @try {
+            SEL enableHost = sel_registerName("_enableHostingIfPossible");
+            if ([sceneView respondsToSelector:enableHost]) { ((void(*)(id,SEL))objc_msgSend)(sceneView, enableHost); HH("enabled hosting\n"); }
+        } @catch(...) {}
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBHostDismiss(); });
+        HH("SUCCESS: hosted scene view on car screen (20s auto-dismiss)\n");
+    } @catch (NSException *e) {
+        HHF("HOST EXC: %s\n", [[e reason] UTF8String] ?: "?");
+    }
+    HH("==== END ====\n");
+    if (fd>=0) close(fd);
+}
 static void cbrSBProbeSceneHandle(const char *bid_cstr) {
     int fd = open("/var/mobile/CBR_sb_handle.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
     #define HP(s) do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
@@ -1156,7 +1228,8 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
              bid[0] ? bid : "(no pending file)");
     cbrSBLog(line);
     cbrSBProbeSceneHandle(bid);
-    cbrSBCreateSceneHandle(bid);
+    id _cbrHandle = cbrSBCreateSceneHandle(bid);
+    cbrSBHostScene(bid, _cbrHandle);
     cbrSBDumpSceneClasses();
     cbrSBProbeDisplays();
     cbrSBRenderWindow();
@@ -1603,7 +1676,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.17.3 init - CREATE handle via fetchOrCreate + HOST\n";
+        const char msg[] = "[CBR] v3.17.4 init - CREATE + HOST (host restored)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
