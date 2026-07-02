@@ -705,6 +705,57 @@ static void cbrSBLog(const char *msg) {
     if (fd >= 0) { write(fd, msg, strlen(msg)); write(fd, "\n", 1); close(fd); }
     write(2, msg, strlen(msg)); write(2, "\n", 1);
 }
+static void cbrSBDumpOneClass(int fd, const char *clsname) {
+    Class dc = objc_getClass(clsname);
+    if (!dc) {
+        char miss[128]; int n = snprintf(miss, sizeof(miss), "  [%s] NOT FOUND\n", clsname);
+        if (fd>=0) write(fd, miss, n); return;
+    }
+    char hdr[160]; int hn = snprintf(hdr, sizeof(hdr), "== %s ==\n", clsname);
+    if (fd>=0) write(fd, hdr, hn);
+    Class c = dc; int depth = 0;
+    while (c && strcmp(class_getName(c), "NSObject") != 0 && depth < 3) {
+        unsigned int mn = 0;
+        Method *m = class_copyMethodList(c, &mn);
+        char cl[160]; int cn = snprintf(cl, sizeof(cl), " -[%s] %u methods:\n", class_getName(c), mn);
+        if (fd>=0) write(fd, cl, cn);
+        for (unsigned int i = 0; i < mn; i++) {
+            const char *sn = sel_getName(method_getName(m[i]));
+            // only the interesting ones: scene/display/host/screen/carplay/external/launch
+            if (strcasestr(sn,"scene")||strcasestr(sn,"display")||strcasestr(sn,"host")||
+                strcasestr(sn,"screen")||strcasestr(sn,"carplay")||strcasestr(sn,"external")||
+                strcasestr(sn,"launch")||strcasestr(sn,"window")||strcasestr(sn,"context")) {
+                char ml[200]; int mnl = snprintf(ml, sizeof(ml), "    -%s\n", sn);
+                if (fd>=0) write(fd, ml, mnl);
+            }
+        }
+        if (m) free(m);
+        c = class_getSuperclass(c); depth++;
+    }
+}
+static void cbrSBDumpSceneClasses(void) {
+    static int done = 0;
+    if (done) return;
+    done = 1;
+    int fd = open("/var/mobile/CBR_sb_classes.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    if (fd < 0) return;
+    write(fd, "==== SB SCENE/DISPLAY CLASS DUMP (iOS17) ====\n", 45);
+    // Candidate class names across the SpringBoard/FrontBoard scene + display stack.
+    const char *names[] = {
+        "SBSceneManager", "SBSceneManagerCoordinator", "SBMainDisplaySceneManager",
+        "SBSceneHandle", "SBApplicationSceneHandle", "FBSceneManager", "FBScene",
+        "FBSceneHostManager", "FBSSceneHostManager", "UISceneHostingController",
+        "SBSceneHostManager", "SBDisplayManager", "SBExternalDisplayManager",
+        "FBSDisplayConfiguration", "FBSDisplayLayout", "CADisplay", "UIScreen",
+        "SBApplicationController", "FBSSceneClientProvider",
+        "SBWindowScene", "UIWindowScene", "SBSceneView", "SBDeviceApplicationSceneView",
+        "CRSExternalDisplayManager", "CarDisplayInfo", "SBHDisplayIdentifier",
+        NULL };
+    for (int i = 0; names[i]; i++) cbrSBDumpOneClass(fd, names[i]);
+    write(fd, "==== END SB CLASS DUMP ====\n", 28);
+    close(fd);
+    cbrSBLog("[CBR-SB] scene/display class dump written to CBR_sb_classes.txt");
+}
 static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
                                 CFStringRef name, const void *object,
                                 CFDictionaryRef userInfo) {
@@ -719,6 +770,7 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     snprintf(line, sizeof(line), "[CBR-SB] received launch signal -> %s",
              bid[0] ? bid : "(no pending file)");
     cbrSBLog(line);
+    cbrSBDumpSceneClasses();
 }
 static void cbrSBRegisterListener(void) {
     cbrSBLog("[CBR-SB] v3.14.0 listener registering in SpringBoard");
@@ -919,7 +971,7 @@ static void cbrSBRegisterListener(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.14.0 init - CarPlay hooks + SpringBoard listener\n";
+        const char msg[] = "[CBR] v3.14.1 init - CarPlay hooks + SB listener + scene dump\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
