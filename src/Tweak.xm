@@ -904,10 +904,40 @@ static void cbrSBRenderWindow(void) {
 static id gCBRSceneHandle = nil;  // retain the handle we create
 // v3.17.1: discover how to CREATE (not just fetch) a scene handle. Logs the
 // fetchOrCreate signature + candidate request classes so we build the request right.
+// v3.17.2: dump SBApplicationSceneHandleRequest + SBApplicationSceneEntity init/setters,
+// then ATTEMPT the create via fetchOrCreateApplicationSceneHandleForRequest:.
+static id gCBRRealHandle = nil;
+static void cbrSBDumpRequestClass(void) {
+    static int done=0; if(done)return; done=1;
+    int fd = open("/var/mobile/CBR_sb_reqclass.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    #define RD(s) do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
+    #define RDF(...) do{ char _b[300]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
+    for (const char *cn : (const char*[]){"SBApplicationSceneHandleRequest","SBApplicationSceneEntity", NULL}) {
+        if (!cn) break;
+        Class dc = objc_getClass(cn);
+        if (!dc){ RDF("%s MISSING\n", cn); continue; }
+        RDF("== %s (init/setters) ==\n", cn);
+        unsigned int mn=0; Method *m=class_copyMethodList(dc,&mn);
+        for (unsigned int i=0;i<mn;i++){ const char*sn=sel_getName(method_getName(m[i]));
+            if (strncmp(sn,"init",4)==0||strncmp(sn,"set",3)==0||strcasestr(sn,"request")||
+                strcasestr(sn,"entity")||strcasestr(sn,"identity")||strcasestr(sn,"application"))
+                RDF("   -%s\n", sn); }
+        if(m)free(m);
+        // class methods too (factory)
+        Class mc = object_getClass(dc);
+        unsigned int cn2=0; Method *cm=class_copyMethodList(mc,&cn2);
+        for (unsigned int i=0;i<cn2;i++){ const char*sn=sel_getName(method_getName(cm[i]));
+            if (strncmp(sn,"request",7)==0||strcasestr(sn,"entity")||strncmp(sn,"scene",5)==0)
+                RDF("   +%s\n", sn); }
+        if(cm)free(cm);
+    }
+    if(fd>=0)close(fd);
+}
 static void cbrSBProbeRequest(id mgr, id sbApp, id identity) {
     int fd = open("/var/mobile/CBR_sb_request.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
     #define RQ(s) do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
     #define RQF(...) do{ char _b[400]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
+    cbrSBDumpRequestClass();
     RQ("==== REQUEST PROBE ====\n");
     @try {
         // 1) All fetchOrCreate / create methods on the scene manager.
@@ -1562,7 +1592,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.17.1 init - probe scene-request construction\n";
+        const char msg[] = "[CBR] v3.17.2 init - dump request class init/setters\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
