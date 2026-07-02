@@ -898,6 +898,80 @@ static void cbrSBRenderWindow(void) {
 // v3.16.2: can SpringBoard hand us an application scene handle for the tapped app?
 // This is the decisive Option-A test. Query + log only. Creating a scene handle
 // MAY spin up the app's scene, so this is run parked with disable staged.
+// v3.17.0: actually CREATE the app's scene handle (creating path, no request object).
+// Uses the confirmed createPrimaryIfRequired: identity path, then fetches the handle.
+// This is the first CREATING call - may spin up the app's scene. Parked + disable staged.
+static id gCBRSceneHandle = nil;  // retain the handle we create
+static id cbrSBCreateSceneHandle(const char *bid_cstr) {
+    int fd = open("/var/mobile/CBR_sb_create.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+    #define CR(s) do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
+    #define CRF(...) do{ char _b[400]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
+    CR("==== CREATE SCENE HANDLE ====\n");
+    id handle = nil;
+    if (!bid_cstr || !bid_cstr[0]) { CR("no bid\n"); if(fd>=0)close(fd); return nil; }
+    CRF("bid: %s\n", bid_cstr);
+    @try {
+        NSString *bid = [NSString stringWithUTF8String:bid_cstr];
+
+        // App object.
+        Class acCls = objc_getClass("SBApplicationController");
+        id ac = acCls ? ((id(*)(id,SEL))objc_msgSend)(acCls, sel_registerName("sharedInstance")) : nil;
+        id sbApp = ac ? ((id(*)(id,SEL,id))objc_msgSend)(ac, sel_registerName("applicationWithBundleIdentifier:"), bid) : nil;
+        CRF("SBApplication: %s\n", sbApp ? class_getName(object_getClass(sbApp)) : "nil");
+        if (!sbApp) { CR("no app -> abort\n"); CR("==== END ====\n"); if(fd>=0)close(fd); return nil; }
+
+        // Scene manager for the main display.
+        Class coordCls = objc_getClass("SBSceneManagerCoordinator");
+        id coord = coordCls ? ((id(*)(id,SEL))objc_msgSend)(coordCls, sel_registerName("sharedInstance")) : nil;
+        Class UIScreenCls = objc_getClass("UIScreen");
+        id mainScreen = ((id(*)(id,SEL))objc_msgSend)(UIScreenCls, sel_registerName("mainScreen"));
+        id dispIdentity = cb(mainScreen, "displayIdentity");
+        id mgr = nil;
+        if (coord && dispIdentity) {
+            SEL sMgr = sel_registerName("sceneManagerForDisplayIdentity:");
+            if ([coord respondsToSelector:sMgr])
+                mgr = ((id(*)(id,SEL,id))objc_msgSend)(coord, sMgr, dispIdentity);
+        }
+        CRF("scene manager: %s\n", mgr ? class_getName(object_getClass(mgr)) : "nil");
+        if (!mgr) { CR("no mgr -> abort\n"); CR("==== END ====\n"); if(fd>=0)close(fd); return nil; }
+
+        // Create-or-get a scene identity (createPrimaryIfRequired: = creating path, no request obj).
+        id identity = nil;
+        @try {
+            SEL createSel = sel_registerName("sceneIdentityForApplication:createPrimaryIfRequired:sceneSessionRole:");
+            if ([mgr respondsToSelector:createSel]) {
+                // sceneSessionRole: 0 is the default application role on iOS.
+                identity = ((id(*)(id,SEL,id,BOOL,NSInteger))objc_msgSend)(mgr, createSel, sbApp, YES, (NSInteger)0);
+            }
+        } @catch (NSException *e) { CRF("createIdentity EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+        CRF("created sceneIdentity: %s\n", identity ? class_getName(object_getClass(identity)) : "nil");
+
+        if (!identity) { CR("no identity -> abort\n"); CR("==== END ====\n"); if(fd>=0)close(fd); return nil; }
+
+        // Fetch the handle for that identity.
+        @try {
+            SEL esh = sel_registerName("existingSceneHandleForSceneIdentity:");
+            if ([mgr respondsToSelector:esh])
+                handle = ((id(*)(id,SEL,id))objc_msgSend)(mgr, esh, identity);
+        } @catch (NSException *e) { CRF("fetchHandle EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+        CRF("scene handle: %s\n", handle ? class_getName(object_getClass(handle)) : "nil");
+
+        if (handle) {
+            gCBRSceneHandle = handle;  // retain
+            // Log the handle's scene identifier + whether it can mint a scene view.
+            id sid = cb(handle, "sceneIdentifier");
+            CRF("handle.sceneIdentifier: %s\n", sid ? [[sid description] UTF8String] : "nil");
+            SEL mkView = sel_registerName("newSceneViewWithReferenceSize:contentOrientation:containerOrientation:hostRequester:");
+            CRF("handle can mint scene view: %s\n", [handle respondsToSelector:mkView] ? "YES" : "no");
+            CR("SUCCESS: got a live scene handle\n");
+        }
+    } @catch (NSException *e) {
+        CRF("CREATE EXC: %s\n", [[e reason] UTF8String] ?: "?");
+    }
+    CR("==== END ====\n");
+    if (fd>=0) close(fd);
+    return handle;
+}
 static void cbrSBProbeSceneHandle(const char *bid_cstr) {
     int fd = open("/var/mobile/CBR_sb_handle.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
     #define HP(s) do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
@@ -1000,6 +1074,7 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
              bid[0] ? bid : "(no pending file)");
     cbrSBLog(line);
     cbrSBProbeSceneHandle(bid);
+    cbrSBCreateSceneHandle(bid);
     cbrSBDumpSceneClasses();
     cbrSBProbeDisplays();
     cbrSBRenderWindow();
@@ -1446,7 +1521,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.16.4 init - PROBE-ONLY (no car window), scene-handle probe\n";
+        const char msg[] = "[CBR] v3.17.0 init - CREATE scene handle (SpringBoard)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
