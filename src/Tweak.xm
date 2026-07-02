@@ -1019,12 +1019,23 @@ static id cbrSBCreateSceneHandle(const char *bid_cstr) {
 
         cbrSBProbeRequest(mgr, sbApp, identity);
 
-        // Fetch the handle for that identity.
+        // Build the request via the factory that takes exactly what we have, then CREATE.
+        id request = nil;
         @try {
-            SEL esh = sel_registerName("existingSceneHandleForSceneIdentity:");
-            if ([mgr respondsToSelector:esh])
-                handle = ((id(*)(id,SEL,id))objc_msgSend)(mgr, esh, identity);
-        } @catch (NSException *e) { CRF("fetchHandle EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+            Class reqCls = objc_getClass("SBApplicationSceneHandleRequest");
+            SEL fac = sel_registerName("defaultRequestForApplication:sceneIdentity:displayIdentity:");
+            if (reqCls && [reqCls respondsToSelector:fac]) {
+                request = ((id(*)(id,SEL,id,id,id))objc_msgSend)(reqCls, fac, sbApp, identity, dispIdentity);
+            }
+        } @catch (NSException *e) { CRF("buildRequest EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+        CRF("request: %s\n", request ? class_getName(object_getClass(request)) : "nil");
+
+        // fetchOrCreate: the CREATE call (makes the handle if it doesn't exist).
+        @try {
+            SEL fc = sel_registerName("fetchOrCreateApplicationSceneHandleForRequest:");
+            if (request && [mgr respondsToSelector:fc])
+                handle = ((id(*)(id,SEL,id))objc_msgSend)(mgr, fc, request);
+        } @catch (NSException *e) { CRF("fetchOrCreate EXC: %s\n", [[e reason] UTF8String]?:"?"); }
         CRF("scene handle: %s\n", handle ? class_getName(object_getClass(handle)) : "nil");
 
         if (handle) {
@@ -1592,7 +1603,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.17.2 init - dump request class init/setters\n";
+        const char msg[] = "[CBR] v3.17.3 init - CREATE handle via fetchOrCreate + HOST\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
