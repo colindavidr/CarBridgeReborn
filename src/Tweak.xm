@@ -1118,6 +1118,42 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
             if ([sceneView respondsToSelector:enableHost]) { ((void(*)(id,SEL))objc_msgSend)(sceneView, enableHost); HH("enabled hosting\n"); }
         } @catch(...) {}
 
+        // ---- v3.17.5: force the scene live + set display mode + activate ----
+        // #define cbrForceSceneLive marker
+        @try {
+            // Log scene view display mode + available modes.
+            SEL dispMode = sel_registerName("displayMode");
+            if ([sceneView respondsToSelector:dispMode]) {
+                NSInteger dm = ((NSInteger(*)(id,SEL))objc_msgSend)(sceneView, dispMode);
+                HHF("displayMode (current): %ld\n", (long)dm);
+            }
+            // Set display mode to live/hosted. On SBSceneView, mode 2 is typically "live host".
+            SEL setDispMode = sel_registerName("setDisplayMode:animationFactory:completion:");
+            if ([sceneView respondsToSelector:setDispMode]) {
+                ((void(*)(id,SEL,NSInteger,id,id))objc_msgSend)(sceneView, setDispMode, (NSInteger)2, nil, nil);
+                HH("set displayMode=2 (live host)\n");
+            }
+        } @catch (NSException *e) { HHF("displayMode EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+
+        // Activate/foreground the scene so the app actually renders.
+        @try {
+            id scene = cb(handle, "scene");
+            HHF("scene obj: %s\n", scene ? class_getName(object_getClass(scene)) : "nil");
+            if (scene) {
+                // FBScene activateWithTransitionContext: brings it live.
+                SEL act = sel_registerName("activateWithTransitionContext:");
+                if ([scene respondsToSelector:act]) {
+                    ((void(*)(id,SEL,id))objc_msgSend)(scene, act, nil);
+                    HH("scene activated\n");
+                }
+            }
+            // Also try to foreground via the handle's application.
+            id app = cb(handle, "application");
+            if (!app) app = cb(scene, "application");
+            HHF("app for foreground: %s\n", app ? class_getName(object_getClass(app)) : "nil");
+        } @catch (NSException *e) { HHF("activate EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+
+
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBHostDismiss(); });
         HH("SUCCESS: hosted scene view on car screen (20s auto-dismiss)\n");
     } @catch (NSException *e) {
@@ -1676,7 +1712,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.17.4 init - CREATE + HOST (host restored)\n";
+        const char msg[] = "[CBR] v3.17.5 init - force scene live + activate\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
