@@ -1191,14 +1191,27 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                     }
                                 } @catch (NSException *e) { CHF("updateSettingsWithBlock EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                             }
-                            id dvc = getIvar(bAppVC, "_deviceAppViewController");
-                            id sv = dvc ? getIvar(dvc, "_sceneView") : nil;
-                            CHF("completion _sceneView: %s\n", sv ? class_getName(object_getClass(sv)) : "STILL nil");
-                            if (sv && gCBRRootWindow) {
+                            // Dump appVC ivars once to find where the scene view actually lives.
+                            static int avd=0;
+                            if(!avd){ avd=1; int df=open("/var/mobile/CBR_appvc.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
+                                Class ac2=object_getClass(bAppVC); int d=0;
+                                while(ac2 && strcmp(class_getName(ac2),"NSObject")!=0 && d<4){ unsigned int n=0; Ivar *iv=class_copyIvarList(ac2,&n);
+                                    char hb[160]; int hn=snprintf(hb,sizeof(hb),"[%s]\n",class_getName(ac2)); if(df>=0)write(df,hb,hn);
+                                    for(unsigned int i=0;i<n;i++){ const char*nm=ivar_getName(iv[i]); if(nm){ char lb[200]; int ln=snprintf(lb,sizeof(lb),"  %s\n",nm); if(df>=0)write(df,lb,ln);} }
+                                    if(iv)free(iv); ac2=class_getSuperclass(ac2); d++; }
+                                if(df>=0)close(df); }
+                            // Try to activate the scene onscreen (stronger than settings).
+                            @try { SEL av=sel_registerName("activate:"); if([scn respondsToSelector:av]){ ((void(*)(id,SEL,id))objc_msgSend)(scn,av,nil); CH("scene activate: called\n"); } } @catch(...) {}
+                            // Try several ivar paths for the live scene view.
+                            id sv2 = nil;
+                            @try { id d1=getIvar(bAppVC,"_deviceAppViewController"); if(d1){ sv2=getIvar(d1,"_sceneView"); if(!sv2) sv2=getIvar(d1,"_sceneHostView"); } } @catch(...) {}
+                            @try { if(!sv2) sv2=getIvar(bAppVC,"_sceneView"); } @catch(...) {}
+                            @try { if(!sv2){ id cv=cb(bAppVC,"view"); id subs=cv?cb(cv,"subviews"):nil; if(subs && [subs count]>0){ CHF("appVC.view has %lu subviews\n",(unsigned long)[subs count]); for(id sub in subs){ CHF("  subview: %s\n", class_getName(object_getClass(sub))); } } } } @catch(...) {}
+                            CHF("resolved sceneView (multi-path): %s\n", sv2 ? class_getName(object_getClass(sv2)) : "STILL nil");
+                            if (sv2 && gCBRRootWindow) {
                                 CGRect wf = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("frame"));
-                                ((void(*)(id,SEL,CGRect))objc_msgSend)(sv, sel_registerName("setFrame:"), CGRectMake(0,0,wf.size.width,wf.size.height));
-                                ((void(*)(id,SEL,double))objc_msgSend)(gCBRRootWindow, sel_registerName("setAlpha:"), (double)1.0);
-                                CH("completion: sized scene view + window shown\n");
+                                ((void(*)(id,SEL,CGRect))objc_msgSend)(sv2, sel_registerName("setFrame:"), CGRectMake(0,0,wf.size.width,wf.size.height));
+                                CH("sized resolved scene view\n");
                             }
                         } @catch (NSException *e) { CHF("completion EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                         CH("---- end completion ----\n");
@@ -1851,7 +1864,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.18.4 init - FBScene updateSettingsWithBlock (fg+landscape)\n";
+        const char msg[] = "[CBR] v3.18.5 init - resolve scene view (multi-path) + activate\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
