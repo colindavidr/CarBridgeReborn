@@ -75,6 +75,9 @@ static void CBCarLogFmt(const char *fmt, ...) {
 }
 static void CBPostLaunch(const char *bid_cstr) {
     if (!bid_cstr) return;
+    { int pfd = open("/var/mobile/CBR_pending_launch.txt",
+                     O_WRONLY|O_CREAT|O_TRUNC, 0644);
+      if (pfd >= 0) { write(pfd, bid_cstr, strlen(bid_cstr)); close(pfd); } }
     @try {
         CFStringRef bid = CFStringCreateWithCString(kCFAllocatorDefault,
                               bid_cstr, kCFStringEncodingUTF8);
@@ -692,6 +695,39 @@ static void addCarplayDeclarations(id lib) {
 }
 
 
+// ---- v3.14.0 SpringBoard side: receive the CarPlay launch signal ----
+// Darwin notifications carry no userInfo across processes, so CarPlay writes the
+// target bundle id to a file then posts a name-only notification; we read it here.
+// Pure logging: proves the signal reaches SpringBoard with the right bid. No
+// scene/window code yet (that is the next, riskier stage).
+static void cbrSBLog(const char *msg) {
+    int fd = open("/var/mobile/CBR_springboard.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+    if (fd >= 0) { write(fd, msg, strlen(msg)); write(fd, "\n", 1); close(fd); }
+    write(2, msg, strlen(msg)); write(2, "\n", 1);
+}
+static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
+                                CFStringRef name, const void *object,
+                                CFDictionaryRef userInfo) {
+    char bid[256] = {0};
+    int fd = open("/var/mobile/CBR_pending_launch.txt", O_RDONLY);
+    if (fd >= 0) {
+        ssize_t n = read(fd, bid, sizeof(bid) - 1);
+        close(fd);
+        if (n > 0) { bid[n] = 0; for (int i = 0; bid[i]; i++) if (bid[i]=='\n'||bid[i]=='\r'){bid[i]=0;break;} }
+    }
+    char line[320];
+    snprintf(line, sizeof(line), "[CBR-SB] received launch signal -> %s",
+             bid[0] ? bid : "(no pending file)");
+    cbrSBLog(line);
+}
+static void cbrSBRegisterListener(void) {
+    cbrSBLog("[CBR-SB] v3.14.0 listener registering in SpringBoard");
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+        NULL, cbrSBLaunchCallback, CFSTR("com.carbridgereborn.launch"),
+        NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    cbrSBLog("[CBR-SB] observer registered for com.carbridgereborn.launch");
+}
+
 %group CARPLAY
 
 // ── Phase 1: DashBoard._newApplicationLibrary ─────────────────────────────────
@@ -883,9 +919,12 @@ static void addCarplayDeclarations(id lib) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.13.5 init - static native-CarPlay detection + lazy-decl fix\n";
+        const char msg[] = "[CBR] v3.14.0 init - CarPlay hooks + SpringBoard listener\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
+    }
+    else if (strcmp(__progname, "SpringBoard") == 0) {
+        cbrSBRegisterListener();
     }
 }
 
