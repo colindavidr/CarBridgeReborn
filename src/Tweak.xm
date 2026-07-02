@@ -902,6 +902,7 @@ static void cbrSBRenderWindow(void) {
 // Uses the confirmed createPrimaryIfRequired: identity path, then fetches the handle.
 // This is the first CREATING call - may spin up the app's scene. Parked + disable staged.
 static id gCBRSceneHandle = nil;  // retain the handle we create
+static id gCBRLastMgr = nil;  // last scene manager (for host activation)
 // v3.17.1: discover how to CREATE (not just fetch) a scene handle. Logs the
 // fetchOrCreate signature + candidate request classes so we build the request right.
 // v3.17.2: dump SBApplicationSceneHandleRequest + SBApplicationSceneEntity init/setters,
@@ -1002,6 +1003,7 @@ static id cbrSBCreateSceneHandle(const char *bid_cstr) {
                 mgr = ((id(*)(id,SEL,id))objc_msgSend)(coord, sMgr, dispIdentity);
         }
         CRF("scene manager: %s\n", mgr ? class_getName(object_getClass(mgr)) : "nil");
+        gCBRLastMgr = mgr;
         if (!mgr) { CR("no mgr -> abort\n"); CR("==== END ====\n"); if(fd>=0)close(fd); return nil; }
 
         // Create-or-get a scene identity (createPrimaryIfRequired: = creating path, no request obj).
@@ -1068,6 +1070,37 @@ static void cbrSBHostDismiss(void) {
         }
     } @catch(...) {}
 }
+// v3.17.7: launch the app so its scene instantiates (scene:0x0 = app not running).
+// cbrLaunchApp marker
+static void cbrLaunchApp(const char *bid_cstr, id mgr, id handle, int fd) {
+    if (!bid_cstr) return;
+    @try {
+        // Try scene-manager activation entry points (these create+foreground the scene).
+        const char *sels[] = {"activateSceneHandle:","_activateSceneHandle:","foregroundSceneHandle:", (const char*)0};
+        for (int i=0; sels[i]; i++) {
+            SEL se = sel_registerName(sels[i]);
+            if (mgr && [mgr respondsToSelector:se]) {
+                @try { ((void(*)(id,SEL,id))objc_msgSend)(mgr, se, handle);
+                    char b[200]; int n=snprintf(b,sizeof(b),"mgr.%s called\n",sels[i]); if(fd>=0)write(fd,b,n); }
+                @catch (NSException *e) { char b[240]; int n=snprintf(b,sizeof(b),"mgr.%s EXC: %s\n",sels[i],[[e reason] UTF8String]?:"?"); if(fd>=0)write(fd,b,n); }
+            }
+        }
+        // FBSSystemService open (forces the app process to run).
+        @try {
+            Class svcCls = objc_getClass("FBSSystemService");
+            id svc = svcCls ? ((id(*)(id,SEL))objc_msgSend)(svcCls, sel_registerName("sharedService")) : nil;
+            if (svc) {
+                NSString *bid = [NSString stringWithUTF8String:bid_cstr];
+                SEL openSel = sel_registerName("openApplication:options:clientPort:withResult:");
+                if ([svc respondsToSelector:openSel]) {
+                    unsigned int port = ((unsigned int(*)(id,SEL))objc_msgSend)(svc, sel_registerName("createClientPort"));
+                    ((void(*)(id,SEL,id,id,unsigned int,id))objc_msgSend)(svc, openSel, bid, @{}, port, nil);
+                    if(fd>=0){const char*m="FBSSystemService openApplication called\n";write(fd,m,strlen(m));}
+                }
+            }
+        } @catch (NSException *e) { if(fd>=0){const char*m="FBSSystemService EXC\n";write(fd,m,strlen(m));} }
+    } @catch (NSException *e) {}
+}
 static void cbrSBHostScene(const char *bid_cstr, id handle) {
     int fd = open("/var/mobile/CBR_sb_host.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
     #define HH(s) do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
@@ -1090,8 +1123,13 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         // Mint the scene view from the handle. orientation 3 = landscape.
         SEL mkView = sel_registerName("newSceneViewWithReferenceSize:contentOrientation:containerOrientation:hostRequester:");
         if (![handle respondsToSelector:mkView]) { HH("handle can't mint view -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
-        HH("minting scene view...\n");
-        id sceneView = ((id(*)(id,SEL,CGSize,NSInteger,NSInteger,id))objc_msgSend)(handle, mkView, b.size, (NSInteger)3, (NSInteger)3, nil);
+        // Launch the app so its scene instantiates, then mint the view with a real
+        // hostRequester (nil never triggers scene creation).
+        cbrLaunchApp(bid_cstr, gCBRLastMgr, handle, fd);
+        Class _vcCls = objc_getClass("UIViewController");
+        id hostVC = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(_vcCls, sel_registerName("alloc")), sel_registerName("init"));
+        HH("minting scene view (hostRequester=VC)...\n");
+        id sceneView = ((id(*)(id,SEL,CGSize,NSInteger,NSInteger,id))objc_msgSend)(handle, mkView, b.size, (NSInteger)3, (NSInteger)3, hostVC);
         HHF("scene view: %s\n", sceneView ? class_getName(object_getClass(sceneView)) : "nil");
         if (!sceneView) { HH("no scene view -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
         gCBRHostSceneView = sceneView;
@@ -1103,11 +1141,9 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         id win = ((id(*)(id,SEL))objc_msgSend)(UIWindowCls, sel_registerName("alloc"));
         win = ((id(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("initWithFrame:"), b);
         ((void(*)(id,SEL,id))objc_msgSend)(win, sel_registerName("setScreen:"), carScreen);
-        Class VCCls = objc_getClass("UIViewController");
-        id vc = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(VCCls, sel_registerName("alloc")), sel_registerName("init"));
-        id root = cb(vc, "view");
+        id root = cb(hostVC, "view");
         ((void(*)(id,SEL,id))objc_msgSend)(root, sel_registerName("addSubview:"), sceneView);
-        ((void(*)(id,SEL,id))objc_msgSend)(win, sel_registerName("setRootViewController:"), vc);
+        ((void(*)(id,SEL,id))objc_msgSend)(win, sel_registerName("setRootViewController:"), hostVC);
         ((void(*)(id,SEL,double))objc_msgSend)(win, sel_registerName("setWindowLevel:"), (double)10000.0);
         HH("makeKeyAndVisible...\n");
         ((void(*)(id,SEL))objc_msgSend)(win, sel_registerName("makeKeyAndVisible"));
@@ -1747,7 +1783,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.17.6 init - activate handle to instantiate scene\n";
+        const char msg[] = "[CBR] v3.17.7 init - launch app + hostRequester=VC\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
