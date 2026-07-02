@@ -902,6 +902,45 @@ static void cbrSBRenderWindow(void) {
 // Uses the confirmed createPrimaryIfRequired: identity path, then fetches the handle.
 // This is the first CREATING call - may spin up the app's scene. Parked + disable staged.
 static id gCBRSceneHandle = nil;  // retain the handle we create
+// v3.17.1: discover how to CREATE (not just fetch) a scene handle. Logs the
+// fetchOrCreate signature + candidate request classes so we build the request right.
+static void cbrSBProbeRequest(id mgr, id sbApp, id identity) {
+    int fd = open("/var/mobile/CBR_sb_request.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+    #define RQ(s) do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
+    #define RQF(...) do{ char _b[400]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
+    RQ("==== REQUEST PROBE ====\n");
+    @try {
+        // 1) All fetchOrCreate / create methods on the scene manager.
+        Class mgrCls = object_getClass(mgr);
+        Class c = mgrCls; int depth=0;
+        while (c && strcmp(class_getName(c),"NSObject")!=0 && depth<4) {
+            unsigned int n=0; Method *m=class_copyMethodList(c,&n);
+            for (unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i]));
+                if (strcasestr(sn,"fetchorcreate")||strcasestr(sn,"createscene")||
+                    (strcasestr(sn,"handle")&&strcasestr(sn,"for")))
+                    RQF("  mgr -%s\n", sn); }
+            if(m)free(m); c=class_getSuperclass(c); depth++;
+        }
+        // 2) Candidate request classes present on device.
+        const char *reqClasses[] = {"FBSceneManagerRequest","FBSSceneRequest","SBApplicationSceneEntity",
+            "FBApplicationSceneEntity","SBSceneHandleRequest","FBSceneRequest",
+            "SBApplicationSceneHandleRequest","FBProcessManager", NULL};
+        for (int i=0;reqClasses[i];i++)
+            RQF("  class %s: %s\n", reqClasses[i], objc_getClass(reqClasses[i])?"present":"MISSING");
+        // 3) identity's own methods (maybe it builds a request/entity).
+        if (identity) {
+            RQF("  identity class: %s\n", class_getName(object_getClass(identity)));
+        }
+        // 4) Does the app object vend an entity/request?
+        if (sbApp) {
+            const char *appProbes[] = {"sceneEntity","applicationSceneEntity","mainSceneEntity","sceneHandle", NULL};
+            for (int i=0;appProbes[i];i++){ id r=cb(sbApp,appProbes[i]);
+                RQF("  app.%s -> %s\n", appProbes[i], r?class_getName(object_getClass(r)):"nil"); }
+        }
+    } @catch (NSException *e) { RQF("REQ EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+    RQ("==== END ====\n");
+    if(fd>=0)close(fd);
+}
 static id cbrSBCreateSceneHandle(const char *bid_cstr) {
     int fd = open("/var/mobile/CBR_sb_create.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
     #define CR(s) do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
@@ -947,6 +986,8 @@ static id cbrSBCreateSceneHandle(const char *bid_cstr) {
         CRF("created sceneIdentity: %s\n", identity ? class_getName(object_getClass(identity)) : "nil");
 
         if (!identity) { CR("no identity -> abort\n"); CR("==== END ====\n"); if(fd>=0)close(fd); return nil; }
+
+        cbrSBProbeRequest(mgr, sbApp, identity);
 
         // Fetch the handle for that identity.
         @try {
@@ -1521,7 +1562,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.17.0 init - CREATE scene handle (SpringBoard)\n";
+        const char msg[] = "[CBR] v3.17.1 init - probe scene-request construction\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
