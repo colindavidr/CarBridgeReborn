@@ -1775,6 +1775,82 @@ static void cbrSBLocateLiveScene(const char *bid_cstr) {
     if(fd>=0) close(fd);
 }
 
+// v3.20.5: PATH-A LOCATOR v2 - use the REAL accessors the mgr dump revealed:
+// runningApplicationScenes:, externalApplicationSceneHandles. Find the client/contextID
+// via the scene's process (client:nil on FBScene means client lives elsewhere).
+static void cbrSBLocateLiveScene2(const char *bid_cstr) {
+    int fd = open("/var/mobile/CBR_locate2.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    #define L2(s)  do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
+    #define L2F(...) do{ char _b[460]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
+    L2("==== PATH-A LOCATOR v2 ====\n");
+    if (!bid_cstr||!bid_cstr[0]) { L2("no bid\n"); if(fd>=0)close(fd); return; }
+    L2F("target: %s\n", bid_cstr);
+    @try {
+        NSString *bid = [NSString stringWithUTF8String:bid_cstr];
+        Class coordCls = objc_getClass("SBSceneManagerCoordinator");
+        id coord = coordCls ? ((id(*)(id,SEL))objc_msgSend)(coordCls, sel_registerName("sharedInstance")) : nil;
+        id mainScreen = ((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
+        id dispId = cb(mainScreen, "displayIdentity");
+        id mgr = nil;
+        if (coord && dispId){ SEL s=sel_registerName("sceneManagerForDisplayIdentity:"); if([coord respondsToSelector:s]) mgr=((id(*)(id,SEL,id))objc_msgSend)(coord,s,dispId); }
+        L2F("mgr: %s\n", mgr?class_getName(object_getClass(mgr)):"nil");
+        if(!mgr){ L2("no mgr\n"); if(fd>=0)close(fd); return; }
+
+        // A) runningApplicationScenes: - dump its type encoding to learn the arg, then try forms.
+        SEL runSel = sel_registerName("runningApplicationScenes:");
+        Method rm = class_getInstanceMethod(object_getClass(mgr), runSel);
+        if (rm) { char *enc = method_copyArgumentType(rm, 2); L2F("runningApplicationScenes: arg2 type = %s\n", enc?enc:"?"); if(enc)free(enc); }
+
+        // Try runningApplicationScenes: with a predicate block that accepts all (returns YES).
+        @try {
+            BOOL (^pred)(id) = ^BOOL(id scene){ return YES; };
+            if ([mgr respondsToSelector:runSel]) {
+                id running = ((id(*)(id,SEL,id))objc_msgSend)(mgr, runSel, pred);
+                unsigned long rc = running && [running respondsToSelector:sel_registerName("count")] ? (unsigned long)[running count] : 0;
+                L2F("runningApplicationScenes:(pred) -> %lu\n", rc);
+                if (running) for (id sc in running) {
+                    id ident = [sc respondsToSelector:sel_registerName("identity")]?((id(*)(id,SEL))objc_msgSend)(sc,sel_registerName("identity")):nil;
+                    NSString *is = ident?[NSString stringWithFormat:@"%@",ident]:@"?";
+                    L2F("  running scene: %s ident:%.70s\n", class_getName(object_getClass(sc)), [is UTF8String]);
+                }
+            }
+        } @catch (NSException *e) { L2F("runningScenes(pred) EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+
+        // B) The YouTube scene from allScenes - dig for process/contextID via alternate paths.
+        id allScenes = [mgr respondsToSelector:sel_registerName("allScenes")]?((id(*)(id,SEL))objc_msgSend)(mgr,sel_registerName("allScenes")):nil;
+        if (allScenes) for (id sc in allScenes) {
+            id ident=[sc respondsToSelector:sel_registerName("identity")]?((id(*)(id,SEL))objc_msgSend)(sc,sel_registerName("identity")):nil;
+            NSString *is=ident?[NSString stringWithFormat:@"%@",ident]:@"?";
+            if (![is containsString:bid]) continue;
+            L2F("TARGET scene: %s\n", class_getName(object_getClass(sc)));
+            // Dump ALL methods of this FBScene mentioning client/process/context/host/layer.
+            Class scc=object_getClass(sc); int d=0;
+            while(scc && strcmp(class_getName(scc),"NSObject")!=0 && d<3){ unsigned int n=0; Method *m=class_copyMethodList(scc,&n);
+                for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i]));
+                    if(strcasestr(sn,"client")||strcasestr(sn,"process")||strcasestr(sn,"context")||strcasestr(sn,"host")||strcasestr(sn,"layer")||strcasestr(sn,"pid"))
+                        L2F("   -%s\n", sn); }
+                if(m)free(m); scc=class_getSuperclass(scc); d++; }
+            // Try clientProcess / process / _process / contextHost
+            for (const char *sel : (const char*[]){"clientProcess","process","_process","clientHandle","_client", NULL}) {
+                if(!sel) break; SEL se=sel_registerName(sel);
+                if([sc respondsToSelector:se]){ id r=((id(*)(id,SEL))objc_msgSend)(sc,se); L2F("   sc.%s -> %s\n", sel, r?class_getName(object_getClass(r)):"nil"); }
+            }
+        }
+
+        // C) externalApplicationSceneHandles - SpringBoard's external-display app scene tracking.
+        for (const char *sel : (const char*[]){"externalApplicationSceneHandles","externalForegroundApplicationSceneHandles", NULL}) {
+            if(!sel) break; SEL se=sel_registerName(sel);
+            if([mgr respondsToSelector:se]){ id h=((id(*)(id,SEL))objc_msgSend)(mgr,se);
+                unsigned long hc = h && [h respondsToSelector:sel_registerName("count")]?(unsigned long)[h count]:0;
+                L2F("mgr.%s -> %lu handles\n", sel, hc);
+                if(h) for(id hh in h) L2F("   handle: %s\n", class_getName(object_getClass(hh)));
+            } else L2F("mgr.%s: no selector\n", sel);
+        }
+    } @catch (NSException *e) { L2F("LOC2 EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+    L2("==== END ====\n");
+    if(fd>=0) close(fd);
+}
+
 static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
                                 CFStringRef name, const void *object,
                                 CFDictionaryRef userInfo) {
@@ -1794,6 +1870,7 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     cbrReferenceProbe();
     cbrSBHostScene(bid, _cbrHandle);
     cbrSBLocateLiveScene(bid);
+    cbrSBLocateLiveScene2(bid);
     cbrSBDumpSceneClasses();
     cbrSBProbeDisplays();
     cbrSBRenderWindow();
