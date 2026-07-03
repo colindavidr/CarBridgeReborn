@@ -1254,6 +1254,53 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                             id scn = ((id(*)(id,SEL))objc_msgSend)(bHandle, sel_registerName("sceneIfExists"));
                             CHF("scene in completion: %s\n", scn ? class_getName(object_getClass(scn)) : "STILL nil");
                             if (scn) {
+                            // ---- v3.19.3: LAYER/DISPLAY BINDING PROBE ----
+                            // The decisive question: is this scene's content layer bound to the CarPlay
+                            // display, or pinned to the main display? And what layer-host surface exists?
+                            {
+                            int lfd = open("/var/mobile/CBR_layer.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+                            #define LF(s)  do{ if(lfd>=0) write(lfd,(s),strlen(s)); }while(0)
+                            #define LFF(...) do{ char _b[420]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(lfd>=0)write(lfd,_b,_n);}while(0)
+                            LF("==== SCENE LAYER/DISPLAY BINDING ====\n");
+                            @try {
+                                LF("-- FBScene methods (layer/context/display/host) --\n");
+                                Class sc=object_getClass(scn); int d=0;
+                                while(sc && strcmp(class_getName(sc),"NSObject")!=0 && d<5){ unsigned int n=0; Method *m=class_copyMethodList(sc,&n);
+                                    for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i]));
+                                        if(strcasestr(sn,"layer")||strcasestr(sn,"context")||strcasestr(sn,"display")||strcasestr(sn,"host")||strcasestr(sn,"present")||strcasestr(sn,"identity"))
+                                            LFF("  -%s\n", sn); }
+                                    if(m)free(m); sc=class_getSuperclass(sc); d++; }
+                                @try { id sid=cb(scn,"identity"); LFF("scene.identity: %s\n", sid?class_getName(object_getClass(sid)):"nil");
+                                    if(sid){ @try{ id disp=cb(sid,"displayIdentity"); LFF("  identity.displayIdentity: %s\n", disp?class_getName(object_getClass(disp)):"nil");
+                                        if(disp){ id du=cb(disp,"uniqueIdentifier"); LFF("    display uniqueIdentifier: %s\n", du?[[NSString stringWithFormat:@"%@",du] UTF8String]:"nil"); } }@catch(...){} } } @catch(...) {}
+                                @try { id st=cb(scn,"settings"); LFF("scene.settings: %s\n", st?class_getName(object_getClass(st)):"nil");
+                                    if(st){ unsigned int n=0; Method *m=class_copyMethodList(object_getClass(st),&n);
+                                        LF("  -- settings methods (display/frame/bound) --\n");
+                                        for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i])); if(strcasestr(sn,"display")||strcasestr(sn,"frame")||strcasestr(sn,"bound")||strcasestr(sn,"deviceOrientation")) LFF("    -%s\n",sn); }
+                                        if(m)free(m); } } @catch(...) {}
+                                for (const char *sel : (const char*[]){"contextId","_contextId","contextID","layerContext","rootLayer","layer", (const char*)0}) {
+                                    if(!sel) break;
+                                    SEL se=sel_registerName(sel);
+                                    if([scn respondsToSelector:se]){ @try{ id r=((id(*)(id,SEL))objc_msgSend)(scn,se); LFF("scn.%s -> %s\n", sel, r?class_getName(object_getClass(r)):"nil/scalar"); }@catch(...){ LFF("scn.%s -> (threw/scalar)\n", sel);} }
+                                    else LFF("scn.%s: no selector\n", sel);
+                                }
+                                LF("-- our CarPlay rootWindow surface --\n");
+                                if (gCBRRootWindow) {
+                                    for (const char *sel : (const char*[]){"_contextId","contextId","layerContext","_layerContextId", (const char*)0}) {
+                                        if(!sel) break; SEL se=sel_registerName(sel);
+                                        LFF("  rootWindow.%s: %s\n", sel, [gCBRRootWindow respondsToSelector:se]?"YES":"no");
+                                    }
+                                    @try { id rl=cb(gCBRRootWindow,"layer"); LFF("  rootWindow.layer: %s\n", rl?class_getName(object_getClass(rl)):"nil");
+                                        if(rl){ unsigned int n=0; Method *m=class_copyMethodList(object_getClass(rl),&n);
+                                            LF("    -- layer methods (context/host/contents) --\n");
+                                            for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i])); if(strcasestr(sn,"context")||strcasestr(sn,"host")||strcasestr(sn,"contents")) LFF("      -%s\n",sn); }
+                                            if(m)free(m); } } @catch(...) {}
+                                }
+                            } @catch (NSException *e) { LFF("LAYER EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+                            LF("==== END ====\n");
+                            if(lfd>=0) close(lfd);
+                            }
+                            // ---- end v3.19.3 layer probe ----
                                 // Dump FBScene settings methods once so we use the right one.
                                 static int fbd=0;
                                 if(!fbd){ fbd=1; int df=open("/var/mobile/CBR_fbscene.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
@@ -2053,7 +2100,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.19.2 init - reference probe v2 (3 routes to live scene view)\n";
+        const char msg[] = "[CBR] v3.19.3 init - scene layer/display binding probe\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
