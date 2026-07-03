@@ -1221,7 +1221,9 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
     HH("==== HOST SCENE v3.18.0 (port) ====\n");
     if (!bid_cstr || !bid_cstr[0]) { HH("no bid\n"); if(fd>=0)close(fd); return; }
     if (!handle) { HH("no handle -> abort\n"); if(fd>=0)close(fd); return; }
-    if (gCBRRootWindow) { HH("already hosting -> dismiss\n"); if(fd>=0)close(fd); cbrSBHostDismiss(); return; }
+    // v3.20.3: don't blind-toggle on a possibly-stale global. Tear down old window and
+    // continue hosting the freshly-tapped app. Fixes "worked once, black after".
+    if (gCBRRootWindow) { HH("was hosting -> dismiss old, re-host fresh\n"); cbrSBHostDismiss(); }
     HHF("bid: %s\n", bid_cstr);
     @try {
         NSString *bid = [NSString stringWithUTF8String:bid_cstr];
@@ -2096,7 +2098,7 @@ static void cbrCPProbeScenes(void) {
                 CBCarLogFmt("[CBR-CP] tap(launchInfo) -> %s", bid ?: "?");
                 CBPostLaunch(bid);   // writes pending bid file (cbrCPRenderTest reads it)
                 CBLogFmt("[CBR] Tapped bridged app: %s", bid ?: "?");
-                cbrCPRenderTest();   // v3.20.1: ENABLED - in-process car-scene window test
+                // cbrCPRenderTest(); // v3.20.2 disabled for stability isolation - in-process car-scene window test
                 handled = YES;
             }
         }
