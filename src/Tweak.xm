@@ -1964,12 +1964,16 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     snprintf(line, sizeof(line), "[CBR-SB] received launch signal -> %s",
              bid[0] ? bid : "(no pending file)");
     cbrSBLog(line);
-    cbrSBProbeSceneHandle(bid);
+    // v3.20.11: PATH-A + probes REMOVED from the hot path. cbrSBReassignToCarPlay
+    // poked the LIVE main-display scene's display config on every tap; the composite
+    // never moved, leaving the scene spinning the render server -> load avg 143 runaway.
+    // Keep ONLY the grafting host - this is what actually rendered scrollable YouTube.
+    // cbrSBProbeSceneHandle(bid);      // diagnostic only - off hot path
     id _cbrHandle = cbrSBCreateSceneHandle(bid);
     cbrSBHostScene(bid, _cbrHandle);
-    cbrSBReassignToCarPlay(bid);
-    cbrSBProbeTransition(bid);
-    cbrSBProbeTxnCtx(bid);
+    // cbrSBReassignToCarPlay(bid);     // PATH-A - caused the load runaway - REMOVED
+    // cbrSBProbeTransition(bid);       // diagnostic only - off hot path
+    // cbrSBProbeTxnCtx(bid);           // diagnostic only - off hot path
 }
 static void cbrSBRegisterListener(void) {
     cbrSBLog("[CBR-SB] v3.14.0 listener registering in SpringBoard");
@@ -2413,7 +2417,8 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.20.2 init - declaration lifetime fix (retain + full-populate)\n";
+        const char msg[] = "[CBR] v3.20.11 init - grafting host only (PATH-A reverted, load runaway fix)
+";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
