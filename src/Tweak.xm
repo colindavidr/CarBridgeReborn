@@ -1318,6 +1318,35 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                         };
                                         ((void(*)(id,SEL,id))objc_msgSend)(scn, updBlk, diff);
                                         CH("scene updateSettingsWithBlock: applied (fg+landscape)\n");
+                                // v3.20.12: RE-DRIVE the mode-4 render HERE, where the scene is
+                                // confirmed LIVE. The sync render ran when sceneIfExists was nil
+                                // (racing the async scene creation and losing). This runs the render
+                                // trigger against the now-existing scene - the fix for "worked once, lost the race after".
+                                @try {
+                                    id rdAppView = [bAppVC respondsToSelector:sel_registerName("appView")] ? ((id(*)(id,SEL))objc_msgSend)(bAppVC, sel_registerName("appView")) : nil;
+                                    CHF("REDRIVE(comp) appView: %s\n", rdAppView ? class_getName(object_getClass(rdAppView)) : "nil");
+                                    if (rdAppView) {
+                                        id rdAnim = nil;
+                                        Class rdSavc = objc_getClass("SBApplicationSceneView");
+                                        SEL rdAf = sel_registerName("defaultDisplayModeAnimationFactory");
+                                        if (rdSavc && [rdSavc respondsToSelector:rdAf]) rdAnim = ((id(*)(id,SEL))objc_msgSend)(rdSavc, rdAf);
+                                        SEL rdSdm = sel_registerName("setDisplayMode:animationFactory:completion:");
+                                        if ([rdAppView respondsToSelector:rdSdm]) {
+                                            // bounce 0 -> 4 to force a rebind against the live scene
+                                            @try { ((void(*)(id,SEL,int,id,void*))objc_msgSend)(rdAppView, rdSdm, 0, rdAnim, NULL); } @catch(...) {}
+                                            ((void(*)(id,SEL,int,id,void*))objc_msgSend)(rdAppView, rdSdm, 4, rdAnim, NULL);
+                                            CH("REDRIVE(comp) setDisplayMode 0->4 applied against LIVE scene\n");
+                                        } else { CH("REDRIVE(comp) MISSING setDisplayMode\n"); }
+                                    }
+                                    // size the live scene view to the car window
+                                    id rdDvc = getIvar(bAppVC, "_deviceAppViewController");
+                                    id rdSv = rdDvc ? getIvar(rdDvc, "_sceneView") : nil;
+                                    if (rdSv && gCBRRootWindow) {
+                                        CGRect wf = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds"));
+                                        ((void(*)(id,SEL,CGRect))objc_msgSend)(rdSv, sel_registerName("setFrame:"), CGRectMake(0,0,wf.size.width,wf.size.height));
+                                        CH("REDRIVE(comp) sized live sceneView to car window\n");
+                                    }
+                                } @catch (NSException *e) { CHF("REDRIVE(comp) EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                                     } else {
                                         CH("no updateSettingsWithBlock: - see CBR_fbscene.txt\n");
                                     }
@@ -2417,7 +2446,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.20.11 init - grafting host only (PATH-A reverted, load runaway fix)\n";
+        const char msg[] = "[CBR] v3.20.12 init - grafting host only (PATH-A reverted, load runaway fix)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
