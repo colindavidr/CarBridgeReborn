@@ -1258,94 +1258,6 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                             id scn = ((id(*)(id,SEL))objc_msgSend)(bHandle, sel_registerName("sceneIfExists"));
                             CHF("scene in completion: %s\n", scn ? class_getName(object_getClass(scn)) : "STILL nil");
                             if (scn) {
-                            // ---- v3.19.3: LAYER/DISPLAY BINDING PROBE ----
-                            // The decisive question: is this scene's content layer bound to the CarPlay
-                            // display, or pinned to the main display? And what layer-host surface exists?
-                            {
-                            int lfd = open("/var/mobile/CBR_layer.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
-                            #define LF(s)  do{ if(lfd>=0) write(lfd,(s),strlen(s)); }while(0)
-                            #define LFF(...) do{ char _b[420]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(lfd>=0)write(lfd,_b,_n);}while(0)
-                            LF("==== SCENE LAYER/DISPLAY BINDING ====\n");
-                            @try {
-                                LF("-- FBScene methods (layer/context/display/host) --\n");
-                                Class sc=object_getClass(scn); int d=0;
-                                while(sc && strcmp(class_getName(sc),"NSObject")!=0 && d<5){ unsigned int n=0; Method *m=class_copyMethodList(sc,&n);
-                                    for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i]));
-                                        if(strcasestr(sn,"layer")||strcasestr(sn,"context")||strcasestr(sn,"display")||strcasestr(sn,"host")||strcasestr(sn,"present")||strcasestr(sn,"identity"))
-                                            LFF("  -%s\n", sn); }
-                                    if(m)free(m); sc=class_getSuperclass(sc); d++; }
-                                @try { id sid=cb(scn,"identity"); LFF("scene.identity: %s\n", sid?class_getName(object_getClass(sid)):"nil");
-                                    if(sid){ @try{ id disp=cb(sid,"displayIdentity"); LFF("  identity.displayIdentity: %s\n", disp?class_getName(object_getClass(disp)):"nil");
-                                        if(disp){ id du=cb(disp,"uniqueIdentifier"); LFF("    display uniqueIdentifier: %s\n", du?[[NSString stringWithFormat:@"%@",du] UTF8String]:"nil"); } }@catch(...){} } } @catch(...) {}
-                                @try { id st=cb(scn,"settings"); LFF("scene.settings: %s\n", st?class_getName(object_getClass(st)):"nil");
-                                    if(st){ unsigned int n=0; Method *m=class_copyMethodList(object_getClass(st),&n);
-                                        LF("  -- settings methods (display/frame/bound) --\n");
-                                        for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i])); if(strcasestr(sn,"display")||strcasestr(sn,"frame")||strcasestr(sn,"bound")||strcasestr(sn,"deviceOrientation")) LFF("    -%s\n",sn); }
-                                        if(m)free(m); } } @catch(...) {}
-                                for (const char *sel : (const char*[]){"contextId","_contextId","contextID","layerContext","rootLayer","layer", (const char*)0}) {
-                                    if(!sel) break;
-                                    SEL se=sel_registerName(sel);
-                                    if([scn respondsToSelector:se]){ @try{ id r=((id(*)(id,SEL))objc_msgSend)(scn,se); LFF("scn.%s -> %s\n", sel, r?class_getName(object_getClass(r)):"nil/scalar"); }@catch(...){ LFF("scn.%s -> (threw/scalar)\n", sel);} }
-                                    else LFF("scn.%s: no selector\n", sel);
-                                }
-                                LF("-- our CarPlay rootWindow surface --\n");
-                                if (gCBRRootWindow) {
-                                    for (const char *sel : (const char*[]){"_contextId","contextId","layerContext","_layerContextId", (const char*)0}) {
-                                        if(!sel) break; SEL se=sel_registerName(sel);
-                                        LFF("  rootWindow.%s: %s\n", sel, [gCBRRootWindow respondsToSelector:se]?"YES":"no");
-                                    }
-                                    @try { id rl=cb(gCBRRootWindow,"layer"); LFF("  rootWindow.layer: %s\n", rl?class_getName(object_getClass(rl)):"nil");
-                                        if(rl){ unsigned int n=0; Method *m=class_copyMethodList(object_getClass(rl),&n);
-                                            LF("    -- layer methods (context/host/contents) --\n");
-                                            for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i])); if(strcasestr(sn,"context")||strcasestr(sn,"host")||strcasestr(sn,"contents")) LFF("      -%s\n",sn); }
-                                            if(m)free(m); } } @catch(...) {}
-                                }
-                            } @catch (NSException *e) { LFF("LAYER EXC: %s\n", [[e reason] UTF8String]?:"?"); }
-                            LF("==== END ====\n");
-                            if(lfd>=0) close(lfd);
-                            }
-                            // ---- end v3.19.3 layer probe ----
-                            // ---- v3.19.4: LAYER MANAGER PROBE - the content bridge ----
-                            {
-                            int mfd = open("/var/mobile/CBR_layermgr.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
-                            #define MF(s)  do{ if(mfd>=0) write(mfd,(s),strlen(s)); }while(0)
-                            #define MFF(...) do{ char _b[440]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(mfd>=0)write(mfd,_b,_n);}while(0)
-                            MF("==== LAYER MANAGER + DISPLAY ====\n");
-                            @try {
-                                // 1) scn.display - what is it, and what display does it name?
-                                @try { id disp=cb(scn,"display"); MFF("scn.display: %s\n", disp?class_getName(object_getClass(disp)):"nil");
-                                    if(disp){ unsigned int n=0; Method *m=class_copyMethodList(object_getClass(disp),&n);
-                                        MF("  display methods (id/name/unique/config):\n");
-                                        for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i])); if(strcasestr(sn,"identif")||strcasestr(sn,"name")||strcasestr(sn,"unique")||strcasestr(sn,"config")||strcasestr(sn,"displayID")) MFF("    -%s\n",sn); }
-                                        if(m)free(m);
-                                        @try{ id du=cb(disp,"uniqueIdentifier"); MFF("  display.uniqueIdentifier: %s\n", du?[[NSString stringWithFormat:@"%@",du] UTF8String]:"nil"); }@catch(...){}
-                                        @try{ id dn=cb(disp,"name"); MFF("  display.name: %s\n", dn?[[NSString stringWithFormat:@"%@",dn] UTF8String]:"nil"); }@catch(...){}
-                                    } } @catch(...) {}
-
-                                // 2) scn.layerManager - the content layer owner. Dump its full API.
-                                id lm = cb(scn, "layerManager");
-                                MFF("scn.layerManager: %s\n", lm?class_getName(object_getClass(lm)):"nil");
-                                if (lm) {
-                                    MF("  -- ALL layerManager methods --\n");
-                                    Class lc=object_getClass(lm); int d=0;
-                                    while(lc && strcmp(class_getName(lc),"NSObject")!=0 && d<3){ unsigned int n=0; Method *m=class_copyMethodList(lc,&n);
-                                        for(unsigned int i=0;i<n;i++){ MFF("    -%s\n", sel_getName(method_getName(m[i]))); }
-                                        if(m)free(m); lc=class_getSuperclass(lc); d++; }
-                                    // Try likely layer/context getters.
-                                    for (const char *sel : (const char*[]){"layers","allLayers","rootLayer","layer","contextId","context","layerContext","externalContextId","contextIdentifier", (const char*)0}) {
-                                        if(!sel) break; SEL se=sel_registerName(sel);
-                                        if([lm respondsToSelector:se]){ @try{ id r=((id(*)(id,SEL))objc_msgSend)(lm,se); MFF("  lm.%s -> %s\n", sel, r?class_getName(object_getClass(r)):"nil/scalar"); if(r && [r respondsToSelector:sel_registerName("count")]) MFF("     count=%lu\n",(unsigned long)[r count]); }@catch(...){ MFF("  lm.%s -> (scalar/threw)\n", sel);} }
-                                        else MFF("  lm.%s: no selector\n", sel);
-                                    }
-                                }
-
-                                // 3) Our window's _contextId - what type is it (scalar id vs number)?
-                                @try { SEL ci=sel_registerName("_contextId"); if([gCBRRootWindow respondsToSelector:ci]){ id c=((id(*)(id,SEL))objc_msgSend)(gCBRRootWindow,ci); MFF("rootWindow._contextId -> %s\n", c?class_getName(object_getClass(c)):"nil/scalar"); } } @catch(...) { MF("rootWindow._contextId threw (likely scalar uint32)\n"); }
-                            } @catch (NSException *e) { MFF("LM EXC: %s\n", [[e reason] UTF8String]?:"?"); }
-                            MF("==== END ====\n");
-                            if(mfd>=0) close(mfd);
-                            }
-                            // ---- end v3.19.4 layer manager probe ----
                                 // Dump FBScene settings methods once so we use the right one.
                                 static int fbd=0;
                                 if(!fbd){ fbd=1; int df=open("/var/mobile/CBR_fbscene.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
@@ -1371,23 +1283,8 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                     }
                                 } @catch (NSException *e) { CHF("updateSettingsWithBlock EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                             }
-                            // Dump appVC ivars once to find where the scene view actually lives.
-                            static int avd=0;
-                            if(!avd){ avd=1; int df=open("/var/mobile/CBR_appvc.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-                                Class ac2=object_getClass(bAppVC); int d=0;
-                                while(ac2 && strcmp(class_getName(ac2),"NSObject")!=0 && d<4){ unsigned int n=0; Ivar *iv=class_copyIvarList(ac2,&n);
-                                    char hb[160]; int hn=snprintf(hb,sizeof(hb),"[%s]\n",class_getName(ac2)); if(df>=0)write(df,hb,hn);
-                                    for(unsigned int i=0;i<n;i++){ const char*nm=ivar_getName(iv[i]); if(nm){ char lb[200]; int ln=snprintf(lb,sizeof(lb),"  %s\n",nm); if(df>=0)write(df,lb,ln);} }
-                                    if(iv)free(iv); ac2=class_getSuperclass(ac2); d++; }
-                                if(df>=0)close(df); }
                             // Try to activate the scene onscreen (stronger than settings).
                             /* activate: removed v3.18.8 - traps SpringBoard mid-completion */
-                            // Try several ivar paths for the live scene view.
-                            id sv2 = nil;
-                            @try { id d1=getIvar(bAppVC,"_deviceAppViewController"); if(d1){ sv2=getIvar(d1,"_sceneView"); if(!sv2) sv2=getIvar(d1,"_sceneHostView"); } } @catch(...) {}
-                            @try { if(!sv2) sv2=getIvar(bAppVC,"_sceneView"); } @catch(...) {}
-                            @try { if(!sv2){ id cv=cb(bAppVC,"view"); id subs=cv?cb(cv,"subviews"):nil; if(subs && [subs count]>0){ CHF("appVC.view has %lu subviews\n",(unsigned long)[subs count]); for(id sub in subs){ CHF("  subview: %s\n", class_getName(object_getClass(sub))); } } } } @catch(...) {}
-                            CHF("resolved sceneView (multi-path): %s\n", sv2 ? class_getName(object_getClass(sv2)) : "STILL nil");
                             // Scene is live + foregrounded. Show the window UNCONDITIONALLY. The old show was
                             // gated behind finding sv/sv2, which stays nil every run - so the window never
                             // actually appeared. The scene view is a subview of appVC.view once the scene
@@ -1399,63 +1296,6 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                 ((void(*)(id,SEL,double))objc_msgSend)(gCBRRootWindow, sel_registerName("setAlpha:"), (double)1.0);
                                 CH("window shown + appVC sized (forced)\n");
                             }
-                            if (sv2 && gCBRRootWindow) {
-                                CGRect wf = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("frame"));
-                                ((void(*)(id,SEL,CGRect))objc_msgSend)(sv2, sel_registerName("setFrame:"), CGRectMake(0,0,wf.size.width,wf.size.height));
-                                CH("sized resolved scene view\n");
-                            }
-                            // ---- v3.18.9 DIAG: inspect live scene view hosting state ----
-                            @try {
-                                id dvc9 = getIvar(bAppVC, "_deviceAppViewController");
-                                id sv9 = dvc9 ? getIvar(dvc9, "_sceneView") : nil;
-                                CHF("DIAG sceneView: %s\n", sv9 ? class_getName(object_getClass(sv9)) : "nil");
-                                if (sv9) {
-                                    // Does the scene view know about a live scene / handle?
-                                    @try { id sh = ((id(*)(id,SEL))objc_msgSend)(sv9, sel_registerName("sceneHandle")); CHF("DIAG sv.sceneHandle: %s\n", sh?class_getName(object_getClass(sh)):"nil"); } @catch(...) { CH("DIAG sv.sceneHandle: (no selector)\n"); }
-                                    @try { id sc = ((id(*)(id,SEL))objc_msgSend)(sv9, sel_registerName("scene")); CHF("DIAG sv.scene: %s\n", sc?class_getName(object_getClass(sc)):"nil"); } @catch(...) { CH("DIAG sv.scene: (no selector)\n"); }
-                                    @try { NSInteger dm = ((NSInteger(*)(id,SEL))objc_msgSend)(sv9, sel_registerName("displayMode")); CHF("DIAG sv.displayMode: %ld\n",(long)dm); } @catch(...) { CH("DIAG sv.displayMode: (no selector)\n"); }
-                                    // Frame + hidden + alpha of the scene view.
-                                    @try { CGRect fr=((CGRect(*)(id,SEL))objc_msgSend)(sv9,sel_registerName("frame")); CHF("DIAG sv.frame: %.0f,%.0f %.0fx%.0f\n",fr.origin.x,fr.origin.y,fr.size.width,fr.size.height); } @catch(...) {}
-                                    @try { BOOL h=((BOOL(*)(id,SEL))objc_msgSend)(sv9,sel_registerName("isHidden")); double a=((double(*)(id,SEL))objc_msgSend)(sv9,sel_registerName("alpha")); CHF("DIAG sv.hidden:%d alpha:%.2f\n",h,a); } @catch(...) {}
-                                    // Superview chain - is sv9 actually in the window hierarchy?
-                                    @try { id spv=((id(*)(id,SEL))objc_msgSend)(sv9,sel_registerName("superview")); CHF("DIAG sv.superview: %s\n", spv?class_getName(object_getClass(spv)):"nil (NOT IN HIERARCHY)"); } @catch(...) {}
-                                    // Subview tree of the scene view - is content hosted inside?
-                                    @try { id subs=((id(*)(id,SEL))objc_msgSend)(sv9,sel_registerName("subviews")); CHF("DIAG sv has %lu subviews:\n",(unsigned long)[subs count]); for(id s in subs){ CGRect sf=((CGRect(*)(id,SEL))objc_msgSend)(s,sel_registerName("frame")); CHF("  - %s (%.0fx%.0f)\n",class_getName(object_getClass(s)),sf.size.width,sf.size.height);} } @catch(...) {}
-                                    // Look for a content container ivar and its contents.
-                                    @try { id ccv=getIvar(sv9,"_sceneContentContainerView"); if(!ccv) ccv=getIvar(sv9,"_contentContainerView"); if(ccv){ id csubs=((id(*)(id,SEL))objc_msgSend)(ccv,sel_registerName("subviews")); CHF("DIAG contentContainer %s has %lu subviews\n",class_getName(object_getClass(ccv)),(unsigned long)[csubs count]); for(id s in csubs){ CHF("    * %s\n",class_getName(object_getClass(s)));} } else { CH("DIAG no content container ivar found\n"); } } @catch(...) {}
-                                }
-                            } @catch (NSException *e) { CHF("DIAG EXC: %s\n", [[e reason] UTF8String]?:"?"); }
-                            // ---- end DIAG ----
-                            // ---- v3.19.0: re-drive mode-4 hosting now that FBScene is live ----
-                            // At sync mint time sceneIfExists was nil, so mode-4 attached only the
-                            // background view. Now that FBScene exists, re-apply setDisplayMode:4 on the
-                            // appView to bind the live content layer.
-                            @try {
-                                SEL _avSel = sel_registerName("appView");
-                                id _appView = [bAppVC respondsToSelector:_avSel] ? ((id(*)(id,SEL))objc_msgSend)(bAppVC, _avSel) : nil;
-                                CHF("REDRIVE appView: %s\n", _appView ? class_getName(object_getClass(_appView)) : "nil");
-                                if (_appView) {
-                                    id _animF = nil;
-                                    Class _savc = objc_getClass("SBApplicationSceneView");
-                                    SEL _afSel = sel_registerName("defaultDisplayModeAnimationFactory");
-                                    if (_savc && [_savc respondsToSelector:_afSel]) _animF = ((id(*)(id,SEL))objc_msgSend)(_savc, _afSel);
-                                    // First bounce to 0 then back to 4, to force a rebind against the live scene.
-                                    SEL _sdm = sel_registerName("setDisplayMode:animationFactory:completion:");
-                                    if ([_appView respondsToSelector:_sdm]) {
-                                        @try { ((void(*)(id,SEL,int,id,void*))objc_msgSend)(_appView, _sdm, 0, _animF, NULL); } @catch(...) {}
-                                        ((void(*)(id,SEL,int,id,void*))objc_msgSend)(_appView, _sdm, 4, _animF, NULL);
-                                        CH("REDRIVE setDisplayMode 0->4 applied against live scene\n");
-                                    } else { CH("REDRIVE MISSING setDisplayMode selector\n"); }
-                                }
-                                // Re-dump the content container to confirm a content layer attached this time.
-                                id dvcR = getIvar(bAppVC, "_deviceAppViewController");
-                                id svR = dvcR ? getIvar(dvcR, "_sceneView") : nil;
-                                if (svR) {
-                                    id ccv=getIvar(svR,"_sceneContentContainerView"); if(!ccv) ccv=getIvar(svR,"_contentContainerView");
-                                    if(ccv){ id csubs=((id(*)(id,SEL))objc_msgSend)(ccv,sel_registerName("subviews")); CHF("REDRIVE contentContainer now has %lu subviews:\n",(unsigned long)[csubs count]); for(id s in csubs){ CHF("    * %s\n",class_getName(object_getClass(s)));} }
-                                }
-                            } @catch (NSException *e) { CHF("REDRIVE EXC: %s\n", [[e reason] UTF8String]?:"?"); }
-                            // ---- end v3.19.0 re-drive ----
                         } @catch (NSException *e) { CHF("completion EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                         CH("---- end completion ----\n");
                         if(cfd>=0) close(cfd);
@@ -2145,7 +1985,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.19.5 init - lifetime fix (no __block captures, global-held)\n";
+        const char msg[] = "[CBR] v3.19.6 init - stable: probes removed, minimal completion\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
