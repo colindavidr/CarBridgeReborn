@@ -612,6 +612,17 @@ static id cbrMakePolicy(id appInfo) {
     return pol;
 }
 
+// v3.20.2: STRONG-hold every declaration we synthesize for the entire
+// CarPlayApp process lifetime. object_setIvar into _carPlayDeclaration does
+// NOT reliably take ownership of this ivar, so under ARC our local decl was
+// freed at loop-scope end and the ivar dangled; CarPlay's async analytics
+// (_DBAnalyticsAppInfo initWithBundleIdentifier:appDeclaration:policyEvaluator:)
+// then retained a dead pointer and crash-looped the process. Keeping our own
+// strong reference makes the object immortal so every later read is valid.
+static NSMutableArray *gCBRDeclarations = nil;
+// Associated-object key: also pins each declaration to its appInfo's lifetime.
+static const void *kCBRDeclKey = &kCBRDeclKey;
+
 static void addCarplayDeclarations(id lib) {
     if (!lib) { CBLog("[CBR] addDeclarations: lib nil"); return; }
     cbrSnapshotNativeSet(lib);   // capture native-CarPlay apps BEFORE injecting ours
@@ -656,12 +667,39 @@ static void addCarplayDeclarations(id lib) {
             if (!CBIsEnabled(bid_cstr)) continue;
 
             id decl = [[declClass alloc] init];
-            cb1b(decl, "setSupportsTemplates:", NO);   // NO = 0
-            cb1b(decl, "setSupportsMaps:", NO);        // YES = 1
+            // v3.20.2: populate ALL 21 ivars so analytics can never dereference
+            // an uninitialized field. cb1b/cb1 no-op safely if a setter is absent.
+            // 17 BOOL support flags — all NO for a bridged (non-native) app:
+            cb1b(decl, "setSystemApp:", NO);
+            cb1b(decl, "setRequiresGeoSupport:", NO);
+            cb1b(decl, "setLaunchUsingSiri:", NO);
+            cb1b(decl, "setLaunchNotificationsUsingSiri:", NO);
+            cb1b(decl, "setSupportsPlayableContent:", NO);
+            cb1b(decl, "setSupportsMessaging:", NO);
+            cb1b(decl, "setSupportsCalling:", NO);
+            cb1b(decl, "setSupportsMaps:", NO);          // NO = normal icon path
+            cb1b(decl, "setSupportsAudio:", NO);
+            cb1b(decl, "setSupportsCommunication:", NO);
+            cb1b(decl, "setSupportsTemplates:", NO);     // NO = not a template app
+            cb1b(decl, "setSupportsCharging:", NO);
+            cb1b(decl, "setSupportsParking:", NO);
+            cb1b(decl, "setSupportsPublicSafety:", NO);
+            cb1b(decl, "setSupportsQuickOrdering:", NO);
+            cb1b(decl, "setSupportsFueling:", NO);
+            cb1b(decl, "setSupportsDrivingTask:", NO);
+            // 3 object fields — never leave nil for the analytics reader:
             cb1(decl, "setBundleIdentifier:", bidObj);
             id bundleURL = cb(appInfo, "bundleURL");
             id declPath = bundleURL ? cb(bundleURL, "path") : nil;
-            if (declPath) cb1(decl, "setBundlePath:", declPath);
+            cb1(decl, "setBundlePath:", declPath ?: @"");
+            cb1(decl, "setAutoMakerProtocols:", [NSSet set]);  // was left nil before
+
+            // v3.20.2 CRITICAL: take ownership BEFORE the ivar store so the
+            // object cannot be freed when this scope ends (the crash-loop fix).
+            if (!gCBRDeclarations) gCBRDeclarations = [[NSMutableArray alloc] init];
+            [gCBRDeclarations addObject:decl];
+            objc_setAssociatedObject(appInfo, kCBRDeclKey, decl,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
             BOOL set = setIvar(appInfo, "_carPlayDeclaration", decl);
             if (!set) {
@@ -2114,7 +2152,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.20.1 init - ENABLE in-process car-scene window (CarPlayApp side)\n";
+        const char msg[] = "[CBR] v3.20.2 init - declaration lifetime fix (retain + full-populate)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
