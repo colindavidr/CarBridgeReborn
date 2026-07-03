@@ -1861,6 +1861,55 @@ static void cbrSBReassignToCarPlay(const char *bid_cstr) {
     if(fd>=0) close(fd);
 }
 
+// v3.20.9: probe the transition-context API on the live scene (display moves are
+// transitions, not settings pokes). Surgical: find handle, CFRetain, read selectors, release.
+static void cbrSBProbeTransition(const char *bid_cstr) {
+    int fd = open("/var/mobile/CBR_txn.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    #define TP(s)  do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
+    #define TPF(...) do{ char _b[440]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
+    TP("==== TRANSITION API PROBE ====\n");
+    if(!bid_cstr||!bid_cstr[0]){ TP("no bid\n"); if(fd>=0)close(fd); return; }
+    @try {
+        NSString *bid=[NSString stringWithUTF8String:bid_cstr];
+        Class coordCls=objc_getClass("SBSceneManagerCoordinator");
+        id coord=coordCls?((id(*)(id,SEL))objc_msgSend)(coordCls,sel_registerName("sharedInstance")):nil;
+        id mainScreen=((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("mainScreen"));
+        id mdi=cb(mainScreen,"displayIdentity");
+        id mgr=nil; if(coord&&mdi){ SEL s=sel_registerName("sceneManagerForDisplayIdentity:"); if([coord respondsToSelector:s]) mgr=((id(*)(id,SEL,id))objc_msgSend)(coord,s,mdi); }
+        if(!mgr){ TP("no mgr\n"); if(fd>=0)close(fd); return; }
+        id targetHandle=nil;
+        id extH=[mgr respondsToSelector:sel_registerName("externalApplicationSceneHandles")]?((id(*)(id,SEL))objc_msgSend)(mgr,sel_registerName("externalApplicationSceneHandles")):nil;
+        if(extH) for(id h in extH){ id sidObj=[h respondsToSelector:sel_registerName("sceneIdentifier")]?((id(*)(id,SEL))objc_msgSend)(h,sel_registerName("sceneIdentifier")):nil; NSString*sid=sidObj?[NSString stringWithFormat:@"%@",sidObj]:@""; if([sid containsString:bid]){targetHandle=h;break;} }
+        if(!targetHandle){ TP("no target handle\n"); if(fd>=0)close(fd); return; }
+        CFRetain((__bridge CFTypeRef)targetHandle);
+        @try {
+            id scn=[targetHandle respondsToSelector:sel_registerName("sceneIfExists")]?((id(*)(id,SEL))objc_msgSend)(targetHandle,sel_registerName("sceneIfExists")):nil;
+            TPF("scene: %s\n", scn?class_getName(object_getClass(scn)):"nil");
+            if(scn){
+                // ALL transition/update/activate/context methods on the scene.
+                TP("-- scene transition/activate/update methods --\n");
+                Class sc=object_getClass(scn); int d=0;
+                while(sc&&strcmp(class_getName(sc),"NSObject")!=0&&d<3){ unsigned int n=0; Method*m=class_copyMethodList(sc,&n);
+                    for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i])); if(strcasestr(sn,"transition")||strcasestr(sn,"activate")||strcasestr(sn,"updateSettings")) TPF("   -%s\n",sn); }
+                    if(m)free(m); sc=class_getSuperclass(sc); d++; }
+                // The settings object: what identifies its display, and is there a transition-context class?
+                id st=[scn respondsToSelector:sel_registerName("settings")]?((id(*)(id,SEL))objc_msgSend)(scn,sel_registerName("settings")):nil;
+                TPF("settings: %s\n", st?class_getName(object_getClass(st)):"nil");
+                if(st){ Class stc=object_getClass(st); unsigned int n=0; Method*m=class_copyMethodList(stc,&n);
+                    TP("  settings display/frame getters+setters:\n");
+                    for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i])); if(strcasestr(sn,"display")||strcasestr(sn,"frame")||strcasestr(sn,"bound")) TPF("    -%s\n",sn); }
+                    if(m)free(m); }
+                // Does a transition-context factory class exist?
+                for(const char*cn:(const char*[]){"FBSSceneTransitionContext","UIApplicationSceneTransitionContext","FBSceneTransitionContext", NULL}){
+                    if(!cn)break; Class c=objc_getClass(cn); TPF("class %s: %s\n", cn, c?"EXISTS":"nil"); }
+            }
+        } @catch(NSException*e){ TPF("inner EXC: %s\n",[[e reason] UTF8String]?:"?"); }
+        CFRelease((__bridge CFTypeRef)targetHandle);
+    } @catch(NSException*e){ TPF("PROBE EXC: %s\n",[[e reason] UTF8String]?:"?"); }
+    TP("==== END ====\n");
+    if(fd>=0) close(fd);
+}
+
 static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
                                 CFStringRef name, const void *object,
                                 CFDictionaryRef userInfo) {
@@ -1879,6 +1928,7 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     id _cbrHandle = cbrSBCreateSceneHandle(bid);
     cbrSBHostScene(bid, _cbrHandle);
     cbrSBReassignToCarPlay(bid);
+    cbrSBProbeTransition(bid);
 }
 static void cbrSBRegisterListener(void) {
     cbrSBLog("[CBR-SB] v3.14.0 listener registering in SpringBoard");
