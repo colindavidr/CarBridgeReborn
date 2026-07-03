@@ -1087,65 +1087,93 @@ static void cbrSBHostDismiss(void) {
         if(fd>=0){const char*m="[host] dismissed\n";write(fd,m,strlen(m));close(fd);}
     } @catch(...) {}
 }
-// v3.19.1: REFERENCE PROBE - dump a live, natively-hosted app scene view's content
-// container so we can diff against our empty CarPlay host. Walks the main-display
-// scene layout controller for a running app's SBApplicationSceneView.
+// v3.19.2: REFERENCE PROBE v2 - three routes to a live app scene view.
 static void cbrDumpViewTree(id v, int fd, int depth, int maxdepth) {
     if (!v || depth > maxdepth) return;
     @try {
         const char *cn = class_getName(object_getClass(v));
         CGRect fr = ((CGRect(*)(id,SEL))objc_msgSend)(v, sel_registerName("frame"));
-        char pad[32]; int pn = depth*2 < 30 ? depth*2 : 30; for(int i=0;i<pn;i++) pad[i]=' '; pad[pn]='\0';
-        char lb[300]; int ln = snprintf(lb, sizeof(lb), "%s- %s (%.0fx%.0f)\n", pad, cn, fr.size.width, fr.size.height);
+        char pad[40]; int pn = depth*2 < 38 ? depth*2 : 38; for(int i=0;i<pn;i++) pad[i]=' '; pad[pn]='\0';
+        char lb[320]; int ln = snprintf(lb, sizeof(lb), "%s- %s (%.0fx%.0f)\n", pad, cn, fr.size.width, fr.size.height);
         if (fd>=0) write(fd, lb, ln);
         id subs = ((id(*)(id,SEL))objc_msgSend)(v, sel_registerName("subviews"));
         if (subs) for (id s in subs) cbrDumpViewTree(s, fd, depth+1, maxdepth);
     } @catch(...) {}
 }
+// If a view (or any descendant) is an SBApplicationSceneView, dump its content container.
+static int cbrFindAndDumpSceneView(id v, int fd, int depth) {
+    if (!v || depth > 8) return 0;
+    int found = 0;
+    @try {
+        const char *cn = class_getName(object_getClass(v));
+        if (strstr(cn, "ApplicationSceneView") || strstr(cn, "DeviceApplicationSceneView")) {
+            char hb[200]; int hn=snprintf(hb,sizeof(hb),"\n>>> LIVE sceneView in window tree: %s\n", cn); if(fd>=0)write(fd,hb,hn);
+            @try { NSInteger dm=((NSInteger(*)(id,SEL))objc_msgSend)(v,sel_registerName("displayMode")); char b[80];int n=snprintf(b,sizeof(b),"    displayMode: %ld\n",(long)dm);if(fd>=0)write(fd,b,n);} @catch(...) {}
+            id ccv = getIvar(v,"_sceneContentContainerView"); if(!ccv) ccv=getIvar(v,"_contentContainerView");
+            char cb2[160]; int cn2=snprintf(cb2,sizeof(cb2),"    contentContainer: %s\n", ccv?class_getName(object_getClass(ccv)):"nil"); if(fd>=0)write(fd,cb2,cn2);
+            if (ccv) { id cs=((id(*)(id,SEL))objc_msgSend)(ccv,sel_registerName("subviews")); char sb[80];int sn=snprintf(sb,sizeof(sb),"    container has %lu subviews:\n",cs?(unsigned long)[cs count]:0);if(fd>=0)write(fd,sb,sn);
+                if(cs) for(id s in cs){ char eb[160];int en=snprintf(eb,sizeof(eb),"       * %s\n",class_getName(object_getClass(s)));if(fd>=0)write(fd,eb,en);} }
+            if(fd>=0)write(fd,"    FULL TREE:\n",15);
+            cbrDumpViewTree(v, fd, 2, 6);
+            found = 1;
+        }
+        id subs = ((id(*)(id,SEL))objc_msgSend)(v, sel_registerName("subviews"));
+        if (subs) for (id s in subs) { found += cbrFindAndDumpSceneView(s, fd, depth+1); if (found >= 2) break; }
+    } @catch(...) {}
+    return found;
+}
 static void cbrReferenceProbe(void) {
     int fd = open("/var/mobile/CBR_reference.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
     #define RF(s)  do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
     #define RFF(...) do{ char _b[400]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
-    RF("==== REFERENCE: live main-display app scene view ====\n");
+
+    // ROUTE 1: enumerate real class names for layout/switcher controllers.
+    RF("==== ROUTE 1: class name discovery ====\n");
     @try {
-        Class layoutCls = objc_getClass("SBMainDisplaySceneLayoutViewController");
-        SEL shared = sel_registerName("mainDisplaySceneLayoutViewController");
-        id layoutVC = (layoutCls && [layoutCls respondsToSelector:shared]) ? ((id(*)(id,SEL))objc_msgSend)(layoutCls, shared) : nil;
-        RFF("layoutVC: %s\n", layoutVC ? class_getName(object_getClass(layoutVC)) : "nil");
-        if (!layoutVC) { RF("no layout controller - open an app on the main screen first\n"); RF("==== END ====\n"); if(fd>=0)close(fd); return; }
-        id appVCs = cb(layoutVC, "appViewControllers");
-        RFF("appViewControllers: %lu\n", appVCs ? (unsigned long)[appVCs count] : 0);
-        int dumped = 0;
-        if (appVCs) for (id alc in appVCs) {
+        unsigned int n=0; Class *all=objc_copyClassList(&n);
+        for(unsigned int i=0;i<n;i++){ const char*cn=class_getName(all[i]);
+            if(strncmp(cn,"SB",2)==0 && (strstr(cn,"Layout")||strstr(cn,"Switcher")||strstr(cn,"SceneManager")) && (strstr(cn,"ViewController")||strstr(cn,"Manager")))
+                RFF("  %s\n", cn); }
+        if(all) free(all);
+    } @catch(...) {}
+
+    // ROUTE 2: frontmost app scene via scene manager.
+    RF("\n==== ROUTE 2: frontmost scene via SBSceneManager ====\n");
+    @try {
+        Class smCls = objc_getClass("SBSceneManagerCoordinator"); id sm=nil;
+        if(smCls && [smCls respondsToSelector:sel_registerName("sharedInstance")]) sm=((id(*)(id,SEL))objc_msgSend)(smCls,sel_registerName("sharedInstance"));
+        RFF("  SBSceneManagerCoordinator: %s\n", sm?class_getName(object_getClass(sm)):"nil");
+        // Also try main display scene manager directly.
+        Class mdsm = objc_getClass("SBMainDisplaySceneManager");
+        RFF("  SBMainDisplaySceneManager class: %s\n", mdsm?"EXISTS":"nil");
+    } @catch(...) {}
+
+    // ROUTE 3: brute-force walk all main-screen windows for a live scene view.
+    RF("\n==== ROUTE 3: walk main-screen windows for live SBApplicationSceneView ====\n");
+    @try {
+        Class scr = objc_getClass("UIScreen");
+        id mainScreen = ((id(*)(id,SEL))objc_msgSend)(scr, sel_registerName("mainScreen"));
+        // Get windows via UIApplication.
+        Class appCls = objc_getClass("UIApplication");
+        id app = ((id(*)(id,SEL))objc_msgSend)(appCls, sel_registerName("sharedApplication"));
+        id windows = app ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("windows")) : nil;
+        RFF("  windows: %lu\n", windows?(unsigned long)[windows count]:0);
+        int total = 0;
+        if (windows) for (id w in windows) {
             @try {
-                id appSceneVC = cb(alc, "_applicationSceneViewController");
-                id sv = appSceneVC ? getIvar(appSceneVC, "_sceneView") : nil;
-                if (!sv) continue;
-                const char *svcn = class_getName(object_getClass(sv));
-                // Only dump one that is actually a live app scene view.
-                RFF("\n-- candidate sceneView: %s --\n", svcn);
-                @try { id sh = cb(sv, "sceneHandle"); RFF("   sceneHandle: %s\n", sh?class_getName(object_getClass(sh)):"nil"); } @catch(...) {}
-                @try { NSInteger dm=((NSInteger(*)(id,SEL))objc_msgSend)(sv,sel_registerName("displayMode")); RFF("   displayMode: %ld\n",(long)dm); } @catch(...) {}
-                // Content container ivar (try both names we've seen).
-                id ccv = getIvar(sv, "_sceneContentContainerView"); if(!ccv) ccv = getIvar(sv, "_contentContainerView");
-                RFF("   contentContainer: %s\n", ccv?class_getName(object_getClass(ccv)):"nil");
-                if (ccv) {
-                    id csubs = ((id(*)(id,SEL))objc_msgSend)(ccv, sel_registerName("subviews"));
-                    RFF("   contentContainer has %lu subviews:\n", csubs?(unsigned long)[csubs count]:0);
-                    if (csubs) for (id s in csubs) RFF("      * %s\n", class_getName(object_getClass(s)));
-                }
-                // Full subview tree of the live scene view (this is the gold - shows the content host).
-                RF("   FULL TREE:\n");
-                cbrDumpViewTree(sv, fd, 2, 5);
-                dumped++;
-                if (dumped >= 2) break;   // two live examples is plenty
+                id ws = ((id(*)(id,SEL))objc_msgSend)(w, sel_registerName("screen"));
+                if (ws != mainScreen) continue;   // main screen only
+                total += cbrFindAndDumpSceneView(w, fd, 0);
+                if (total >= 2) break;
             } @catch(...) {}
         }
-        if (!dumped) RF("no live app scene views found - make sure an app is open/recent on the main screen\n");
-    } @catch (NSException *e) { RFF("REF EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+        if (!total) RF("  no live SBApplicationSceneView found in any main-screen window\n");
+    } @catch (NSException *e) { RFF("  ROUTE3 EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+
     RF("==== END ====\n");
     if(fd>=0) close(fd);
 }
+
 
 static void cbrSBHostScene(const char *bid_cstr, id handle) {
     int fd = open("/var/mobile/CBR_sb_host.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
@@ -2025,7 +2053,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.19.1 init - reference probe (live app scene view content container)\n";
+        const char msg[] = "[CBR] v3.19.2 init - reference probe v2 (3 routes to live scene view)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
