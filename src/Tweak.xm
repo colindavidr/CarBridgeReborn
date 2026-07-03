@@ -1301,6 +1301,47 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                             if(lfd>=0) close(lfd);
                             }
                             // ---- end v3.19.3 layer probe ----
+                            // ---- v3.19.4: LAYER MANAGER PROBE - the content bridge ----
+                            {
+                            int mfd = open("/var/mobile/CBR_layermgr.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+                            #define MF(s)  do{ if(mfd>=0) write(mfd,(s),strlen(s)); }while(0)
+                            #define MFF(...) do{ char _b[440]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(mfd>=0)write(mfd,_b,_n);}while(0)
+                            MF("==== LAYER MANAGER + DISPLAY ====\n");
+                            @try {
+                                // 1) scn.display - what is it, and what display does it name?
+                                @try { id disp=cb(scn,"display"); MFF("scn.display: %s\n", disp?class_getName(object_getClass(disp)):"nil");
+                                    if(disp){ unsigned int n=0; Method *m=class_copyMethodList(object_getClass(disp),&n);
+                                        MF("  display methods (id/name/unique/config):\n");
+                                        for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i])); if(strcasestr(sn,"identif")||strcasestr(sn,"name")||strcasestr(sn,"unique")||strcasestr(sn,"config")||strcasestr(sn,"displayID")) MFF("    -%s\n",sn); }
+                                        if(m)free(m);
+                                        @try{ id du=cb(disp,"uniqueIdentifier"); MFF("  display.uniqueIdentifier: %s\n", du?[[NSString stringWithFormat:@"%@",du] UTF8String]:"nil"); }@catch(...){}
+                                        @try{ id dn=cb(disp,"name"); MFF("  display.name: %s\n", dn?[[NSString stringWithFormat:@"%@",dn] UTF8String]:"nil"); }@catch(...){}
+                                    } } @catch(...) {}
+
+                                // 2) scn.layerManager - the content layer owner. Dump its full API.
+                                id lm = cb(scn, "layerManager");
+                                MFF("scn.layerManager: %s\n", lm?class_getName(object_getClass(lm)):"nil");
+                                if (lm) {
+                                    MF("  -- ALL layerManager methods --\n");
+                                    Class lc=object_getClass(lm); int d=0;
+                                    while(lc && strcmp(class_getName(lc),"NSObject")!=0 && d<3){ unsigned int n=0; Method *m=class_copyMethodList(lc,&n);
+                                        for(unsigned int i=0;i<n;i++){ MFF("    -%s\n", sel_getName(method_getName(m[i]))); }
+                                        if(m)free(m); lc=class_getSuperclass(lc); d++; }
+                                    // Try likely layer/context getters.
+                                    for (const char *sel : (const char*[]){"layers","allLayers","rootLayer","layer","contextId","context","layerContext","externalContextId","contextIdentifier", (const char*)0}) {
+                                        if(!sel) break; SEL se=sel_registerName(sel);
+                                        if([lm respondsToSelector:se]){ @try{ id r=((id(*)(id,SEL))objc_msgSend)(lm,se); MFF("  lm.%s -> %s\n", sel, r?class_getName(object_getClass(r)):"nil/scalar"); if(r && [r respondsToSelector:sel_registerName("count")]) MFF("     count=%lu\n",(unsigned long)[r count]); }@catch(...){ MFF("  lm.%s -> (scalar/threw)\n", sel);} }
+                                        else MFF("  lm.%s: no selector\n", sel);
+                                    }
+                                }
+
+                                // 3) Our window's _contextId - what type is it (scalar id vs number)?
+                                @try { SEL ci=sel_registerName("_contextId"); if([gCBRRootWindow respondsToSelector:ci]){ id c=((id(*)(id,SEL))objc_msgSend)(gCBRRootWindow,ci); MFF("rootWindow._contextId -> %s\n", c?class_getName(object_getClass(c)):"nil/scalar"); } } @catch(...) { MF("rootWindow._contextId threw (likely scalar uint32)\n"); }
+                            } @catch (NSException *e) { MFF("LM EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+                            MF("==== END ====\n");
+                            if(mfd>=0) close(mfd);
+                            }
+                            // ---- end v3.19.4 layer manager probe ----
                                 // Dump FBScene settings methods once so we use the right one.
                                 static int fbd=0;
                                 if(!fbd){ fbd=1; int df=open("/var/mobile/CBR_fbscene.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
@@ -2100,7 +2141,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.19.3 init - scene layer/display binding probe\n";
+        const char msg[] = "[CBR] v3.19.4 init - layer manager + display probe\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
