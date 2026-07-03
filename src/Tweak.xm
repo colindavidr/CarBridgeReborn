@@ -1551,11 +1551,12 @@ static void cbrSBProbeSceneHandle(const char *bid_cstr) {
         // 3) Main-display scene manager: try the coordinator's per-display lookup,
         //    or fall back to a shared SBMainDisplaySceneManager if exposed.
         id mgr = nil;
+        id dispIdentity = nil;  // v3.19.9: hoisted - needed by request build below
         @try {
             // Try to get main display identity from UIScreen.mainScreen.
             Class UIScreenCls = objc_getClass("UIScreen");
             id mainScreen = ((id(*)(id,SEL))objc_msgSend)(UIScreenCls, sel_registerName("mainScreen"));
-            id dispIdentity = cb(mainScreen, "displayIdentity");
+            dispIdentity = cb(mainScreen, "displayIdentity");
             HPF("main displayIdentity: %s\n", dispIdentity ? class_getName(object_getClass(dispIdentity)) : "nil");
             if (coord && dispIdentity) {
                 SEL sMgr = sel_registerName("sceneManagerForDisplayIdentity:");
@@ -1567,30 +1568,37 @@ static void cbrSBProbeSceneHandle(const char *bid_cstr) {
 
         if (!mgr) { HP("no scene manager -> cannot probe handle\n"); HP("==== END ====\n"); if(fd>=0)close(fd); return; }
 
-        // 4) sceneIdentityForApplication: (needs the SBApplication object).
+        // 4) v3.19.9 STEP 1: create the identity as a PRIMARY launchable scene
+        //    (was sceneIdentityForApplication: non-creating; that yields a hollow handle
+        //    with no client. Mirror the probe-path creating sequence at 1013-1045.)
         id identity = nil;
         @try {
-            SEL sid = sel_registerName("sceneIdentityForApplication:");
-            if (sbApp && [mgr respondsToSelector:sid])
-                identity = ((id(*)(id,SEL,id))objc_msgSend)(mgr, sid, sbApp);
-        } @catch (NSException *e) { HPF("sceneIdentityForApplication EXC: %s\n", [[e reason] UTF8String]?:"?"); }
-        HPF("sceneIdentity: %s\n", identity ? class_getName(object_getClass(identity)) : "nil");
+            SEL createSel = sel_registerName("sceneIdentityForApplication:createPrimaryIfRequired:sceneSessionRole:");
+            if (sbApp && [mgr respondsToSelector:createSel])
+                identity = ((id(*)(id,SEL,id,BOOL,NSInteger))objc_msgSend)(mgr, createSel, sbApp, YES, (NSInteger)0);
+        } @catch (NSException *e) { HPF("HOST createIdentity EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+        HPF("HOST: created sceneIdentity (primary): %s\n", identity ? class_getName(object_getClass(identity)) : "nil");
+        if (!identity) { HP("HOST: no primary identity -> abort\n"); HP("==== END ====\n"); if(fd>=0)close(fd); return; }
 
-        // 5) existingSceneHandleForSceneIdentity: (non-creating - safest).
+        // 5) Build the launch request (app + identity + MAIN display identity).
+        id request = nil;
+        @try {
+            Class reqCls = objc_getClass("SBApplicationSceneHandleRequest");
+            SEL fac = sel_registerName("defaultRequestForApplication:sceneIdentity:displayIdentity:");
+            if (reqCls && [reqCls respondsToSelector:fac])
+                request = ((id(*)(id,SEL,id,id,id))objc_msgSend)(reqCls, fac, sbApp, identity, dispIdentity);
+        } @catch (NSException *e) { HPF("HOST buildRequest EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+        HPF("HOST: request: %s\n", request ? class_getName(object_getClass(request)) : "nil");
+        if (!request) { HP("HOST: no request -> abort\n"); HP("==== END ====\n"); if(fd>=0)close(fd); return; }
+
+        // 6) CREATE the handle (this is the real creating call - may launch the scene).
         id handle = nil;
         @try {
-            SEL esh = sel_registerName("existingSceneHandleForSceneIdentity:");
-            if (identity && [mgr respondsToSelector:esh])
-                handle = ((id(*)(id,SEL,id))objc_msgSend)(mgr, esh, identity);
-        } @catch (NSException *e) { HPF("existingSceneHandle EXC: %s\n", [[e reason] UTF8String]?:"?"); }
-        HPF("existing handle: %s\n", handle ? class_getName(object_getClass(handle)) : "nil");
-
-        // 6) Report whether the creating API exists (do NOT call it yet - creating
-        //    may launch the app scene; we just confirm it's reachable).
-        SEL fc = sel_registerName("fetchOrCreateApplicationSceneHandleForRequest:");
-        HPF("fetchOrCreate available on mgr: %s\n", [mgr respondsToSelector:fc] ? "YES" : "no");
-        SEL scForApp = sel_registerName("sceneIdentityForApplication:createPrimaryIfRequired:sceneSessionRole:");
-        HPF("createPrimary variant available: %s\n", [mgr respondsToSelector:scForApp] ? "YES" : "no");
+            SEL fc = sel_registerName("fetchOrCreateApplicationSceneHandleForRequest:");
+            if ([mgr respondsToSelector:fc])
+                handle = ((id(*)(id,SEL,id))objc_msgSend)(mgr, fc, request);
+        } @catch (NSException *e) { HPF("HOST fetchOrCreate EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+        HPF("HOST: CREATED handle: %s\n", handle ? class_getName(object_getClass(handle)) : "nil");
 
     } @catch (NSException *e) {
         HPF("PROBE EXC: %s\n", [[e reason] UTF8String] ?: "?");
@@ -2062,7 +2070,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.19.8 init - displayMode readback + client/process + subtree walk\n";
+        const char msg[] = "[CBR] v3.19.9 init - STEP1 create primary identity + real handle\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
