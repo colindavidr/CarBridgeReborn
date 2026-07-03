@@ -1079,6 +1079,7 @@ static id cbrGetCarplayCADisplay(void) {
 static id gCBRRootWindow = nil;
 static id gCBRAppVC = nil;
 static id gCBRActiveTxns = nil;
+static id gCBRTxn = nil;         // v3.19.5: strong-hold txn for safe completion
 static void cbrSBHostDismiss(void) {
     @try {
         if (gCBRRootWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRRootWindow, sel_registerName("setHidden:"), YES); }
@@ -1238,17 +1239,20 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                     id activeTxns = getIvar(appVC, "_activeTransitions");
                     HHF("_activeTransitions: %s\n", activeTxns ? class_getName(object_getClass(activeTxns)) : "nil");
                     gCBRActiveTxns = activeTxns;
-                    __block id bTxn = txn;
-                    __block id bAppVC = appVC;
-                    __block id bHandle = handle;
+                    // v3.19.5: NO __block object captures (they dangle -> objc_retain segfault
+                    // in BSTransaction _noteCompleted). Hold strongly in globals set before begin,
+                    // read them back inside the block, null-check everything.
+                    gCBRTxn = txn; gCBRAppVC = appVC; gCBRSceneHandle = handle;
                     void (^completion)(int) = ^(int arg1) {
+                        id bAppVC = gCBRAppVC; id bHandle = gCBRSceneHandle; id bTxn = gCBRTxn;
+                        if (!bAppVC || !bHandle) { int _cf=open("/var/mobile/CBR_sb_host.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_cf>=0){const char*m="completion: globals nil, bailing safely\n";write(_cf,m,strlen(m));close(_cf);} return; }
                         int cfd = open("/var/mobile/CBR_sb_host.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
                         #define CH(s) do{ if(cfd>=0) write(cfd,(s),strlen(s)); }while(0)
                         #define CHF(...) do{ char _b[400]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(cfd>=0)write(cfd,_b,_n);}while(0)
                         CH("---- txn COMPLETION fired ----\n");
                         @try {
                             id at = getIvar(bAppVC, "_activeTransitions");
-                            if (at) ((void(*)(id,SEL,id))objc_msgSend)(at, sel_registerName("removeObject:"), bTxn);
+                            if (at && bTxn) ((void(*)(id,SEL,id))objc_msgSend)(at, sel_registerName("removeObject:"), bTxn);
                         } @catch(...) {}
                         @try {
                             id scn = ((id(*)(id,SEL))objc_msgSend)(bHandle, sel_registerName("sceneIfExists"));
@@ -2141,7 +2145,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.19.4 init - layer manager + display probe\n";
+        const char msg[] = "[CBR] v3.19.5 init - lifetime fix (no __block captures, global-held)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
