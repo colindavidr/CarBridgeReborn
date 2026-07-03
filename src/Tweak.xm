@@ -2417,8 +2417,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.20.11 init - grafting host only (PATH-A reverted, load runaway fix)
-";
+        const char msg[] = "[CBR] v3.20.11 init - grafting host only (PATH-A reverted, load runaway fix)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
