@@ -1201,7 +1201,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                     if(iv)free(iv); ac2=class_getSuperclass(ac2); d++; }
                                 if(df>=0)close(df); }
                             // Try to activate the scene onscreen (stronger than settings).
-                            @try { SEL av=sel_registerName("activate:"); if([scn respondsToSelector:av]){ ((void(*)(id,SEL,id))objc_msgSend)(scn,av,nil); CH("scene activate: called\n"); } } @catch(...) {}
+                            /* activate: removed v3.18.8 - traps SpringBoard mid-completion */
                             // Try several ivar paths for the live scene view.
                             id sv2 = nil;
                             @try { id d1=getIvar(bAppVC,"_deviceAppViewController"); if(d1){ sv2=getIvar(d1,"_sceneView"); if(!sv2) sv2=getIvar(d1,"_sceneHostView"); } } @catch(...) {}
@@ -1233,6 +1233,43 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                     @try { if (activeTxns) ((void(*)(id,SEL,id))objc_msgSend)(activeTxns, sel_registerName("addObject:"), txn); HH("added to _activeTransitions\n"); } @catch(...) {}
                     @try { ((void(*)(id,SEL))objc_msgSend)(txn, sel_registerName("begin")); HH("txn begin called\n"); }
                     @catch (NSException *e) { HHF("txn begin EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+    /* ---- v3.18.8: render the carplay-cast way: _createSceneViewController + appView setDisplayMode:4 ---- */
+    @try {
+        @try { [appVC setValue:@2 forKey:@"_currentMode"]; HH("set _currentMode=2\n"); } @catch(...) {}
+        @try { id _as = getIvar(appVC, "_activationSettings"); if(_as){ ((void(*)(id,SEL))objc_msgSend)(_as, sel_registerName("clearActivationSettings")); HH("cleared activationSettings\n"); } } @catch(...) {}
+        @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(appVC, sel_registerName("setIgnoresOcclusions:"), NO); } @catch(...) {}
+
+        SEL _csvc = sel_registerName("_createSceneViewController");
+        if ([appVC respondsToSelector:_csvc]) { ((void(*)(id,SEL))objc_msgSend)(appVC, _csvc); HH("_createSceneViewController called\n"); }
+        else { HH("MISSING _createSceneViewController\n"); }
+
+        id _animF = nil;
+        Class _savc = objc_getClass("SBApplicationSceneView");
+        SEL _afSel = sel_registerName("defaultDisplayModeAnimationFactory");
+        if (_savc && [_savc respondsToSelector:_afSel]) _animF = ((id(*)(id,SEL))objc_msgSend)(_savc, _afSel);
+        HHF("animationFactory: %s\n", _animF ? class_getName(object_getClass(_animF)) : "nil");
+
+        SEL _avSel = sel_registerName("appView");
+        id _appView = [appVC respondsToSelector:_avSel] ? ((id(*)(id,SEL))objc_msgSend)(appVC, _avSel) : nil;
+        HHF("appView: %s\n", _appView ? class_getName(object_getClass(_appView)) : "nil (MISSING appView)");
+
+        if (_appView) {
+            SEL _sdm = sel_registerName("setDisplayMode:animationFactory:completion:");
+            if ([_appView respondsToSelector:_sdm]) { ((void(*)(id,SEL,int,id,void*))objc_msgSend)(_appView, _sdm, 4, _animF, NULL); HH("appView setDisplayMode:4 applied (LIVE CONTENT)\n"); }
+            else { HH("MISSING setDisplayMode:animationFactory:completion:\n"); }
+        }
+
+        @try { id _v = ((id(*)(id,SEL))objc_msgSend)(appVC, sel_registerName("view")); if(_v){ Class _uic=objc_getClass("UIColor"); id _clr=((id(*)(id,SEL))objc_msgSend)(_uic, sel_registerName("clearColor")); ((void(*)(id,SEL,id))objc_msgSend)(_v, sel_registerName("setBackgroundColor:"), _clr); } } @catch(...) {}
+
+        if (gCBRRootWindow) {
+            ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRRootWindow, sel_registerName("setHidden:"), NO);
+            ((void(*)(id,SEL,double))objc_msgSend)(gCBRRootWindow, sel_registerName("setAlpha:"), (double)1.0);
+            HH("window shown\n");
+        }
+
+        @try { id _dvc = getIvar(appVC, "_deviceAppViewController"); id _sv = _dvc ? getIvar(_dvc, "_sceneView") : nil; HHF("POST _sceneView: %s\n", _sv ? class_getName(object_getClass(_sv)) : "STILL nil"); } @catch(...) {}
+    } @catch (NSException *e) { HHF("render-live EXC: %s\n", [[e reason] UTF8String] ?: "?"); }
+    /* ---- end v3.18.8 render ---- */
                 }
             } else { HH("appVC has no _createSceneUpdateTransaction -> cannot launch\n"); }
         } @catch (NSException *e) { HHF("transaction EXC: %s\n", [[e reason] UTF8String]?:"?"); }
@@ -1875,7 +1912,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.18.6 init - force window visible + size appVC.view\n";
+        const char msg[] = "[CBR] v3.18.8 init - createSceneViewController + appView setDisplayMode:4\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
