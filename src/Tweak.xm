@@ -1451,6 +1451,47 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                 }
                             } @catch (NSException *e) { DHF("v3.19.7 probe/xform EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                             // ---- end v3.19.7 ----
+                            // ---- v3.19.8: displayMode readback + scene client/process + subtree layer walk ----
+                            @try {
+                                @try { SEL _dmSel = sel_registerName("displayMode"); if([sceneView respondsToSelector:_dmSel]){ long _dm = (long)((NSInteger(*)(id,SEL))objc_msgSend)(sceneView, _dmSel); DHF("sceneView displayMode readback: %ld (we set 4)\n", _dm); } } @catch(...) {}
+                                id _h = gCBRSceneHandle;
+                                id _scn = _h ? ((id(*)(id,SEL))objc_msgSend)(_h, sel_registerName("sceneIfExists")) : nil;
+                                if (_scn) {
+                                    SEL _clSel = sel_registerName("client");
+                                    id _cl = [_scn respondsToSelector:_clSel] ? ((id(*)(id,SEL))objc_msgSend)(_scn, _clSel) : nil;
+                                    DHF("scene client: %s\n", _cl ? class_getName(object_getClass(_cl)) : "nil (NO client - app not connected)");
+                                    if (_cl) {
+                                        SEL _pSel = sel_registerName("process");
+                                        id _proc = [_cl respondsToSelector:_pSel] ? ((id(*)(id,SEL))objc_msgSend)(_cl, _pSel) : nil;
+                                        DHF("client process: %s\n", _proc ? class_getName(object_getClass(_proc)) : "nil");
+                                        if (_proc) {
+                                            @try { SEL _pidSel = sel_registerName("pid"); if([_proc respondsToSelector:_pidSel]){ int _pid = ((int(*)(id,SEL))objc_msgSend)(_proc, _pidSel); DHF("app pid: %d\n", _pid); } } @catch(...) {}
+                                            @try { SEL _vSel = sel_registerName("isValid"); if([_proc respondsToSelector:_vSel]){ BOOL _pv = ((BOOL(*)(id,SEL))objc_msgSend)(_proc, _vSel); DHF("app process valid: %d\n", (int)_pv); } } @catch(...) {}
+                                        }
+                                    }
+                                }
+                                if (sceneView) {
+                                    DH("-- sceneView subtree walk --\n");
+                                    id _svl = ((id(*)(id,SEL))objc_msgSend)(sceneView, sel_registerName("layer"));
+                                    id _svls = _svl ? ((id(*)(id,SEL))objc_msgSend)(_svl, sel_registerName("sublayers")) : nil;
+                                    if (_svls) for (id _l in _svls) DHF("  sceneView.layer: %s\n", class_getName(object_getClass(_l)));
+                                    id _svsubs = ((id(*)(id,SEL))objc_msgSend)(sceneView, sel_registerName("subviews"));
+                                    if (_svsubs) for (id _sub in _svsubs) {
+                                        DHF("  view: %s\n", class_getName(object_getClass(_sub)));
+                                        id _sl = ((id(*)(id,SEL))objc_msgSend)(_sub, sel_registerName("layer"));
+                                        id _sls = _sl ? ((id(*)(id,SEL))objc_msgSend)(_sl, sel_registerName("sublayers")) : nil;
+                                        if (_sls) for (id _l2 in _sls) DHF("    layer: %s\n", class_getName(object_getClass(_l2)));
+                                        id _ss = ((id(*)(id,SEL))objc_msgSend)(_sub, sel_registerName("subviews"));
+                                        if (_ss) for (id _s2 in _ss) {
+                                            DHF("    view: %s\n", class_getName(object_getClass(_s2)));
+                                            id _s2l = ((id(*)(id,SEL))objc_msgSend)(_s2, sel_registerName("layer"));
+                                            id _s2ls = _s2l ? ((id(*)(id,SEL))objc_msgSend)(_s2l, sel_registerName("sublayers")) : nil;
+                                            if (_s2ls) for (id _l3 in _s2ls) DHF("      layer: %s\n", class_getName(object_getClass(_l3)));
+                                        }
+                                    }
+                                }
+                            } @catch (NSException *e) { DHF("v3.19.8 probe EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+                            // ---- end v3.19.8 ----
                 }
                 // Re-assert window visible on top.
                 @try {
@@ -2021,7 +2062,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.19.7 init - sublayer/host probe + content-container scale transform\n";
+        const char msg[] = "[CBR] v3.19.8 init - displayMode readback + client/process + subtree walk\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
