@@ -1765,6 +1765,102 @@ static void cbrSBInspectExternal(const char *bid_cstr) {
     if(fd>=0) close(fd);
 }
 
+// v3.20.8: PATH-A SHOT - move YouTube's LIVE scene from Main display to CarPlay.
+// The scene already renders (clientProcess live). It's pinned to Main. We try to
+// reassign its display to the CarPlay FBSDisplayConfiguration. Strict lifetime:
+// find ONE handle, CFRetain, act once, release. No loose transient reads.
+static void cbrSBReassignToCarPlay(const char *bid_cstr) {
+    int fd = open("/var/mobile/CBR_reassign.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    #define RA(s)  do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
+    #define RAF(...) do{ char _b[440]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
+    RA("==== PATH-A: REASSIGN TO CARPLAY ====\n");
+    if(!bid_cstr||!bid_cstr[0]){ RA("no bid\n"); if(fd>=0)close(fd); return; }
+    RAF("target: %s\n", bid_cstr);
+    @try {
+        NSString *bid = [NSString stringWithUTF8String:bid_cstr];
+
+        // 1) Get the CarPlay display configuration (same builder the host uses).
+        id caDisplay = cbrGetCarplayCADisplay();
+        if(!caDisplay){ RA("no carplay CADisplay -> abort\n"); RA("==== END ====\n"); if(fd>=0)close(fd); return; }
+        Class fbsCfgCls = objc_getClass("FBSDisplayConfiguration");
+        id carCfg = ((id(*)(id,SEL,id,BOOL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(fbsCfgCls, sel_registerName("alloc")), sel_registerName("initWithCADisplay:isMainDisplay:"), caDisplay, NO);
+        if(!carCfg){ RA("no carplay FBSDisplayConfiguration -> abort\n"); RA("==== END ====\n"); if(fd>=0)close(fd); return; }
+        id carDispId = [carCfg respondsToSelector:sel_registerName("identity")] ? ((id(*)(id,SEL))objc_msgSend)(carCfg, sel_registerName("identity")) : nil;
+        RAF("carplay displayIdentity: %s\n", carDispId ? class_getName(object_getClass(carDispId)) : "nil");
+
+        // 2) Find the ONE external handle whose sceneIdentifier matches our bid. Retain it immediately.
+        Class coordCls=objc_getClass("SBSceneManagerCoordinator");
+        id coord=coordCls?((id(*)(id,SEL))objc_msgSend)(coordCls,sel_registerName("sharedInstance")):nil;
+        id mainScreen=((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("mainScreen"));
+        id mainDispId=cb(mainScreen,"displayIdentity");
+        id mgr=nil; if(coord&&mainDispId){ SEL s=sel_registerName("sceneManagerForDisplayIdentity:"); if([coord respondsToSelector:s]) mgr=((id(*)(id,SEL,id))objc_msgSend)(coord,s,mainDispId); }
+        if(!mgr){ RA("no mgr -> abort\n"); RA("==== END ====\n"); if(fd>=0)close(fd); return; }
+
+        id targetHandle = nil;
+        id extH=[mgr respondsToSelector:sel_registerName("externalApplicationSceneHandles")]?((id(*)(id,SEL))objc_msgSend)(mgr,sel_registerName("externalApplicationSceneHandles")):nil;
+        if(extH) for(id h in extH){
+            id sidObj=[h respondsToSelector:sel_registerName("sceneIdentifier")]?((id(*)(id,SEL))objc_msgSend)(h,sel_registerName("sceneIdentifier")):nil;
+            NSString *sid = sidObj ? [NSString stringWithFormat:@"%@", sidObj] : @"";
+            if([sid containsString:bid]){ targetHandle = h; break; }
+        }
+        // Fallback: runningApplicationScenes: predicate to find the handle if not external.
+        if(!targetHandle){
+            SEL runSel=sel_registerName("runningApplicationScenes:");
+            if([mgr respondsToSelector:runSel]){
+                BOOL(^pred)(id)=^BOOL(id scene){ return YES; };
+                id running=((id(*)(id,SEL,id))objc_msgSend)(mgr,runSel,pred);
+                if(running) for(id h in running){
+                    id sidObj=[h respondsToSelector:sel_registerName("sceneIdentifier")]?((id(*)(id,SEL))objc_msgSend)(h,sel_registerName("sceneIdentifier")):nil;
+                    NSString *sid=sidObj?[NSString stringWithFormat:@"%@",sidObj]:@"";
+                    if([sid containsString:bid]){ targetHandle=h; break; }
+                }
+            }
+        }
+        RAF("target handle: %s\n", targetHandle ? class_getName(object_getClass(targetHandle)) : "nil (NOT FOUND)");
+        if(!targetHandle){ RA("no target handle -> abort\n"); RA("==== END ====\n"); if(fd>=0)close(fd); return; }
+
+        // Retain the handle for the duration of the operation.
+        CFRetain((__bridge CFTypeRef)targetHandle);
+
+        // 3) Get its live scene and attempt the display reassignment via settings.
+        @try {
+            id scn=[targetHandle respondsToSelector:sel_registerName("sceneIfExists")]?((id(*)(id,SEL))objc_msgSend)(targetHandle,sel_registerName("sceneIfExists")):nil;
+            RAF("scene: %s\n", scn ? class_getName(object_getClass(scn)) : "nil");
+            if(scn && carDispId){
+                // updateSettingsWithBlock: set the display / displayIdentity on mutable settings.
+                SEL updBlk=sel_registerName("updateSettingsWithBlock:");
+                if([scn respondsToSelector:updBlk]){
+                    __block id blkDispId = carDispId;
+                    __block id blkCfg = carCfg;
+                    __block int blkFd = fd;
+                    void(^diff)(id)=^(id ms){
+                        // try several setters for display reassignment; log which exist.
+                        if([ms respondsToSelector:sel_registerName("setDisplayIdentity:")]){ ((void(*)(id,SEL,id))objc_msgSend)(ms,sel_registerName("setDisplayIdentity:"),blkDispId); const char*m="  applied setDisplayIdentity:\n"; if(blkFd>=0)write(blkFd,m,strlen(m)); }
+                        else if([ms respondsToSelector:sel_registerName("setDisplayConfiguration:")]){ ((void(*)(id,SEL,id))objc_msgSend)(ms,sel_registerName("setDisplayConfiguration:"),blkCfg); const char*m="  applied setDisplayConfiguration:\n"; if(blkFd>=0)write(blkFd,m,strlen(m)); }
+                        else { const char*m="  NO display setter on settings (see settings dump)\n"; if(blkFd>=0)write(blkFd,m,strlen(m)); }
+                        // keep it foreground/active
+                        if([ms respondsToSelector:sel_registerName("setForeground:")]) ((void(*)(id,SEL,BOOL))objc_msgSend)(ms,sel_registerName("setForeground:"),YES);
+                    };
+                    ((void(*)(id,SEL,id))objc_msgSend)(scn, updBlk, diff);
+                    RA("updateSettingsWithBlock: applied\n");
+                } else {
+                    RA("scene has no updateSettingsWithBlock:\n");
+                    // dump settings setters so we find the right display setter next
+                    id st=[scn respondsToSelector:sel_registerName("settings")]?((id(*)(id,SEL))objc_msgSend)(scn,sel_registerName("settings")):nil;
+                    if(st){ Class stc=object_getClass(st); unsigned int n=0; Method*m=class_copyMethodList(stc,&n);
+                        RA("  settings setters (display/frame):\n");
+                        for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i])); if(strncmp(sn,"set",3)==0 && (strcasestr(sn,"display")||strcasestr(sn,"frame"))) RAF("    -%s\n",sn); }
+                        if(m)free(m); }
+                }
+            }
+        } @catch (NSException *e) { RAF("reassign inner EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+
+        CFRelease((__bridge CFTypeRef)targetHandle);
+    } @catch (NSException *e) { RAF("REASSIGN EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+    RA("==== END ====\n");
+    if(fd>=0) close(fd);
+}
+
 static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
                                 CFStringRef name, const void *object,
                                 CFDictionaryRef userInfo) {
@@ -1782,6 +1878,7 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     cbrSBProbeSceneHandle(bid);
     id _cbrHandle = cbrSBCreateSceneHandle(bid);
     cbrSBHostScene(bid, _cbrHandle);
+    cbrSBReassignToCarPlay(bid);
 }
 static void cbrSBRegisterListener(void) {
     cbrSBLog("[CBR-SB] v3.14.0 listener registering in SpringBoard");
