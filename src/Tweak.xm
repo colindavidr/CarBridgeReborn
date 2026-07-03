@@ -1910,6 +1910,46 @@ static void cbrSBProbeTransition(const char *bid_cstr) {
     if(fd>=0) close(fd);
 }
 
+// v3.20.10: probe FBSSceneTransitionContext - how to build one with a target display,
+// so we can activateWithTransitionContext: to migrate the scene to CarPlay.
+static void cbrSBProbeTxnCtx(const char *bid_cstr) {
+    int fd = open("/var/mobile/CBR_txnctx.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    #define TC(s)  do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
+    #define TCF(...) do{ char _b[440]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
+    TC("==== TRANSITION CONTEXT API ====\n");
+    @try {
+        // Class methods (factories) + instance setters on FBSSceneTransitionContext.
+        for(const char*cn:(const char*[]){"FBSSceneTransitionContext","UIApplicationSceneTransitionContext", NULL}){
+            if(!cn)break; Class c=objc_getClass(cn);
+            if(!c){ TCF("%s: nil\n",cn); continue; }
+            TCF("=== %s ===\n", cn);
+            // class (factory) methods
+            Class meta=object_getClass((id)c); unsigned int n=0; Method*m=class_copyMethodList(meta,&n);
+            TC("  class/factory methods:\n");
+            for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i])); TCF("    +%s\n",sn); }
+            if(m)free(m);
+            // instance methods mentioning display/target/context
+            unsigned int n2=0; Method*m2=class_copyMethodList(c,&n2);
+            TC("  instance display/target setters:\n");
+            for(unsigned int i=0;i<n2;i++){ const char*sn=sel_getName(method_getName(m2[i])); if(strncmp(sn,"set",3)==0 && (strcasestr(sn,"display")||strcasestr(sn,"target")||strcasestr(sn,"animation")||strcasestr(sn,"context"))) TCF("    -%s\n",sn); }
+            if(m2)free(m2);
+        }
+        // Also: does the SCENE MANAGER have a method to move/reparent a scene to a display?
+        Class coordCls=objc_getClass("SBSceneManagerCoordinator");
+        id coord=coordCls?((id(*)(id,SEL))objc_msgSend)(coordCls,sel_registerName("sharedInstance")):nil;
+        id mainScreen=((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("mainScreen"));
+        id mdi=cb(mainScreen,"displayIdentity");
+        id mgr=nil; if(coord&&mdi){ SEL s=sel_registerName("sceneManagerForDisplayIdentity:"); if([coord respondsToSelector:s]) mgr=((id(*)(id,SEL,id))objc_msgSend)(coord,s,mdi); }
+        if(mgr){ TCF("mgr: %s\n", class_getName(object_getClass(mgr)));
+            Class mc=object_getClass(mgr); unsigned int n=0; Method*m=class_copyMethodList(mc,&n);
+            TC("  mgr move/transfer/display methods:\n");
+            for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i])); if(strcasestr(sn,"move")||strcasestr(sn,"transfer")||strcasestr(sn,"reparent")||strcasestr(sn,"migrat")||(strcasestr(sn,"display")&&strcasestr(sn,"scene"))) TCF("    -%s\n",sn); }
+            if(m)free(m); }
+    } @catch(NSException*e){ TCF("EXC: %s\n",[[e reason] UTF8String]?:"?"); }
+    TC("==== END ====\n");
+    if(fd>=0) close(fd);
+}
+
 static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
                                 CFStringRef name, const void *object,
                                 CFDictionaryRef userInfo) {
@@ -1929,6 +1969,7 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     cbrSBHostScene(bid, _cbrHandle);
     cbrSBReassignToCarPlay(bid);
     cbrSBProbeTransition(bid);
+    cbrSBProbeTxnCtx(bid);
 }
 static void cbrSBRegisterListener(void) {
     cbrSBLog("[CBR-SB] v3.14.0 listener registering in SpringBoard");
