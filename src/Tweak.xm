@@ -1465,6 +1465,36 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         // v3.20.7: delayed diagnostic pass REMOVED - it walked live scene client/subtree
         // objects and caused objc_retain safe-mode crashes. Rendering work is done synchronously above.
 
+        // v3.20.16: TEARDOWN POLL - sample scene-view state every 0.5s for 20s so we can
+        // SEE what tears the render down (it renders briefly then dies). Reads only safe
+        // properties - no live-render-object walking (that crashed before).
+        for (int _pi = 1; _pi <= 40; _pi++) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(_pi * 0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                int pf = open("/var/mobile/CBR_teardown.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+                #define PF(...) do{ char _b[300]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(pf>=0)write(pf,_b,_n);}while(0)
+                @try {
+                    double t = _pi * 0.5;
+                    // scene still exists on the handle?
+                    id sc = gCBRSceneHandle ? ((id(*)(id,SEL))objc_msgSend)(gCBRSceneHandle, sel_registerName("sceneIfExists")) : nil;
+                    // scene view state
+                    id dvc = gCBRAppVC ? getIvar(gCBRAppVC, "_deviceAppViewController") : nil;
+                    id sv = dvc ? getIvar(dvc, "_sceneView") : nil;
+                    int svHidden = -1; double svAlpha = -1; int hasSuper = -1; int dispMode = -1;
+                    if (sv) {
+                        @try { svHidden = ((BOOL(*)(id,SEL))objc_msgSend)(sv, sel_registerName("isHidden")); } @catch(...) {}
+                        @try { svAlpha = ((double(*)(id,SEL))objc_msgSend)(sv, sel_registerName("alpha")); } @catch(...) {}
+                        @try { id spv = ((id(*)(id,SEL))objc_msgSend)(sv, sel_registerName("superview")); hasSuper = spv ? 1 : 0; } @catch(...) {}
+                        @try { dispMode = (int)((NSInteger(*)(id,SEL))objc_msgSend)(sv, sel_registerName("displayMode")); } @catch(...) {}
+                    }
+                    // window state
+                    int winHidden = -1;
+                    if (gCBRRootWindow) { @try { winHidden = ((BOOL(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("isHidden")); } @catch(...) {} }
+                    PF("t=%.1fs scene=%s sv=%s svHidden=%d svAlpha=%.2f svSuper=%d dispMode=%d winHidden=%d\n",
+                       t, sc?"LIVE":"GONE", sv?"yes":"NIL", svHidden, svAlpha, hasSuper, dispMode, winHidden);
+                } @catch (NSException *e) { PF("poll EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+                if (pf>=0) close(pf);
+            });
+        }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBHostDismiss(); });
         HH("SUCCESS: port host complete (30s) - watch car screen\n");
     } @catch (NSException *e) { HHF("HOST EXC: %s\n", [[e reason] UTF8String] ?: "?"); }
@@ -2453,7 +2483,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.20.15 init - grafting host only (PATH-A reverted, load runaway fix)\n";
+        const char msg[] = "[CBR] v3.20.16 init - grafting host only (PATH-A reverted, load runaway fix)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
