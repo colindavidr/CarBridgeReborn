@@ -1415,6 +1415,42 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                     id container = getIvar(sceneView, "_sceneContentContainerView");
                     DHF("sceneContentContainerView: %s\n", container ? class_getName(object_getClass(container)) : "nil");
                     DH("delayed: sized live scene view to car screen\n");
+                            // ---- v3.19.7: safe sublayer/host probe + content-container scale transform ----
+                            @try {
+                                id _avc = gCBRAppVC;
+                                id _dvc = _avc ? getIvar(_avc, "_deviceAppViewController") : nil;
+                                id _sv  = _dvc ? getIvar(_dvc, "_sceneView") : nil;
+                                id _cc  = _sv ? getIvar(_sv, "_sceneContentContainerView") : nil;
+                                DHF("v3.19.7 container: %s\n", _cc ? class_getName(object_getClass(_cc)) : "nil");
+                                if (_cc) {
+                                    id _lyr  = ((id(*)(id,SEL))objc_msgSend)(_cc, sel_registerName("layer"));
+                                    id _subs = _lyr ? ((id(*)(id,SEL))objc_msgSend)(_lyr, sel_registerName("sublayers")) : nil;
+                                    unsigned long _ln = _subs ? (unsigned long)((NSUInteger(*)(id,SEL))objc_msgSend)(_subs, sel_registerName("count")) : 0UL;
+                                    DHF("container.layer sublayers: %lu\n", _ln);
+                                    if (_subs) for (id _l in _subs) {
+                                        DHF("    - %s\n", class_getName(object_getClass(_l)));
+                                        SEL _cidSel = sel_registerName("contextId");
+                                        if ([_l respondsToSelector:_cidSel]) { unsigned int _cid = ((unsigned int(*)(id,SEL))objc_msgSend)(_l, _cidSel); DHF("        contextId=%u\n", _cid); }
+                                    }
+                                    id _cvs = ((id(*)(id,SEL))objc_msgSend)(_cc, sel_registerName("subviews"));
+                                    unsigned long _nv = _cvs ? (unsigned long)((NSUInteger(*)(id,SEL))objc_msgSend)(_cvs, sel_registerName("count")) : 0UL;
+                                    DHF("container subviews: %lu\n", _nv);
+                                    if (_cvs) for (id _v in _cvs) { DHF("    * %s\n", class_getName(object_getClass(_v))); }
+                                    if (gCBRRootWindow) {
+                                        CGRect _wb = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds"));
+                                        id _ms = ((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
+                                        CGRect _msb;
+                                        if ([_ms respondsToSelector:sel_registerName("boundsForOrientation:")]) _msb = ((CGRect(*)(id,SEL,int))objc_msgSend)(_ms, sel_registerName("boundsForOrientation:"), 3);
+                                        else _msb = ((CGRect(*)(id,SEL))objc_msgSend)(_ms, sel_registerName("bounds"));
+                                        CGFloat _ws = _msb.size.width  > 0 ? _wb.size.width  / _msb.size.width  : 1.0;
+                                        CGFloat _hs = _msb.size.height > 0 ? _wb.size.height / _msb.size.height : 1.0;
+                                        DHF("scale: carplay %.0fx%.0f / main %.0fx%.0f => %.3f,%.3f\n", _wb.size.width,_wb.size.height,_msb.size.width,_msb.size.height,_ws,_hs);
+                                        ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(_cc, sel_registerName("setTransform:"), CGAffineTransformMakeScale(_ws,_hs));
+                                        DH("applied content-container scale transform\n");
+                                    }
+                                }
+                            } @catch (NSException *e) { DHF("v3.19.7 probe/xform EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+                            // ---- end v3.19.7 ----
                 }
                 // Re-assert window visible on top.
                 @try {
@@ -1985,7 +2021,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.19.6 init - stable: probes removed, minimal completion\n";
+        const char msg[] = "[CBR] v3.19.7 init - sublayer/host probe + content-container scale transform\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
