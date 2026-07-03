@@ -1246,6 +1246,36 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                 }
                             } @catch (NSException *e) { CHF("DIAG EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                             // ---- end DIAG ----
+                            // ---- v3.19.0: re-drive mode-4 hosting now that FBScene is live ----
+                            // At sync mint time sceneIfExists was nil, so mode-4 attached only the
+                            // background view. Now that FBScene exists, re-apply setDisplayMode:4 on the
+                            // appView to bind the live content layer.
+                            @try {
+                                SEL _avSel = sel_registerName("appView");
+                                id _appView = [bAppVC respondsToSelector:_avSel] ? ((id(*)(id,SEL))objc_msgSend)(bAppVC, _avSel) : nil;
+                                CHF("REDRIVE appView: %s\n", _appView ? class_getName(object_getClass(_appView)) : "nil");
+                                if (_appView) {
+                                    id _animF = nil;
+                                    Class _savc = objc_getClass("SBApplicationSceneView");
+                                    SEL _afSel = sel_registerName("defaultDisplayModeAnimationFactory");
+                                    if (_savc && [_savc respondsToSelector:_afSel]) _animF = ((id(*)(id,SEL))objc_msgSend)(_savc, _afSel);
+                                    // First bounce to 0 then back to 4, to force a rebind against the live scene.
+                                    SEL _sdm = sel_registerName("setDisplayMode:animationFactory:completion:");
+                                    if ([_appView respondsToSelector:_sdm]) {
+                                        @try { ((void(*)(id,SEL,int,id,void*))objc_msgSend)(_appView, _sdm, 0, _animF, NULL); } @catch(...) {}
+                                        ((void(*)(id,SEL,int,id,void*))objc_msgSend)(_appView, _sdm, 4, _animF, NULL);
+                                        CH("REDRIVE setDisplayMode 0->4 applied against live scene\n");
+                                    } else { CH("REDRIVE MISSING setDisplayMode selector\n"); }
+                                }
+                                // Re-dump the content container to confirm a content layer attached this time.
+                                id dvcR = getIvar(bAppVC, "_deviceAppViewController");
+                                id svR = dvcR ? getIvar(dvcR, "_sceneView") : nil;
+                                if (svR) {
+                                    id ccv=getIvar(svR,"_sceneContentContainerView"); if(!ccv) ccv=getIvar(svR,"_contentContainerView");
+                                    if(ccv){ id csubs=((id(*)(id,SEL))objc_msgSend)(ccv,sel_registerName("subviews")); CHF("REDRIVE contentContainer now has %lu subviews:\n",(unsigned long)[csubs count]); for(id s in csubs){ CHF("    * %s\n",class_getName(object_getClass(s)));} }
+                                }
+                            } @catch (NSException *e) { CHF("REDRIVE EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+                            // ---- end v3.19.0 re-drive ----
                         } @catch (NSException *e) { CHF("completion EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                         CH("---- end completion ----\n");
                         if(cfd>=0) close(cfd);
@@ -1934,7 +1964,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.18.9 init - DIAG live scene view hosting state\n";
+        const char msg[] = "[CBR] v3.19.0 init - re-drive mode-4 hosting against live FBScene\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
