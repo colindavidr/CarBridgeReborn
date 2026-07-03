@@ -1690,6 +1690,91 @@ static void cbrSBProbeSceneHandle(const char *bid_cstr) {
     HP("==== END ====\n");
     if (fd>=0) close(fd);
 }
+// v3.20.4: PATH-A LOCATOR - find the app's REAL client-bearing scene + its contextID.
+// The hollow scene we create has client:nil. The app's process connects to ITS OWN
+// scene (main display). To mirror content onto CarPlay we must first FIND that scene.
+static void cbrSBLocateLiveScene(const char *bid_cstr) {
+    int fd = open("/var/mobile/CBR_locate.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    #define LO(s)  do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
+    #define LOF(...) do{ char _b[440]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
+    LO("==== PATH-A LIVE SCENE LOCATOR ====\n");
+    if (!bid_cstr || !bid_cstr[0]) { LO("no bid\n"); if(fd>=0)close(fd); return; }
+    LOF("target bid: %s\n", bid_cstr);
+    @try {
+        NSString *bid = [NSString stringWithUTF8String:bid_cstr];
+        Class acCls = objc_getClass("SBApplicationController");
+        id ac = acCls ? ((id(*)(id,SEL))objc_msgSend)(acCls, sel_registerName("sharedInstance")) : nil;
+        id app = ac ? ((id(*)(id,SEL,id))objc_msgSend)(ac, sel_registerName("applicationWithBundleIdentifier:"), bid) : nil;
+        LOF("SBApplication: %s\n", app ? class_getName(object_getClass(app)) : "nil");
+        if (!app) { LO("no app\n"); if(fd>=0)close(fd); return; }
+
+        // 1) Dump EVERY SBApplication method mentioning scene/process/pid - find real accessors.
+        LO("-- SBApplication scene/process methods --\n");
+        Class ac2 = object_getClass(app); int d=0;
+        while (ac2 && strcmp(class_getName(ac2),"NSObject")!=0 && d<3) {
+            unsigned int n=0; Method *m=class_copyMethodList(ac2,&n);
+            for (unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i]));
+                if (strcasestr(sn,"scene")||strcasestr(sn,"process")||strcasestr(sn,"pid")||strcasestr(sn,"running")||strcasestr(sn,"context"))
+                    LOF("  -%s\n", sn); }
+            if(m)free(m); ac2=class_getSuperclass(ac2); d++;
+        }
+
+        // 2) Ask the scene manager for ALL scenes, find ones whose client process is alive.
+        LO("-- scene manager enumeration --\n");
+        Class coordCls = objc_getClass("SBSceneManagerCoordinator");
+        id coord = coordCls ? ((id(*)(id,SEL))objc_msgSend)(coordCls, sel_registerName("sharedInstance")) : nil;
+        Class UIScreenCls = objc_getClass("UIScreen");
+        id mainScreen = ((id(*)(id,SEL))objc_msgSend)(UIScreenCls, sel_registerName("mainScreen"));
+        id dispId = cb(mainScreen, "displayIdentity");
+        id mgr = nil;
+        if (coord && dispId) { SEL s=sel_registerName("sceneManagerForDisplayIdentity:"); if([coord respondsToSelector:s]) mgr=((id(*)(id,SEL,id))objc_msgSend)(coord,s,dispId); }
+        LOF("scene mgr: %s\n", mgr ? class_getName(object_getClass(mgr)) : "nil");
+        if (mgr) {
+            // Dump mgr methods that return scene collections.
+            LO("  -- mgr scene-collection methods --\n");
+            Class mc=object_getClass(mgr); int md=0;
+            while(mc && strcmp(class_getName(mc),"NSObject")!=0 && md<3){ unsigned int n=0; Method *m=class_copyMethodList(mc,&n);
+                for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i]));
+                    if((strcasestr(sn,"scene")&&(strcasestr(sn,"all")||strcasestr(sn,"applic")||strcasestr(sn,"active")||strcasestr(sn,"connected")))||strcasestr(sn,"scenesPassing")) LOF("    -%s\n",sn); }
+                if(m)free(m); mc=class_getSuperclass(mc); md++; }
+
+            // Try the common collection accessors and inspect each scene's client + display + contextID.
+            for (const char *sel : (const char*[]){"allApplicationScenes","applicationScenes","_applicationScenes","allScenes","_allScenes","activeApplicationScenes", NULL}) {
+                if (!sel) break; SEL se=sel_registerName(sel);
+                if (![mgr respondsToSelector:se]) { LOF("  mgr.%s: no selector\n", sel); continue; }
+                id scenes = ((id(*)(id,SEL))objc_msgSend)(mgr, se);
+                unsigned long cnt = scenes && [scenes respondsToSelector:sel_registerName("count")] ? (unsigned long)[scenes count] : 0;
+                LOF("  mgr.%s -> %lu scenes\n", sel, cnt);
+                if (!scenes) continue;
+                // scenes may be dict or array; normalize to enumerate values.
+                id list = scenes;
+                if ([scenes respondsToSelector:sel_registerName("allValues")]) list = ((id(*)(id,SEL))objc_msgSend)(scenes, sel_registerName("allValues"));
+                @try {
+                    for (id sc in list) {
+                        const char *scn = class_getName(object_getClass(sc));
+                        // client + pid
+                        id cl = [sc respondsToSelector:sel_registerName("client")] ? ((id(*)(id,SEL))objc_msgSend)(sc, sel_registerName("client")) : nil;
+                        int pid = -1;
+                        if (cl) { id pr=[cl respondsToSelector:sel_registerName("process")]?((id(*)(id,SEL))objc_msgSend)(cl,sel_registerName("process")):nil; if(pr && [pr respondsToSelector:sel_registerName("pid")]) pid=((int(*)(id,SEL))objc_msgSend)(pr,sel_registerName("pid")); }
+                        // identity/bundle to see if it's OUR target app
+                        id ident = [sc respondsToSelector:sel_registerName("identity")] ? ((id(*)(id,SEL))objc_msgSend)(sc, sel_registerName("identity")) : nil;
+                        NSString *identStr = ident ? [NSString stringWithFormat:@"%@", ident] : @"?";
+                        BOOL isTarget = [identStr containsString:bid];
+                        // contextID
+                        unsigned int cid = 0;
+                        if ([sc respondsToSelector:sel_registerName("contextID")]) cid = ((unsigned int(*)(id,SEL))objc_msgSend)(sc, sel_registerName("contextID"));
+                        LOF("    %s%s client:%s pid:%d contextID:%u ident:%.60s\n",
+                            isTarget?">>> TARGET ":"    ", scn, cl?"YES":"nil", pid, cid, [identStr UTF8String]);
+                    }
+                } @catch (NSException *e) { LOF("    enum EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+                if (cnt > 0) break;  // found a working accessor
+            }
+        }
+    } @catch (NSException *e) { LOF("LOCATE EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+    LO("==== END ====\n");
+    if(fd>=0) close(fd);
+}
+
 static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
                                 CFStringRef name, const void *object,
                                 CFDictionaryRef userInfo) {
@@ -1708,6 +1793,7 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     id _cbrHandle = cbrSBCreateSceneHandle(bid);
     cbrReferenceProbe();
     cbrSBHostScene(bid, _cbrHandle);
+    cbrSBLocateLiveScene(bid);
     cbrSBDumpSceneClasses();
     cbrSBProbeDisplays();
     cbrSBRenderWindow();
