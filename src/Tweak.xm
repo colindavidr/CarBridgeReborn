@@ -1224,6 +1224,28 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                 ((void(*)(id,SEL,CGRect))objc_msgSend)(sv2, sel_registerName("setFrame:"), CGRectMake(0,0,wf.size.width,wf.size.height));
                                 CH("sized resolved scene view\n");
                             }
+                            // ---- v3.18.9 DIAG: inspect live scene view hosting state ----
+                            @try {
+                                id dvc9 = getIvar(bAppVC, "_deviceAppViewController");
+                                id sv9 = dvc9 ? getIvar(dvc9, "_sceneView") : nil;
+                                CHF("DIAG sceneView: %s\n", sv9 ? class_getName(object_getClass(sv9)) : "nil");
+                                if (sv9) {
+                                    // Does the scene view know about a live scene / handle?
+                                    @try { id sh = ((id(*)(id,SEL))objc_msgSend)(sv9, sel_registerName("sceneHandle")); CHF("DIAG sv.sceneHandle: %s\n", sh?class_getName(object_getClass(sh)):"nil"); } @catch(...) { CH("DIAG sv.sceneHandle: (no selector)\n"); }
+                                    @try { id sc = ((id(*)(id,SEL))objc_msgSend)(sv9, sel_registerName("scene")); CHF("DIAG sv.scene: %s\n", sc?class_getName(object_getClass(sc)):"nil"); } @catch(...) { CH("DIAG sv.scene: (no selector)\n"); }
+                                    @try { NSInteger dm = ((NSInteger(*)(id,SEL))objc_msgSend)(sv9, sel_registerName("displayMode")); CHF("DIAG sv.displayMode: %ld\n",(long)dm); } @catch(...) { CH("DIAG sv.displayMode: (no selector)\n"); }
+                                    // Frame + hidden + alpha of the scene view.
+                                    @try { CGRect fr=((CGRect(*)(id,SEL))objc_msgSend)(sv9,sel_registerName("frame")); CHF("DIAG sv.frame: %.0f,%.0f %.0fx%.0f\n",fr.origin.x,fr.origin.y,fr.size.width,fr.size.height); } @catch(...) {}
+                                    @try { BOOL h=((BOOL(*)(id,SEL))objc_msgSend)(sv9,sel_registerName("isHidden")); double a=((double(*)(id,SEL))objc_msgSend)(sv9,sel_registerName("alpha")); CHF("DIAG sv.hidden:%d alpha:%.2f\n",h,a); } @catch(...) {}
+                                    // Superview chain - is sv9 actually in the window hierarchy?
+                                    @try { id spv=((id(*)(id,SEL))objc_msgSend)(sv9,sel_registerName("superview")); CHF("DIAG sv.superview: %s\n", spv?class_getName(object_getClass(spv)):"nil (NOT IN HIERARCHY)"); } @catch(...) {}
+                                    // Subview tree of the scene view - is content hosted inside?
+                                    @try { id subs=((id(*)(id,SEL))objc_msgSend)(sv9,sel_registerName("subviews")); CHF("DIAG sv has %lu subviews:\n",(unsigned long)[subs count]); for(id s in subs){ CGRect sf=((CGRect(*)(id,SEL))objc_msgSend)(s,sel_registerName("frame")); CHF("  - %s (%.0fx%.0f)\n",class_getName(object_getClass(s)),sf.size.width,sf.size.height);} } @catch(...) {}
+                                    // Look for a content container ivar and its contents.
+                                    @try { id ccv=getIvar(sv9,"_sceneContentContainerView"); if(!ccv) ccv=getIvar(sv9,"_contentContainerView"); if(ccv){ id csubs=((id(*)(id,SEL))objc_msgSend)(ccv,sel_registerName("subviews")); CHF("DIAG contentContainer %s has %lu subviews\n",class_getName(object_getClass(ccv)),(unsigned long)[csubs count]); for(id s in csubs){ CHF("    * %s\n",class_getName(object_getClass(s)));} } else { CH("DIAG no content container ivar found\n"); } } @catch(...) {}
+                                }
+                            } @catch (NSException *e) { CHF("DIAG EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+                            // ---- end DIAG ----
                         } @catch (NSException *e) { CHF("completion EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                         CH("---- end completion ----\n");
                         if(cfd>=0) close(cfd);
@@ -1912,7 +1934,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.18.8 init - createSceneViewController + appView setDisplayMode:4\n";
+        const char msg[] = "[CBR] v3.18.9 init - DIAG live scene view hosting state\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
