@@ -1851,6 +1851,78 @@ static void cbrSBLocateLiveScene2(const char *bid_cstr) {
     if(fd>=0) close(fd);
 }
 
+// v3.20.6: PATH-A - inspect the external handle + the live scene's clientHandle/layerManager
+// for a hostable contextID. Two mechanisms: (A) mirror live layer, (B) drive external handle.
+static void cbrSBInspectExternal(const char *bid_cstr) {
+    int fd = open("/var/mobile/CBR_ext.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    #define E3(s)  do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
+    #define E3F(...) do{ char _b[460]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,_n);}while(0)
+    E3("==== EXTERNAL HANDLE + CLIENT HANDLE INSPECT ====\n");
+    if(!bid_cstr||!bid_cstr[0]){ E3("no bid\n"); if(fd>=0)close(fd); return; }
+    E3F("target: %s\n", bid_cstr);
+    @try {
+        NSString *bid=[NSString stringWithUTF8String:bid_cstr];
+        Class coordCls=objc_getClass("SBSceneManagerCoordinator");
+        id coord=coordCls?((id(*)(id,SEL))objc_msgSend)(coordCls,sel_registerName("sharedInstance")):nil;
+        id mainScreen=((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("mainScreen"));
+        id dispId=cb(mainScreen,"displayIdentity");
+        id mgr=nil; if(coord&&dispId){ SEL s=sel_registerName("sceneManagerForDisplayIdentity:"); if([coord respondsToSelector:s]) mgr=((id(*)(id,SEL,id))objc_msgSend)(coord,s,dispId); }
+        if(!mgr){ E3("no mgr\n"); if(fd>=0)close(fd); return; }
+
+        // === PART 1: the external handle - what app is it, and its whole API ===
+        id extH=[mgr respondsToSelector:sel_registerName("externalApplicationSceneHandles")]?((id(*)(id,SEL))objc_msgSend)(mgr,sel_registerName("externalApplicationSceneHandles")):nil;
+        if(extH) for(id h in extH){
+            E3F("external handle: %s\n", class_getName(object_getClass(h)));
+            // What bundle / scene identity does this handle carry?
+            for(const char*sel:(const char*[]){"sceneIdentifier","application","sceneHandleIdentifier","identifier", NULL}){
+                if(!sel)break; SEL se=sel_registerName(sel);
+                if([h respondsToSelector:se]){ id r=((id(*)(id,SEL))objc_msgSend)(h,se); E3F("  h.%s -> %s (%.60s)\n", sel, r?class_getName(object_getClass(r)):"nil", r?[[NSString stringWithFormat:@"%@",r] UTF8String]:""); }
+            }
+            // Its scene, if any, and that scene's display.
+            @try { id scn=[h respondsToSelector:sel_registerName("sceneIfExists")]?((id(*)(id,SEL))objc_msgSend)(h,sel_registerName("sceneIfExists")):nil;
+                E3F("  h.sceneIfExists: %s\n", scn?class_getName(object_getClass(scn)):"nil");
+                if(scn){ id disp=[scn respondsToSelector:sel_registerName("display")]?((id(*)(id,SEL))objc_msgSend)(scn,sel_registerName("display")):nil;
+                    E3F("    scene.display: %.60s\n", disp?[[NSString stringWithFormat:@"%@",disp] UTF8String]:"nil"); } } @catch(...) {}
+        }
+
+        // === PART 2: the LIVE youtube scene's clientHandle + layerManager -> contextID ===
+        id allScenes=[mgr respondsToSelector:sel_registerName("allScenes")]?((id(*)(id,SEL))objc_msgSend)(mgr,sel_registerName("allScenes")):nil;
+        if(allScenes) for(id sc in allScenes){
+            id ident=[sc respondsToSelector:sel_registerName("identity")]?((id(*)(id,SEL))objc_msgSend)(sc,sel_registerName("identity")):nil;
+            NSString*is=ident?[NSString stringWithFormat:@"%@",ident]:@"?";
+            if(![is containsString:bid]) continue;
+            E3("LIVE youtube scene found\n");
+            // clientHandle - the render-server connection.
+            id ch=[sc respondsToSelector:sel_registerName("clientHandle")]?((id(*)(id,SEL))objc_msgSend)(sc,sel_registerName("clientHandle")):nil;
+            E3F("  clientHandle: %s\n", ch?class_getName(object_getClass(ch)):"nil");
+            if(ch){ Class chc=object_getClass(ch); int d=0;
+                E3("  -- clientHandle methods (context/layer/id/process) --\n");
+                while(chc&&strcmp(class_getName(chc),"NSObject")!=0&&d<2){ unsigned int n=0; Method*m=class_copyMethodList(chc,&n);
+                    for(unsigned int i=0;i<n;i++){ const char*sn=sel_getName(method_getName(m[i])); if(strcasestr(sn,"context")||strcasestr(sn,"layer")||strcasestr(sn,"identity")||strcasestr(sn,"process")||strcasestr(sn,"pid")) E3F("     -%s\n",sn); }
+                    if(m)free(m); chc=class_getSuperclass(chc); d++; }
+                // Try to pull a contextID off the client handle.
+                for(const char*sel:(const char*[]){"contextID","contextId","_contextID", NULL}){ if(!sel)break; SEL se=sel_registerName(sel);
+                    if([ch respondsToSelector:se]){ unsigned int cid=((unsigned int(*)(id,SEL))objc_msgSend)(ch,se); E3F("  ch.%s = %u\n", sel, cid); } }
+            }
+            // layerManager -> layers now (app is running, should be non-empty this time)
+            id lm=[sc respondsToSelector:sel_registerName("layerManager")]?((id(*)(id,SEL))objc_msgSend)(sc,sel_registerName("layerManager")):nil;
+            if(lm){ id layers=[lm respondsToSelector:sel_registerName("layers")]?((id(*)(id,SEL))objc_msgSend)(lm,sel_registerName("layers")):nil;
+                unsigned long lc=layers&&[layers respondsToSelector:sel_registerName("count")]?(unsigned long)[layers count]:0;
+                E3F("  layerManager.layers = %lu\n", lc);
+                if(layers) for(id ly in layers){ E3F("     layer: %s\n", class_getName(object_getClass(ly)));
+                    for(const char*sel:(const char*[]){"contextID","context","layer", NULL}){ if(!sel)break; SEL se=sel_registerName(sel);
+                        if([ly respondsToSelector:se]){ @try{ id r=((id(*)(id,SEL))objc_msgSend)(ly,se); E3F("        ly.%s -> %s\n", sel, r?class_getName(object_getClass(r)):"nil/scalar"); }@catch(...){ unsigned int v=((unsigned int(*)(id,SEL))objc_msgSend)(ly,se); E3F("        ly.%s = %u\n", sel, v); } } }
+                }
+            }
+            // clientProcess pid (confirm it's the live one)
+            id cp=[sc respondsToSelector:sel_registerName("clientProcess")]?((id(*)(id,SEL))objc_msgSend)(sc,sel_registerName("clientProcess")):nil;
+            if(cp && [cp respondsToSelector:sel_registerName("pid")]){ int pid=((int(*)(id,SEL))objc_msgSend)(cp,sel_registerName("pid")); E3F("  clientProcess pid: %d\n", pid); }
+        }
+    } @catch (NSException *e){ E3F("EXT EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+    E3("==== END ====\n");
+    if(fd>=0) close(fd);
+}
+
 static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
                                 CFStringRef name, const void *object,
                                 CFDictionaryRef userInfo) {
@@ -1871,6 +1943,7 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     cbrSBHostScene(bid, _cbrHandle);
     cbrSBLocateLiveScene(bid);
     cbrSBLocateLiveScene2(bid);
+    cbrSBInspectExternal(bid);
     cbrSBDumpSceneClasses();
     cbrSBProbeDisplays();
     cbrSBRenderWindow();
