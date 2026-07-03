@@ -1323,6 +1323,13 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                 // (racing the async scene creation and losing). This runs the render
                                 // trigger against the now-existing scene - the fix for "worked once, lost the race after".
                                 @try {
+                                    // v3.20.13: ensure the scene view controller exists FIRST, so appView is
+                                    // non-nil regardless of sync/async completion ordering (warm boot ran
+                                    // completion before the sync _createSceneViewController -> appView was nil).
+                                    @try {
+                                        SEL rdCsvc = sel_registerName("_createSceneViewController");
+                                        if ([bAppVC respondsToSelector:rdCsvc]) { ((void(*)(id,SEL))objc_msgSend)(bAppVC, rdCsvc); CH("REDRIVE(comp) ensured scene view controller\n"); }
+                                    } @catch(...) {}
                                     id rdAppView = [bAppVC respondsToSelector:sel_registerName("appView")] ? ((id(*)(id,SEL))objc_msgSend)(bAppVC, sel_registerName("appView")) : nil;
                                     CHF("REDRIVE(comp) appView: %s\n", rdAppView ? class_getName(object_getClass(rdAppView)) : "nil");
                                     if (rdAppView) {
@@ -2446,7 +2453,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.20.12 init - grafting host only (PATH-A reverted, load runaway fix)\n";
+        const char msg[] = "[CBR] v3.20.13 init - grafting host only (PATH-A reverted, load runaway fix)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
