@@ -1352,6 +1352,19 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                         CGRect wf = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds"));
                                         ((void(*)(id,SEL,CGRect))objc_msgSend)(rdSv, sel_registerName("setFrame:"), CGRectMake(0,0,wf.size.width,wf.size.height));
                                         CH("REDRIVE(comp) sized live sceneView to car window\n");
+                                    // v3.20.14: ACTIVATE the scene onto the display. mode-4 + sized is
+                                    // not sufficient alone (proven: live scene, appView non-nil, mode-4 applied,
+                                    // still black). The scene must be activated. Use transition-context activate
+                                    // (the bare activate: trapped SpringBoard; the transition-context form is safer).
+                                    @try {
+                                        SEL rdCtx = sel_registerName("_createTransitionContext");
+                                        id rdTC = [scn respondsToSelector:rdCtx] ? ((id(*)(id,SEL))objc_msgSend)(scn, rdCtx) : nil;
+                                        SEL rdAct = sel_registerName("activateWithTransitionContext:");
+                                        if ([scn respondsToSelector:rdAct]) {
+                                            ((void(*)(id,SEL,id))objc_msgSend)(scn, rdAct, rdTC);
+                                            CH("REDRIVE(comp) activated scene (transition context)\n");
+                                        } else { CH("REDRIVE(comp) no activateWithTransitionContext:\n"); }
+                                    } @catch (NSException *e) { CHF("REDRIVE(comp) activate EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                                     }
                                 } @catch (NSException *e) { CHF("REDRIVE(comp) EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                                     } else {
@@ -2453,7 +2466,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.20.13 init - grafting host only (PATH-A reverted, load runaway fix)\n";
+        const char msg[] = "[CBR] v3.20.14 init - grafting host only (PATH-A reverted, load runaway fix)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
