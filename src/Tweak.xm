@@ -1492,6 +1492,50 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                 }
                             } @catch (NSException *e) { DHF("v3.19.8 probe EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                             // ---- end v3.19.8 ----
+                            // ---- v3.20.0: LOCATE the live client-bearing scene (app is running, PID exists) ----
+                            @try {
+                                DH("== v3.20.0 live-scene locator ==\n");
+                                Class _acCls = objc_getClass("SBApplicationController");
+                                id _ac = _acCls ? ((id(*)(id,SEL))objc_msgSend)(_acCls, sel_registerName("sharedInstance")) : nil;
+                                id _bidStr = [NSString stringWithUTF8String:"com.google.ios.youtube"];
+                                id _app = _ac ? ((id(*)(id,SEL,id))objc_msgSend)(_ac, sel_registerName("applicationWithBundleIdentifier:"), _bidStr) : nil;
+                                DHF("running SBApplication: %s\n", _app ? class_getName(object_getClass(_app)) : "nil");
+                                if (_app) {
+                                    // Ask the app for its scenes directly.
+                                    for (const char *sel : (const char*[]){"scenes","allScenes","_scenes", NULL}) {
+                                        if (!sel) break;
+                                        SEL _sSel = sel_registerName(sel);
+                                        if (![_app respondsToSelector:_sSel]) continue;
+                                        id _scenes = ((id(*)(id,SEL))objc_msgSend)(_app, _sSel);
+                                        unsigned long _sc = _scenes ? (unsigned long)((NSUInteger(*)(id,SEL))objc_msgSend)(_scenes, sel_registerName("count")) : 0UL;
+                                        DHF("  app.%s -> %lu scene(s)\n", sel, _sc);
+                                        if (_scenes) for (id _s in _scenes) {
+                                            DHF("    scene: %s\n", class_getName(object_getClass(_s)));
+                                            @try {
+                                                SEL _clSel = sel_registerName("client");
+                                                id _cl = [_s respondsToSelector:_clSel] ? ((id(*)(id,SEL))objc_msgSend)(_s, _clSel) : nil;
+                                                DHF("      client: %s\n", _cl ? class_getName(object_getClass(_cl)) : "NIL");
+                                                if (_cl) {
+                                                    SEL _pSel = sel_registerName("process");
+                                                    id _proc = [_cl respondsToSelector:_pSel] ? ((id(*)(id,SEL))objc_msgSend)(_cl, _pSel) : nil;
+                                                    if (_proc) { SEL _pidSel = sel_registerName("pid"); if([_proc respondsToSelector:_pidSel]){ int _pid=((int(*)(id,SEL))objc_msgSend)(_proc,_pidSel); DHF("      client pid: %d  <-- MATCH 16400 = the live scene\n", _pid); } }
+                                                }
+                                            } @catch(...) {}
+                                            @try {
+                                                id _settings = [_s respondsToSelector:sel_registerName("settings")] ? ((id(*)(id,SEL))objc_msgSend)(_s, sel_registerName("settings")) : nil;
+                                                id _di = _settings && [_settings respondsToSelector:sel_registerName("displayIdentity")] ? ((id(*)(id,SEL))objc_msgSend)(_settings, sel_registerName("displayIdentity")) : nil;
+                                                if (!_di && [_s respondsToSelector:sel_registerName("displayIdentity")]) _di = ((id(*)(id,SEL))objc_msgSend)(_s, sel_registerName("displayIdentity"));
+                                                DHF("      display: %s\n", _di ? [[NSString stringWithFormat:@"%@", _di] UTF8String] : "nil");
+                                            } @catch(...) {}
+                                            @try {
+                                                SEL _cidSel = sel_registerName("contextID");
+                                                if ([_s respondsToSelector:_cidSel]) { unsigned int _cid = ((unsigned int(*)(id,SEL))objc_msgSend)(_s, _cidSel); DHF("      scene contextID: %u\n", _cid); }
+                                            } @catch(...) {}
+                                        }
+                                    }
+                                }
+                            } @catch (NSException *e) { DHF("v3.20.0 locator EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+                            // ---- end v3.20.0 ----
                 }
                 // Re-assert window visible on top.
                 @try {
@@ -2070,7 +2114,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.19.9 init - STEP1 create primary identity + real handle\n";
+        const char msg[] = "[CBR] v3.20.0 init - locate live client-bearing scene\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
