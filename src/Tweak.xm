@@ -1491,6 +1491,33 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                     if (gCBRRootWindow) { @try { winHidden = ((BOOL(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("isHidden")); } @catch(...) {} }
                     PF("t=%.1fs scene=%s sv=%s svHidden=%d svAlpha=%.2f svSuper=%d dispMode=%d winHidden=%d\n",
                        t, sc?"LIVE":"GONE", sv?"yes":"NIL", svHidden, svAlpha, hasSuper, dispMode, winHidden);
+                    // v3.20.17: AUTO-REHOST on scene death. The scene dies (scene=GONE) but the
+                    // HANDLE survives and everything else stays intact. Re-create the scene via the
+                    // handle (fetchOrCreate) + re-apply mode-4 to resurrect it within 0.5s of death.
+                    if (!sc && gCBRSceneHandle) {
+                        @try {
+                            // re-create the scene on the handle
+                            SEL foc = sel_registerName("scene");
+                            id newScene = nil;
+                            @try { newScene = ((id(*)(id,SEL))objc_msgSend)(gCBRSceneHandle, sel_registerName("sceneIfExists")); } @catch(...) {}
+                            if (!newScene) {
+                                // force creation
+                                @try { newScene = ((id(*)(id,SEL))objc_msgSend)(gCBRSceneHandle, sel_registerName("scene")); } @catch(...) {}
+                            }
+                            PF("  AUTO-REHOST: recreated scene = %s\n", newScene ? class_getName(object_getClass(newScene)) : "still nil");
+                            // re-apply mode-4 on the appView against the (hopefully) live scene
+                            if (gCBRAppVC) {
+                                @try { SEL csvc=sel_registerName("_createSceneViewController"); if([gCBRAppVC respondsToSelector:csvc]) ((void(*)(id,SEL))objc_msgSend)(gCBRAppVC, csvc); } @catch(...) {}
+                                id av = [gCBRAppVC respondsToSelector:sel_registerName("appView")] ? ((id(*)(id,SEL))objc_msgSend)(gCBRAppVC, sel_registerName("appView")) : nil;
+                                if (av) {
+                                    id anim=nil; Class savc=objc_getClass("SBApplicationSceneView"); SEL af=sel_registerName("defaultDisplayModeAnimationFactory");
+                                    if(savc && [savc respondsToSelector:af]) anim=((id(*)(id,SEL))objc_msgSend)(savc,af);
+                                    SEL sdm=sel_registerName("setDisplayMode:animationFactory:completion:");
+                                    if([av respondsToSelector:sdm]){ ((void(*)(id,SEL,int,id,void*))objc_msgSend)(av,sdm,4,anim,NULL); PF("  AUTO-REHOST: re-applied mode-4\n"); }
+                                }
+                            }
+                        } @catch (NSException *e) { PF("  AUTO-REHOST EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+                    }
                 } @catch (NSException *e) { PF("poll EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                 if (pf>=0) close(pf);
             });
@@ -2483,7 +2510,7 @@ static void cbrCPProbeScenes(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.20.16 init - grafting host only (PATH-A reverted, load runaway fix)\n";
+        const char msg[] = "[CBR] v3.20.17 init - grafting host only (PATH-A reverted, load runaway fix)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
