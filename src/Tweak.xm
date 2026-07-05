@@ -1128,6 +1128,14 @@ static void cbrSBHostDismiss(void) {
         if(fd>=0){const char*m="[host] dismissed\n";write(fd,m,strlen(m));close(fd);}
     } @catch(...) {}
 }
+
+// v3.20.23: target object for the CarPlay exit button (UIButton needs an ObjC target+selector).
+@interface CBRExitTarget : NSObject
+@end
+@implementation CBRExitTarget
+- (void)cbrExitTapped { cbrSBHostDismiss(); }
+@end
+static CBRExitTarget *gCBRExitTarget = nil;
 // v3.19.2: REFERENCE PROBE v2 - three routes to a live app scene view.
 static void cbrDumpViewTree(id v, int fd, int depth, int maxdepth) {
     if (!v || depth > maxdepth) return;
@@ -1465,6 +1473,27 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         } @catch (NSException *e) { HHF("sceneView frame EXC: %s\n", [[e reason] UTF8String]?:"?"); }
 
         @try { ((void(*)(id,SEL,double))objc_msgSend)(rootWindow, sel_registerName("setAlpha:"), (double)1.0); ((void(*)(id,SEL,BOOL))objc_msgSend)(rootWindow, sel_registerName("setHidden:"), NO); } @catch(...) {}
+        // v3.20.23: exit/home button so the user can return to the CarPlay dashboard.
+        @try {
+            if (!gCBRExitTarget) gCBRExitTarget = [[CBRExitTarget alloc] init];
+            Class _btnCls = objc_getClass("UIButton");
+            id _exit = ((id(*)(id,SEL,long))objc_msgSend)(_btnCls, sel_registerName("buttonWithType:"), (long)1);
+            if (_exit) {
+                ((void(*)(id,SEL,CGRect))objc_msgSend)(_exit, sel_registerName("setFrame:"), CGRectMake(18, 18, 92, 44));
+                ((void(*)(id,SEL,id,long))objc_msgSend)(_exit, sel_registerName("setTitle:forState:"), @"Exit", (long)0);
+                Class _uic = objc_getClass("UIColor");
+                id _wht = ((id(*)(id,SEL))objc_msgSend)(_uic, sel_registerName("whiteColor"));
+                ((void(*)(id,SEL,id,long))objc_msgSend)(_exit, sel_registerName("setTitleColor:forState:"), _wht, (long)0);
+                id _bg = ((id(*)(id,SEL,CGFloat,CGFloat))objc_msgSend)(_uic, sel_registerName("colorWithWhite:alpha:"), (CGFloat)0.0, (CGFloat)0.55);
+                ((void(*)(id,SEL,id))objc_msgSend)(_exit, sel_registerName("setBackgroundColor:"), _bg);
+                id _blayer = ((id(*)(id,SEL))objc_msgSend)(_exit, sel_registerName("layer"));
+                if (_blayer) ((void(*)(id,SEL,CGFloat))objc_msgSend)(_blayer, sel_registerName("setCornerRadius:"), (CGFloat)10.0);
+                ((void(*)(id,SEL,id,SEL,unsigned long))objc_msgSend)(_exit, sel_registerName("addTarget:action:forControlEvents:"), gCBRExitTarget, sel_registerName("cbrExitTapped"), (unsigned long)(1UL<<6));
+                ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("addSubview:"), _exit);
+                ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("bringSubviewToFront:"), _exit);
+                HH("exit button added\n");
+            }
+        } @catch(...) { HH("exit button failed\n"); }
         // --- v3.18.2: the scene is created ASYNC after launch. Re-run foreground +
         //     sceneView grab on a delay so the scene actually exists. ---
         // v3.20.7: delayed diagnostic pass REMOVED - it walked live scene client/subtree
@@ -2613,7 +2642,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.22 init - clientProcess keepalive fix\n";
+        const char msg[] = "[CBR] v3.20.23 init - exit button\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2622,7 +2651,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.22 init - clientProcess keepalive fix\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.23 init - exit button\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
