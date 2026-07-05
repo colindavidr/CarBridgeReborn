@@ -1148,8 +1148,10 @@ static void cbrSBHostDismiss(void) {
 
         if (gCBRRootWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRRootWindow, sel_registerName("setHidden:"), YES); }
         gCBRRootWindow = nil; gCBRAppVC = nil; gCBRActiveTxns = nil;
-        @try { if (gCBRKeepAlive) [gCBRKeepAlive removeAllObjects]; } @catch(...) {}
-        DD("[host] dismissed\n");
+        // v3.20.25: do NOT clear keep-alive on dismiss - keeps the app alive so reopen
+        // doesn't hit a suspended process (which renders black). Test of the suspension theory.
+        // @try { if (gCBRKeepAlive) [gCBRKeepAlive removeAllObjects]; } @catch(...) {}
+        DD("[host] dismissed (keep-alive retained)\n");
         if(fd>=0)close(fd);
         #undef DD
     } @catch(...) {}
@@ -1472,9 +1474,20 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
             id sceneNow = ((id(*)(id,SEL))objc_msgSend)(handle, sel_registerName("sceneIfExists"));
             HHF("sceneIfExists: %s\n", sceneNow ? class_getName(object_getClass(sceneNow)) : "nil");
             if (sceneNow) {
-                id mset = ((id(*)(id,SEL))objc_msgSend)(sceneNow, sel_registerName("mutableSettings"));
-                if (mset) {
-                    // foreground = YES, set landscape interface orientation (3).
+                // v3.20.25 foreground-via-block: FBScene has no mutableSettings on iOS 17 (it
+                // threw every time). Use updateSettingsWithBlock: (the working API) to foreground
+                // the scene on reopen, so the app's scene actually presents instead of black.
+                SEL _ub = sel_registerName("updateSettingsWithBlock:");
+                if ([sceneNow respondsToSelector:_ub]) {
+                    void (^_fgb)(id) = ^(id ms){
+                        @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(ms, sel_registerName("setForeground:"), YES); } @catch(...) {}
+                        @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(ms, sel_registerName("setInterfaceOrientation:"), (NSInteger)3); } @catch(...) {}
+                        @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(ms, sel_registerName("setDeactivated:"), NO); } @catch(...) {}
+                    };
+                    @try { ((void(*)(id,SEL,id))objc_msgSend)(sceneNow, _ub, _fgb); HH("reopen foreground via updateSettingsWithBlock applied\n"); } @catch(...) { HH("reopen fg block EXC\n"); }
+                }
+                id mset = nil;
+                if (0) {   // dead: old mutableSettings path disabled
                     @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mset, sel_registerName("setForeground:"), YES); } @catch(...) {}
                     @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(mset, sel_registerName("setInterfaceOrientation:"), (NSInteger)3); } @catch(...) {}
                     @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mset, sel_registerName("setDeactivated:"), NO); } @catch(...) {}
@@ -2668,7 +2681,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.24 init - teardown-restore\n";
+        const char msg[] = "[CBR] v3.20.25 init - reopen foreground fix\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2677,7 +2690,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.24 init - teardown-restore\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.25 init - reopen foreground fix\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
