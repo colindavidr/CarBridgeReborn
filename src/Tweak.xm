@@ -2532,17 +2532,22 @@ static void cbrKLLog(const char *fmt, ...) {
 - (void)updateSettings:(id)arg1 withTransitionContext:(id)arg2 completion:(void *)arg3 {
     @try {
         if (gCBRKeepAlive && [gCBRKeepAlive count]) {
-            id client = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("client"));
-            if (client && [client respondsToSelector:sel_registerName("process")]) {
-                id proc = ((id(*)(id,SEL))objc_msgSend)(client, sel_registerName("process"));
-                id bid = proc ? ((id(*)(id,SEL))objc_msgSend)(proc, sel_registerName("bundleIdentifier")) : nil;
-                if (bid && [gCBRKeepAlive containsObject:bid]) {
-                    BOOL respFg = [arg1 respondsToSelector:sel_registerName("isForeground")];
-                    BOOL isFg = respFg ? ((BOOL(*)(id,SEL))objc_msgSend)(arg1, sel_registerName("isForeground")) : YES;
-                    cbrKLLog("[fbscene] bid=%s argClass=%s respFg=%d isFg=%d => %s\n",
-                             [bid UTF8String], object_getClassName(arg1), (int)respFg, (int)isFg, (respFg && !isFg) ? "BLOCK" : "pass");
-                    if (respFg && !isFg) { return; }   // block the background transition -> keep it live on CarPlay
-                }
+            // iOS 17: FBScene -client returns nil; -clientProcess returns the FBApplicationProcess.
+            id proc = nil;
+            if ([self respondsToSelector:sel_registerName("clientProcess")])
+                proc = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("clientProcess"));
+            if (!proc) {
+                id client = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("client"));
+                if (client && [client respondsToSelector:sel_registerName("process")])
+                    proc = ((id(*)(id,SEL))objc_msgSend)(client, sel_registerName("process"));
+            }
+            id bid = (proc && [proc respondsToSelector:sel_registerName("bundleIdentifier")]) ? ((id(*)(id,SEL))objc_msgSend)(proc, sel_registerName("bundleIdentifier")) : nil;
+            if (bid && [gCBRKeepAlive containsObject:bid]) {
+                BOOL respFg = [arg1 respondsToSelector:sel_registerName("isForeground")];
+                BOOL isFg = respFg ? ((BOOL(*)(id,SEL))objc_msgSend)(arg1, sel_registerName("isForeground")) : YES;
+                cbrKLLog("[fbscene] bid=%s procVia=%s argClass=%s respFg=%d isFg=%d => %s\n",
+                         [bid UTF8String], proc?"ok":"nil", object_getClassName(arg1), (int)respFg, (int)isFg, (respFg && !isFg) ? "BLOCK" : "pass");
+                if (respFg && !isFg) { return; }   // block the background transition -> keep it live on CarPlay
             }
         }
     } @catch(...) {}
@@ -2554,9 +2559,14 @@ static void cbrKLLog(const char *fmt, ...) {
     int shouldBackground = %orig;
     @try {
         if (shouldBackground && gCBRKeepAlive && [gCBRKeepAlive count]) {
-            id client = ((id(*)(id,SEL))objc_msgSend)(arg2, sel_registerName("client"));
-            id proc = client ? ((id(*)(id,SEL))objc_msgSend)(client, sel_registerName("process")) : nil;
-            id bid = proc ? ((id(*)(id,SEL))objc_msgSend)(proc, sel_registerName("bundleIdentifier")) : nil;
+            id proc = nil;
+            if ([arg2 respondsToSelector:sel_registerName("clientProcess")])
+                proc = ((id(*)(id,SEL))objc_msgSend)(arg2, sel_registerName("clientProcess"));
+            if (!proc) {
+                id client = ((id(*)(id,SEL))objc_msgSend)(arg2, sel_registerName("client"));
+                proc = client ? ((id(*)(id,SEL))objc_msgSend)(client, sel_registerName("process")) : nil;
+            }
+            id bid = (proc && [proc respondsToSelector:sel_registerName("bundleIdentifier")]) ? ((id(*)(id,SEL))objc_msgSend)(proc, sel_registerName("bundleIdentifier")) : nil;
             if (bid && [gCBRKeepAlive containsObject:bid]) {
                 cbrKLLog("[lockmgr] bid=%s origShould=%d => forcing NO\n", [bid UTF8String], shouldBackground);
                 shouldBackground = NO;
@@ -2603,7 +2613,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.20 init - keep-alive hook instrumentation\n";
+        const char msg[] = "[CBR] v3.20.22 init - clientProcess keepalive fix\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2612,7 +2622,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.19 init - hook resolution check:\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.22 init - clientProcess keepalive fix\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
