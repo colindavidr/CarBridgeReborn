@@ -2511,6 +2511,18 @@ static void cbrCPProbeScenes(void) {
 %end  // group CARPLAY
 
 
+// v3.20.20: append-only diagnostic log for the keep-alive hooks (what happens at lock).
+static void cbrKLLog(const char *fmt, ...) {
+    static int klfd = -1;
+    if (klfd < 0) klfd = open("/var/mobile/CBR_keepalive.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+    if (klfd < 0) return;
+    char buf[512];
+    va_list ap; va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n > 0) write(klfd, buf, (size_t)n > sizeof(buf) ? sizeof(buf) : (size_t)n);
+}
+
 %group SPRINGBOARD
 // v3.20.18: keep-alive hooks ported from carplay-cast (EthanArbuckle/carplay-cast).
 // While an app is hosted on CarPlay, SpringBoard's normal lifecycle would suspend it the
@@ -2525,8 +2537,11 @@ static void cbrCPProbeScenes(void) {
                 id proc = ((id(*)(id,SEL))objc_msgSend)(client, sel_registerName("process"));
                 id bid = proc ? ((id(*)(id,SEL))objc_msgSend)(proc, sel_registerName("bundleIdentifier")) : nil;
                 if (bid && [gCBRKeepAlive containsObject:bid]) {
-                    BOOL isFg = ((BOOL(*)(id,SEL))objc_msgSend)(arg1, sel_registerName("isForeground"));
-                    if (!isFg) { return; }   // block the background transition -> keep it live on CarPlay
+                    BOOL respFg = [arg1 respondsToSelector:sel_registerName("isForeground")];
+                    BOOL isFg = respFg ? ((BOOL(*)(id,SEL))objc_msgSend)(arg1, sel_registerName("isForeground")) : YES;
+                    cbrKLLog("[fbscene] bid=%s argClass=%s respFg=%d isFg=%d => %s\n",
+                             [bid UTF8String], object_getClassName(arg1), (int)respFg, (int)isFg, (respFg && !isFg) ? "BLOCK" : "pass");
+                    if (respFg && !isFg) { return; }   // block the background transition -> keep it live on CarPlay
                 }
             }
         }
@@ -2542,7 +2557,10 @@ static void cbrCPProbeScenes(void) {
             id client = ((id(*)(id,SEL))objc_msgSend)(arg2, sel_registerName("client"));
             id proc = client ? ((id(*)(id,SEL))objc_msgSend)(client, sel_registerName("process")) : nil;
             id bid = proc ? ((id(*)(id,SEL))objc_msgSend)(proc, sel_registerName("bundleIdentifier")) : nil;
-            if (bid && [gCBRKeepAlive containsObject:bid]) shouldBackground = NO;
+            if (bid && [gCBRKeepAlive containsObject:bid]) {
+                cbrKLLog("[lockmgr] bid=%s origShould=%d => forcing NO\n", [bid UTF8String], shouldBackground);
+                shouldBackground = NO;
+            }
         }
     } @catch(...) {}
     return shouldBackground;
@@ -2585,13 +2603,14 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.19 init - keep-alive + hook-resolution logging\n";
+        const char msg[] = "[CBR] v3.20.20 init - keep-alive hook instrumentation\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (strcmp(__progname, "SpringBoard") == 0) {
         %init(SPRINGBOARD);
         cbrSBRegisterListener();
+        unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
         if(_sf>=0){const char*m="[CBR-SB] v3.20.19 init - hook resolution check:\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
