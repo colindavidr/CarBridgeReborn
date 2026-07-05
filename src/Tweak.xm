@@ -2534,7 +2534,7 @@ static void cbrKLLog(const char *fmt, ...) {
         if (gCBRKeepAlive && [gCBRKeepAlive count]) {
             // iOS 17: FBScene -client returns nil; -clientProcess returns the FBApplicationProcess.
             id proc = nil;
-            if ([self respondsToSelector:sel_registerName("clientProcess")])
+            if ([(id)self respondsToSelector:sel_registerName("clientProcess")])
                 proc = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("clientProcess"));
             if (!proc) {
                 id client = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("client"));
