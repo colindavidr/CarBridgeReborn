@@ -2550,13 +2550,42 @@ static void cbrCPProbeScenes(void) {
 %end
 %end  // group SPRINGBOARD
 
+// v3.20.19: report whether each hooked class+selector actually resolves on THIS
+// device (answers "are we blind-hooking on iOS 17?"). Pure C + runtime lookups.
+static void cbrLogHook(int fd, const char *clsName, char kind, const char *selName) {
+    Class c = objc_getClass(clsName);
+    int hasCls = (c != NULL);
+    int hasMethod = 0;
+    if (c && selName && selName[0]) {
+        SEL sel = sel_registerName(selName);
+        Method m = (kind == '+') ? class_getClassMethod(c, sel) : class_getInstanceMethod(c, sel);
+        hasMethod = (m != NULL);
+    }
+    int resolved = hasCls && hasMethod;
+    char buf[360];
+    int n = snprintf(buf, sizeof(buf), "[hook] %-30s %c%-50s class=%-3s method=%-3s => %s\n",
+                     clsName, kind, selName,
+                     hasCls ? "YES" : "NO", hasMethod ? "YES" : "NO",
+                     resolved ? "RESOLVED" : "** MISSING **");
+    if (fd >= 0 && n > 0) write(fd, buf, (size_t)n);
+}
+
 %ctor {
     // PURE C — no ObjC whatsoever
     if (strcmp(__progname, "CarPlay") == 0) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        const char msg[] = "[CBR] v3.20.18 init - keep-alive hooks (FBScene+lock) prevent scene backgrounding\n";
+        { int hf = open("/var/mobile/CBR_cp_hooks.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+          cbrLogHook(hf, "DashBoard", '+', "_newApplicationLibrary");
+          cbrLogHook(hf, "DBEnvironmentConfiguration", '-', "policyForApplicationInfo:");
+          cbrLogHook(hf, "CRCarPlayAppPolicyEvaluator", '-', "effectivePolicyForAppDeclaration:");
+          cbrLogHook(hf, "CRCarPlayAppPolicyEvaluator", '-', "effectivePolicyForAppDeclaration:inVehicleWithCertificateSerial:");
+          cbrLogHook(hf, "DBDashboardHomeViewController", '-', "_setupIconModel");
+          cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
+          cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
+          if (hf >= 0) close(hf); }
+        const char msg[] = "[CBR] v3.20.19 init - keep-alive + hook-resolution logging\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2564,7 +2593,10 @@ static void cbrCPProbeScenes(void) {
         %init(SPRINGBOARD);
         cbrSBRegisterListener();
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.18 init - keep-alive hooks active\n";write(_sf,m,strlen(m));close(_sf);}
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.19 init - hook resolution check:\n";write(_sf,m,strlen(m));
+            cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
+            cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
+            close(_sf);}
     }
 }
 
