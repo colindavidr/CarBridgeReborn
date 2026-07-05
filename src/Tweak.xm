@@ -1121,11 +1121,37 @@ static id gCBRTxn = nil;         // v3.19.5: strong-hold txn for safe completion
 static NSMutableSet *gCBRKeepAlive = nil;  // v3.20.18: bundle IDs whose scenes must NOT be backgrounded while hosted on CarPlay
 static void cbrSBHostDismiss(void) {
     @try {
+        int fd=open("/var/mobile/CBR_sb_host.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
+        #define DD(m) do{ if(fd>=0){const char*_m=(m);write(fd,_m,strlen(_m));} }while(0)
+        // v3.20.24: teardown-restore. Before we drop our window, put the app's scene view
+        // back to normal LiveContent mode (0). Without this, the app's real scene is left
+        // stuck in the grafted display mode 4 -> reopening shows a black screen until respring.
+        // (Mirrors carplay-cast cleanupAfterCarplay, which CBR's dismiss previously omitted.)
+        @try {
+            if (gCBRAppVC) {
+                id dvc = getIvar(gCBRAppVC, "_deviceAppViewController");
+                id sv  = dvc ? getIvar(dvc, "_sceneView") : nil;
+                if (!sv && [gCBRAppVC respondsToSelector:sel_registerName("appView")])
+                    sv = ((id(*)(id,SEL))objc_msgSend)(gCBRAppVC, sel_registerName("appView"));
+                if (sv) {
+                    id animF = nil; Class savc = objc_getClass("SBApplicationSceneView");
+                    SEL af = sel_registerName("defaultDisplayModeAnimationFactory");
+                    if (savc && [(id)savc respondsToSelector:af]) animF = ((id(*)(id,SEL))objc_msgSend)((id)savc, af);
+                    SEL sdm = sel_registerName("setDisplayMode:animationFactory:completion:");
+                    if ([sv respondsToSelector:sdm]) {
+                        ((void(*)(id,SEL,int,id,void*))objc_msgSend)(sv, sdm, 0, animF, NULL);  // 0 = normal LiveContent
+                        DD("[restore] app scene view -> mode 0 (LiveContent)\n");
+                    } else { DD("[restore] no setDisplayMode on scene view\n"); }
+                } else { DD("[restore] no scene view to restore\n"); }
+            } else { DD("[restore] no gCBRAppVC\n"); }
+        } @catch(NSException *e) { DD("[restore] EXC\n"); }
+
         if (gCBRRootWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRRootWindow, sel_registerName("setHidden:"), YES); }
         gCBRRootWindow = nil; gCBRAppVC = nil; gCBRActiveTxns = nil;
         @try { if (gCBRKeepAlive) [gCBRKeepAlive removeAllObjects]; } @catch(...) {}
-        int fd=open("/var/mobile/CBR_sb_host.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
-        if(fd>=0){const char*m="[host] dismissed\n";write(fd,m,strlen(m));close(fd);}
+        DD("[host] dismissed\n");
+        if(fd>=0)close(fd);
+        #undef DD
     } @catch(...) {}
 }
 
@@ -2642,7 +2668,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.23 init - exit button\n";
+        const char msg[] = "[CBR] v3.20.24 init - teardown-restore\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2651,7 +2677,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.23 init - exit button\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.24 init - teardown-restore\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
