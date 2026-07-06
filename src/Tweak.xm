@@ -1286,6 +1286,17 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         if (!rootWindow) { HH("no rootWindow -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
         gCBRRootWindow = rootWindow;
         @try { id layer = cb(rootWindow, "layer"); ((void(*)(id,SEL,CGFloat))objc_msgSend)(layer, sel_registerName("setCornerRadius:"), (CGFloat)13.0); ((void(*)(id,SEL,BOOL))objc_msgSend)(layer, sel_registerName("setMasksToBounds:"), YES); } @catch(...) {}
+        // v3.20.26: force the WINDOW itself to landscape (orientation 3); scene orientation
+        // alone leaves it portrait on auto-launch. Guarded + logged for iOS 17.
+        @try {
+            SEL _rot = sel_registerName("_rotateWindowToOrientation:updateStatusBar:duration:skipCallbacks:");
+            if ([rootWindow respondsToSelector:_rot]) {
+                ((void(*)(id,SEL,int,int,int,int))objc_msgSend)(rootWindow, _rot, 3, 1, 0, 0);
+                HH("window rotated to landscape via _rotateWindowToOrientation:3\n");
+            } else {
+                HH("_rotateWindowToOrientation: NOT on iOS 17 - need fallback\n");
+            }
+        } @catch(...) { HH("window rotate threw\n"); }
         Class entCls = objc_getClass("SBDeviceApplicationSceneEntity");
         id appSceneEntity = ((id(*)(id,SEL,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(entCls, sel_registerName("alloc")), sel_registerName("initWithApplicationSceneHandle:"), handle);
         HHF("appSceneEntity: %s\n", appSceneEntity ? class_getName(object_getClass(appSceneEntity)) : "nil");
@@ -2681,7 +2692,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.25 init - reopen foreground fix\n";
+        const char msg[] = "[CBR] v3.20.26 init - window rotate landscape\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2690,7 +2701,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.25 init - reopen foreground fix\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.26 init - window rotate landscape\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
