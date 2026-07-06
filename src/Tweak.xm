@@ -2558,11 +2558,72 @@ static void cbrCPProbeScenes(void) {
 // ── Phase 2: _setupIconModel — inject before icon model is built ──────────────
 // Called from DBDashboardHomeViewController viewDidLoad when car connects.
 // By this point the ObjC runtime is fully up and our const char* helpers work.
+// v3.20.30: CarPlayApp-SIDE chrome probe. From SpringBoard we could NOT see CarPlay chrome
+// (all windows were sameScreen=0 / phone display). CarPlay's chrome is rendered in THIS process
+// (CarPlayApp). This probe enumerates CarPlayApp's own scenes/windows/view hierarchy to find the
+// sidebar/dock/home-button chrome - the make-or-break for genuine stock-chrome coordination.
+static void cbrCPProbeChrome(void) {
+    int cf = open("/var/mobile/CBR_cpchrome.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    #define PC(...) do{ char _b[320]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(cf>=0)write(cf,_b,_n);}while(0)
+    PC("==== CARPLAYAPP-SIDE CHROME PROBE ====\n");
+    @try {
+        Class appCls = objc_getClass("UIApplication");
+        id app = ((id(*)(id,SEL))objc_msgSend)(appCls, sel_registerName("sharedApplication"));
+        // 1) all connected scenes in CarPlayApp + their windows
+        id conns = app ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("connectedScenes")) : nil;
+        id all = conns ? ((id(*)(id,SEL))objc_msgSend)(conns, sel_registerName("allObjects")) : nil;
+        NSUInteger cnt = all ? [all count] : 0;
+        PC("connectedScenes: %lu\n", (unsigned long)cnt);
+        for (NSUInteger i=0;i<cnt;i++){
+            id sc = [all objectAtIndex:i];
+            const char *scn = class_getName(object_getClass(sc));
+            // scene role + session
+            id sess = [sc respondsToSelector:sel_registerName("session")] ? ((id(*)(id,SEL))objc_msgSend)(sc, sel_registerName("session")) : nil;
+            id role = sess ? ((id(*)(id,SEL))objc_msgSend)(sess, sel_registerName("role")) : nil;
+            NSString *roleS = role ? [NSString stringWithFormat:@"%@", role] : @"?";
+            PC("  scene[%lu] %s role=%.50s\n", (unsigned long)i, scn, [roleS UTF8String]);
+            // windows of this scene
+            @try {
+                id wins = [sc respondsToSelector:sel_registerName("windows")] ? ((id(*)(id,SEL))objc_msgSend)(sc, sel_registerName("windows")) : nil;
+                NSUInteger wc = wins ? [wins count] : 0;
+                PC("    windows: %lu\n", (unsigned long)wc);
+                for (NSUInteger j=0;j<wc;j++){
+                    id w=[wins objectAtIndex:j];
+                    CGRect wf=((CGRect(*)(id,SEL))objc_msgSend)(w,sel_registerName("frame"));
+                    double lvl=((double(*)(id,SEL))objc_msgSend)(w,sel_registerName("windowLevel"));
+                    PC("      win %s level=%.1f frame=%.0fx%.0f\n", class_getName(object_getClass(w)), lvl, wf.size.width, wf.size.height);
+                    // walk the rootVC's view tree shallowly, looking for chrome-like view classes
+                    id rvc=[w respondsToSelector:sel_registerName("rootViewController")]?((id(*)(id,SEL))objc_msgSend)(w,sel_registerName("rootViewController")):nil;
+                    id rv=rvc?((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")):nil;
+                    if(rv){
+                        id subs=((id(*)(id,SEL))objc_msgSend)(rv,sel_registerName("subviews"));
+                        NSUInteger sc2=subs?[subs count]:0;
+                        PC("        rootView %s subviews=%lu\n", class_getName(object_getClass(rv)), (unsigned long)sc2);
+                        for(NSUInteger k=0;k<sc2 && k<12;k++){ id v=[subs objectAtIndex:k];
+                            const char *vn=class_getName(object_getClass(v));
+                            PC("          sub[%lu] %s\n",(unsigned long)k,vn);
+                        }
+                    }
+                }
+            } @catch(...) { PC("    (windows enum threw)\n"); }
+        }
+        // 2) look for known CarPlay chrome classes by name
+        PC("-- known chrome classes present? --\n");
+        for (const char *cn : (const char*[]){"CARDashboardViewController","CARDashboardChromeViewController","CARSidebarViewController","CARDockViewController","CARStatusBarViewController","CARHomeButton","DBDashboardHomeViewController","DBDashboardViewController","CARDashboardRootViewController","CARChromeViewController", NULL}) {
+            if(!cn)break; Class c=objc_getClass(cn); PC("  %s: %s\n", cn, c?"PRESENT":"absent");
+        }
+    } @catch(NSException *e){ PC("PROBE EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+    PC("==== END ====\n");
+    if(cf>=0)close(cf);
+    #undef PC
+}
+
 %hook DBDashboardHomeViewController
 
 - (void)_setupIconModel {
     cbrCPProbeScenes();
     cbrCPProbeCarSceneGuts();
+    cbrCPProbeChrome();
     CBLog("[CBR] _setupIconModel called");
 
     if (gLibraryPtr) {
@@ -2759,7 +2820,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.29 init - revert level+dump settings\n";
+        const char msg[] = "[CBR] v3.20.30 init - CP-side chrome probe\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2768,7 +2829,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.29 init - revert level+dump settings\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.30 init - CP-side chrome probe\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
