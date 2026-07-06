@@ -1326,6 +1326,23 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         if (!rootWindow) { HH("no rootWindow -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
         gCBRRootWindow = rootWindow;
         @try { id layer = cb(rootWindow, "layer"); ((void(*)(id,SEL,CGFloat))objc_msgSend)(layer, sel_registerName("setCornerRadius:"), (CGFloat)13.0); ((void(*)(id,SEL,BOOL))objc_msgSend)(layer, sel_registerName("setMasksToBounds:"), YES); } @catch(...) {}
+        // v3.20.37: size the window to the REAL car screen bounds (dynamic per car). Our window
+        // was created 240x400 but the actual car screen is e.g. 472x281 (landscape). Find the car
+        // UIScreen via _isCarScreen and match its bounds so the app lays out correctly in a
+        // properly-sized window - NO content-frame forcing (apps fight that).
+        @try {
+            Class _uisCls = objc_getClass("UIScreen");
+            id _screens = ((id(*)(id,SEL))objc_msgSend)(_uisCls, sel_registerName("screens"));
+            id _carScreen = nil;
+            for (id _sc in _screens) { @try { if (((BOOL(*)(id,SEL))objc_msgSend)(_sc, sel_registerName("_isCarScreen"))) { _carScreen = _sc; break; } } @catch(...) {} }
+            if (_carScreen) {
+                CGRect _csb = ((CGRect(*)(id,SEL))objc_msgSend)(_carScreen, sel_registerName("bounds"));
+                if (_csb.size.width > 0 && _csb.size.height > 0) {
+                    ((void(*)(id,SEL,CGRect))objc_msgSend)(rootWindow, sel_registerName("setFrame:"), _csb);
+                    HHF("window sized to REAL car screen %.0fx%.0f\n", _csb.size.width, _csb.size.height);
+                }
+            } else { HH("no car screen found for sizing\n"); }
+        } @catch(...) { HH("car screen sizing threw\n"); }
         // v3.20.26: force the WINDOW itself to landscape (orientation 3); scene orientation
         // alone leaves it portrait on auto-launch. Guarded + logged for iOS 17.
         @try {
@@ -2935,7 +2952,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.36 init - landscape content frame (fix portrait strip)\n";
+        const char msg[] = "[CBR] v3.20.37 init - size window to real car screen (472x281 not 240x400)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2944,7 +2961,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.36 init - landscape content frame\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.37 init - size window to real car screen\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
