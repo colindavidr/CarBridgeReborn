@@ -1147,13 +1147,30 @@ static void cbrSBHostDismiss(void) {
             } else { DD("[restore] no gCBRAppVC\n"); }
         } @catch(NSException *e) { DD("[restore] EXC\n"); }
 
+        // v3.20.32: BACKGROUND the app's scene on exit so it PAUSES (audio was continuing because
+        // we only hid the window + held keep-alive, leaving the app running). Set the scene to
+        // background/deactivated via updateSettingsWithBlock, then release keep-alive so it can suspend.
+        @try {
+            id sc = gCBRSceneHandle ? ((id(*)(id,SEL))objc_msgSend)(gCBRSceneHandle, sel_registerName("sceneIfExists")) : nil;
+            if (sc) {
+                SEL _ub = sel_registerName("updateSettingsWithBlock:");
+                if ([sc respondsToSelector:_ub]) {
+                    void (^bg)(id) = ^(id ms){
+                        @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(ms, sel_registerName("setForeground:"), NO); } @catch(...) {}
+                        @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(ms, sel_registerName("setDeactivated:"), YES); } @catch(...) {}
+                    };
+                    @try { ((void(*)(id,SEL,id))objc_msgSend)(sc, _ub, bg); DD("[exit] app scene backgrounded (foreground=NO, deactivated=YES) - should pause\n"); } @catch(...) { DD("[exit] background block EXC\n"); }
+                }
+            } else { DD("[exit] no scene to background\n"); }
+        } @catch(...) {}
+
         if (gCBRRootWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRRootWindow, sel_registerName("setHidden:"), YES); }
         @try { if (gCBROverlayWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBROverlayWindow, sel_registerName("setHidden:"), YES); gCBROverlayWindow = nil; } } @catch(...) {}
         gCBRRootWindow = nil; gCBRAppVC = nil; gCBRActiveTxns = nil;
-        // v3.20.25: do NOT clear keep-alive on dismiss - keeps the app alive so reopen
-        // doesn't hit a suspended process (which renders black). Test of the suspension theory.
-        // @try { if (gCBRKeepAlive) [gCBRKeepAlive removeAllObjects]; } @catch(...) {}
-        DD("[host] dismissed (keep-alive retained)\n");
+        // v3.20.32: NOW release keep-alive (the .25 retain kept the app running -> audio continued +
+        // left it in a half-state that black-screened on reopen). Releasing lets it suspend cleanly.
+        @try { if (gCBRKeepAlive) [gCBRKeepAlive removeAllObjects]; } @catch(...) {}
+        DD("[host] dismissed (backgrounded + keep-alive released)\n");
         if(fd>=0)close(fd);
         #undef DD
     } @catch(...) {}
@@ -1374,17 +1391,10 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                             @try {
                                                 CGRect _cwb = gCBRRootWindow ? ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds")) : CGRectZero;
                                                 if (_cwb.size.width > 0 && _cwb.size.height > 0) {
-                                                    // v3.20.31: iOS 17 uses setFrame: on UIMutableApplicationSceneSettings
-                                                    // for content sizing (setContentReferenceSize doesn't exist on 17).
-                                                    // Set the scene frame to the car's landscape bounds, and lock orientation
-                                                    // so YouTube's fullscreen interaction can't revert it to portrait.
-                                                    SEL _sf = sel_registerName("setFrame:");
-                                                    if ([mutableSettings respondsToSelector:_sf]) {
-                                                        CGRect _carFrame = CGRectMake(0, 0, _cwb.size.width, _cwb.size.height);
-                                                        ((void(*)(id,SEL,CGRect))objc_msgSend)(mutableSettings, _sf, _carFrame);
-                                                        CHF("[FIX-CRS] setFrame %.0fx%.0f (car) applied\n", _cwb.size.width, _cwb.size.height);
-                                                    }
-                                                    @try { SEL _sbi = sel_registerName("setScreenBoundsIgnoresSceneOrientation:"); if([mutableSettings respondsToSelector:_sbi]){ ((void(*)(id,SEL,BOOL))objc_msgSend)(mutableSettings, _sbi, YES); CH("[FIX-CRS] setScreenBoundsIgnoresSceneOrientation YES (orientation lock)\n"); } } @catch(...) {}
+                                                    // v3.20.32: setFrame/orientation-lock REMOVED - the car bounds came back
+                                                    // portrait (281x472) so setFrame made the app render phone-portrait (stretch bug).
+                                                    // Window rotation alone handled orientation correctly in earlier builds.
+
                                                     SEL _crs = sel_registerName("setContentReferenceSize:withInterfaceOrientation:");
                                                     if (0 && [mutableSettings respondsToSelector:_crs]) {
                                                         CHF("[FIX-CRS] (dead)\n");
@@ -2852,7 +2862,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.31 init - setFrame sizing + orient lock + exit overlay\n";
+        const char msg[] = "[CBR] v3.20.32 init - remove setFrame stretch + exit backgrounds app (pause+clean reopen)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2861,7 +2871,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.31 init - setFrame sizing + orient lock + exit overlay\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.32 init - remove setFrame stretch + exit backgrounds app\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
