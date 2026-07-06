@@ -850,6 +850,7 @@ static void cbrSBProbeDisplays(void) {
 // external car screen) is solved. Logs before/after every call so a respring
 // points at the exact failing operation.
 static id gCBRCarWindow = nil;
+static id gCBROverlayWindow = nil;  // v3.20.31: separate window for exit button
 // cbrFindCarWindowScene: scene-attach variant  // retain so ARC doesn't release it
 static void cbrSBRenderWindow(void) {
     static int done = 0; if (done) return; done = 1;
@@ -1147,6 +1148,7 @@ static void cbrSBHostDismiss(void) {
         } @catch(NSException *e) { DD("[restore] EXC\n"); }
 
         if (gCBRRootWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRRootWindow, sel_registerName("setHidden:"), YES); }
+        @try { if (gCBROverlayWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBROverlayWindow, sel_registerName("setHidden:"), YES); gCBROverlayWindow = nil; } } @catch(...) {}
         gCBRRootWindow = nil; gCBRAppVC = nil; gCBRActiveTxns = nil;
         // v3.20.25: do NOT clear keep-alive on dismiss - keeps the app alive so reopen
         // doesn't hit a suspended process (which renders black). Test of the suspension theory.
@@ -1372,10 +1374,20 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                             @try {
                                                 CGRect _cwb = gCBRRootWindow ? ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds")) : CGRectZero;
                                                 if (_cwb.size.width > 0 && _cwb.size.height > 0) {
+                                                    // v3.20.31: iOS 17 uses setFrame: on UIMutableApplicationSceneSettings
+                                                    // for content sizing (setContentReferenceSize doesn't exist on 17).
+                                                    // Set the scene frame to the car's landscape bounds, and lock orientation
+                                                    // so YouTube's fullscreen interaction can't revert it to portrait.
+                                                    SEL _sf = sel_registerName("setFrame:");
+                                                    if ([mutableSettings respondsToSelector:_sf]) {
+                                                        CGRect _carFrame = CGRectMake(0, 0, _cwb.size.width, _cwb.size.height);
+                                                        ((void(*)(id,SEL,CGRect))objc_msgSend)(mutableSettings, _sf, _carFrame);
+                                                        CHF("[FIX-CRS] setFrame %.0fx%.0f (car) applied\n", _cwb.size.width, _cwb.size.height);
+                                                    }
+                                                    @try { SEL _sbi = sel_registerName("setScreenBoundsIgnoresSceneOrientation:"); if([mutableSettings respondsToSelector:_sbi]){ ((void(*)(id,SEL,BOOL))objc_msgSend)(mutableSettings, _sbi, YES); CH("[FIX-CRS] setScreenBoundsIgnoresSceneOrientation YES (orientation lock)\n"); } } @catch(...) {}
                                                     SEL _crs = sel_registerName("setContentReferenceSize:withInterfaceOrientation:");
-                                                    if ([mutableSettings respondsToSelector:_crs]) {
-                                                        ((void(*)(id,SEL,CGSize,NSInteger))objc_msgSend)(mutableSettings, _crs, _cwb.size, (NSInteger)3);
-                                                        CHF("[FIX-CRS] setContentReferenceSize %.0fx%.0f (car) applied\n", _cwb.size.width, _cwb.size.height);
+                                                    if (0 && [mutableSettings respondsToSelector:_crs]) {
+                                                        CHF("[FIX-CRS] (dead)\n");
                                                     } else {
                                                         SEL _crs2 = sel_registerName("setContentReferenceSize:");
                                                         if ([mutableSettings respondsToSelector:_crs2]) { ((void(*)(id,SEL,CGSize))objc_msgSend)(mutableSettings, _crs2, _cwb.size); CH("[FIX-CRS] setContentReferenceSize (no-orient) applied\n"); }
@@ -1606,7 +1618,27 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 id _blayer = ((id(*)(id,SEL))objc_msgSend)(_exit, sel_registerName("layer"));
                 if (_blayer) ((void(*)(id,SEL,CGFloat))objc_msgSend)(_blayer, sel_registerName("setCornerRadius:"), (CGFloat)10.0);
                 ((void(*)(id,SEL,id,SEL,unsigned long))objc_msgSend)(_exit, sel_registerName("addTarget:action:forControlEvents:"), gCBRExitTarget, sel_registerName("cbrExitTapped"), (unsigned long)(1UL<<6));
-                ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("addSubview:"), _exit);
+                // v3.20.31: add the exit button to a SEPARATE overlay window at a HIGHER level than
+                // the scene view, so the app's full-screen scene view can't swallow its taps (the reason
+                // Exit didn't work - it was under the scene view in the same window).
+                @try {
+                    Class _winCls = objc_getClass("UIRootSceneWindow");
+                    id _ovl = ((id(*)(id,SEL,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(_winCls, sel_registerName("alloc")), sel_registerName("initWithDisplayConfiguration:"), dispCfg);
+                    if (_ovl) {
+                        gCBROverlayWindow = _ovl;
+                        ((void(*)(id,SEL,double))objc_msgSend)(_ovl, sel_registerName("setWindowLevel:"), (double)100.0);
+                        id _clear = ((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIColor"), sel_registerName("clearColor"));
+                        ((void(*)(id,SEL,id))objc_msgSend)(_ovl, sel_registerName("setBackgroundColor:"), _clear);
+                        // host the button in a passthrough container so only the button area is touchable
+                        ((void(*)(id,SEL,id))objc_msgSend)(_ovl, sel_registerName("addSubview:"), _exit);
+                        ((void(*)(id,SEL,BOOL))objc_msgSend)(_ovl, sel_registerName("setHidden:"), NO);
+                        ((void(*)(id,SEL))objc_msgSend)(_ovl, sel_registerName("makeKeyAndVisible"));
+                        HH("exit button in separate overlay window (level 100)\n");
+                    } else {
+                        ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("addSubview:"), _exit);
+                        HH("overlay window failed - exit button on root window (may be covered)\n");
+                    }
+                } @catch(...) { ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("addSubview:"), _exit); }
                 ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("bringSubviewToFront:"), _exit);
                 HH("exit button added\n");
             }
@@ -2820,7 +2852,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.30 init - CP-side chrome probe\n";
+        const char msg[] = "[CBR] v3.20.31 init - setFrame sizing + orient lock + exit overlay\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2829,7 +2861,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.30 init - CP-side chrome probe\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.31 init - setFrame sizing + orient lock + exit overlay\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
