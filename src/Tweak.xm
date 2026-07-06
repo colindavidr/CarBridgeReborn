@@ -1475,6 +1475,38 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                         CGRect wf = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds"));
                                         ((void(*)(id,SEL,CGRect))objc_msgSend)(rdSv, sel_registerName("setFrame:"), CGRectMake(0,0,wf.size.width,wf.size.height));
                                         CH("REDRIVE(comp) sized live sceneView to car window\n");
+                                        // v3.20.34: GEOMETRY PROBE - capture actual coordinate spaces so we fix
+                                        // the zoom/touch-offset correctly (last setFrame guess used portrait bounds).
+                                        @try {
+                                            int gf = open("/var/mobile/CBR_geom.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+                                            #define GG(...) do{ char _b[300]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(gf>=0)write(gf,_b,_n);}while(0)
+                                            GG("==== GEOMETRY PROBE ====\n");
+                                            if (gCBRRootWindow) {
+                                                CGRect wb=((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow,sel_registerName("bounds"));
+                                                CGRect wf=((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow,sel_registerName("frame"));
+                                                GG("window bounds=%.0fx%.0f frame=%.0f,%.0f %.0fx%.0f\n", wb.size.width,wb.size.height, wf.origin.x,wf.origin.y,wf.size.width,wf.size.height);
+                                                @try { CGAffineTransform t=((CGAffineTransform(*)(id,SEL))objc_msgSend)(gCBRRootWindow,sel_registerName("transform")); GG("window transform=[%.2f %.2f %.2f %.2f %.1f %.1f]\n", t.a,t.b,t.c,t.d,t.tx,t.ty); } @catch(...) {}
+                                            }
+                                            id dvc = gCBRAppVC ? getIvar(gCBRAppVC, "_deviceAppViewController") : nil;
+                                            id sv = dvc ? getIvar(dvc, "_sceneView") : nil;
+                                            if (sv) {
+                                                CGRect sb=((CGRect(*)(id,SEL))objc_msgSend)(sv,sel_registerName("bounds"));
+                                                CGRect sf=((CGRect(*)(id,SEL))objc_msgSend)(sv,sel_registerName("frame"));
+                                                GG("sceneView bounds=%.0fx%.0f frame=%.0f,%.0f %.0fx%.0f\n", sb.size.width,sb.size.height, sf.origin.x,sf.origin.y,sf.size.width,sf.size.height);
+                                                @try { CGAffineTransform t=((CGAffineTransform(*)(id,SEL))objc_msgSend)(sv,sel_registerName("transform")); GG("sceneView transform=[%.2f %.2f %.2f %.2f %.1f %.1f]\n", t.a,t.b,t.c,t.d,t.tx,t.ty); } @catch(...) {}
+                                            }
+                                            // the scene settings' current frame + orientation
+                                            if (scn) {
+                                                id st=[scn respondsToSelector:sel_registerName("settings")]?((id(*)(id,SEL))objc_msgSend)(scn,sel_registerName("settings")):nil;
+                                                if (st) {
+                                                    @try { CGRect stf=((CGRect(*)(id,SEL))objc_msgSend)(st,sel_registerName("frame")); GG("settings.frame=%.0f,%.0f %.0fx%.0f\n", stf.origin.x,stf.origin.y,stf.size.width,stf.size.height); } @catch(...) {}
+                                                    @try { NSInteger io=((NSInteger(*)(id,SEL))objc_msgSend)(st,sel_registerName("interfaceOrientation")); GG("settings.interfaceOrientation=%ld\n",(long)io); } @catch(...) {}
+                                                }
+                                            }
+                                            GG("==== END ====\n");
+                                            if(gf>=0)close(gf);
+                                            #undef GG
+                                        } @catch(...) {}
                                     }
                                 } @catch (NSException *e) { CHF("REDRIVE(comp) EXC: %s\n", [[e reason] UTF8String]?:"?"); }
                                     } else {
@@ -2883,7 +2915,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.33 init - exit terminates app (fresh-launch reopen renders + audio stops)\n";
+        const char msg[] = "[CBR] v3.20.34 init - geometry probe\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2892,7 +2924,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.33 init - exit terminates app\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.34 init - geometry probe\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
