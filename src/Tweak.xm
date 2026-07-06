@@ -1,3 +1,4 @@
+#include <signal.h>
 /*
  * CarBridgeReborn v3.5.0
  * iOS 17.0, arm64e, NathanLR rootless
@@ -851,6 +852,7 @@ static void cbrSBProbeDisplays(void) {
 // points at the exact failing operation.
 static id gCBRCarWindow = nil;
 static id gCBROverlayWindow = nil;  // v3.20.31: separate window for exit button
+static NSString *gCBRLastBidStr = nil;  // v3.20.33: bid to terminate on exit
 // cbrFindCarWindowScene: scene-attach variant  // retain so ARC doesn't release it
 static void cbrSBRenderWindow(void) {
     static int done = 0; if (done) return; done = 1;
@@ -1147,22 +1149,40 @@ static void cbrSBHostDismiss(void) {
             } else { DD("[restore] no gCBRAppVC\n"); }
         } @catch(NSException *e) { DD("[restore] EXC\n"); }
 
-        // v3.20.32: BACKGROUND the app's scene on exit so it PAUSES (audio was continuing because
-        // we only hid the window + held keep-alive, leaving the app running). Set the scene to
-        // background/deactivated via updateSettingsWithBlock, then release keep-alive so it can suspend.
+        // v3.20.33: TERMINATE the app on exit instead of backgrounding it. Reopen then does a
+        // FRESH LAUNCH, which renders reliably (proven on first-open) - re-hosting a backgrounded
+        // app produced a perfect host log but BLACK screen (render server never re-bound). A killed
+        // app also can't keep playing audio. So: exit = kill, reopen = fresh launch = renders + silent.
         @try {
-            id sc = gCBRSceneHandle ? ((id(*)(id,SEL))objc_msgSend)(gCBRSceneHandle, sel_registerName("sceneIfExists")) : nil;
-            if (sc) {
-                SEL _ub = sel_registerName("updateSettingsWithBlock:");
-                if ([sc respondsToSelector:_ub]) {
-                    void (^bg)(id) = ^(id ms){
-                        @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(ms, sel_registerName("setForeground:"), NO); } @catch(...) {}
-                        @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(ms, sel_registerName("setDeactivated:"), YES); } @catch(...) {}
-                    };
-                    @try { ((void(*)(id,SEL,id))objc_msgSend)(sc, _ub, bg); DD("[exit] app scene backgrounded (foreground=NO, deactivated=YES) - should pause\n"); } @catch(...) { DD("[exit] background block EXC\n"); }
-                }
-            } else { DD("[exit] no scene to background\n"); }
-        } @catch(...) {}
+            NSString *_bidStr = gCBRLastBidStr;  // stored at host time
+            if (_bidStr) {
+                Class acCls = objc_getClass("SBApplicationController");
+                id ac = acCls ? ((id(*)(id,SEL))objc_msgSend)(acCls, sel_registerName("sharedInstance")) : nil;
+                id app = ac ? ((id(*)(id,SEL,id))objc_msgSend)(ac, sel_registerName("applicationWithBundleIdentifier:"), _bidStr) : nil;
+                if (app) {
+                    // Prefer SBMainWorkspace/RunningBoard-style termination via the app process.
+                    id proc = [app respondsToSelector:sel_registerName("process")] ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("process")) : nil;
+                    BOOL killed = NO;
+                    if (proc) {
+                        for (const char *sel : (const char*[]){"terminateForReason:andReport:withDescription:", NULL}) { (void)sel; }
+                        SEL tk = sel_registerName("terminateForReasonAndReportWithDescription:");
+                        // Simpler: use the scene handle's application to request termination.
+                    }
+                    // Most reliable on 17: ask SBMainWorkspace to deactivate+terminate.
+                    Class wsCls = objc_getClass("SBMainWorkspace");
+                    id ws = wsCls ? ((id(*)(id,SEL))objc_msgSend)(wsCls, sel_registerName("sharedInstance")) : nil;
+                    if (!ws && wsCls) ws = ((id(*)(id,SEL))objc_msgSend)(wsCls, sel_registerName("mainWorkspace"));
+                    // Fallback path: kill the process by pid via the scene's clientProcess.
+                    id sc = gCBRSceneHandle ? ((id(*)(id,SEL))objc_msgSend)(gCBRSceneHandle, sel_registerName("sceneIfExists")) : nil;
+                    id cp = sc && [sc respondsToSelector:sel_registerName("clientProcess")] ? ((id(*)(id,SEL))objc_msgSend)(sc, sel_registerName("clientProcess")) : nil;
+                    if (cp && [cp respondsToSelector:sel_registerName("pid")]) {
+                        int pid = ((int(*)(id,SEL))objc_msgSend)(cp, sel_registerName("pid"));
+                        if (pid > 0) { kill(pid, 9); killed = YES; DD("[exit] terminated app via SIGKILL to clientProcess pid\n"); }
+                    }
+                    if (!killed) DD("[exit] could not resolve pid to terminate\n");
+                } else { DD("[exit] no SBApplication to terminate\n"); }
+            } else { DD("[exit] no stored bid to terminate\n"); }
+        } @catch(NSException *e) { DD("[exit] terminate EXC\n"); }
 
         if (gCBRRootWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRRootWindow, sel_registerName("setHidden:"), YES); }
         @try { if (gCBROverlayWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBROverlayWindow, sel_registerName("setHidden:"), YES); gCBROverlayWindow = nil; } } @catch(...) {}
@@ -1282,6 +1302,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
     // continue hosting the freshly-tapped app. Fixes "worked once, black after".
     if (gCBRRootWindow) { HH("was hosting -> dismiss old, re-host fresh\n"); cbrSBHostDismiss(); }
     HHF("bid: %s\n", bid_cstr);
+        @try { gCBRLastBidStr = [NSString stringWithUTF8String:bid_cstr]; } @catch(...) {}
     @try {
         NSString *bid = [NSString stringWithUTF8String:bid_cstr];
         Class acCls = objc_getClass("SBApplicationController");
@@ -2862,7 +2883,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.32 init - remove setFrame stretch + exit backgrounds app (pause+clean reopen)\n";
+        const char msg[] = "[CBR] v3.20.33 init - exit terminates app (fresh-launch reopen renders + audio stops)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2871,7 +2892,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.32 init - remove setFrame stretch + exit backgrounds app\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.33 init - exit terminates app\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
