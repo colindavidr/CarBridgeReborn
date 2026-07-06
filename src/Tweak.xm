@@ -1540,6 +1540,32 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                                     @try { NSInteger io=((NSInteger(*)(id,SEL))objc_msgSend)(st,sel_registerName("interfaceOrientation")); GG("settings.interfaceOrientation=%ld\n",(long)io); } @catch(...) {}
                                                 }
                                             }
+                                            // v3.20.38: CAR UIScreen real bounds/scale + app contentReferenceSize.
+                                            // (vars named off _b/_n to avoid colliding with the GG macro's buffer)
+                                            @try {
+                                                Class _uis = objc_getClass("UIScreen");
+                                                id _scr = ((id(*)(id,SEL))objc_msgSend)(_uis, sel_registerName("screens"));
+                                                id _arr = _scr ? ((id(*)(id,SEL))objc_msgSend)(_scr, sel_registerName("allObjects")) : nil;
+                                                NSUInteger _sn = _arr ? ((NSUInteger(*)(id,SEL))objc_msgSend)(_arr, sel_registerName("count")) : 0;
+                                                for (NSUInteger _ix=0; _ix<_sn; _ix++) {
+                                                    id _sx = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(_arr, sel_registerName("objectAtIndex:"), _ix);
+                                                    if (_sx && ((BOOL(*)(id,SEL))objc_msgSend)(_sx, sel_registerName("_isCarScreen"))) {
+                                                        CGRect _carb=((CGRect(*)(id,SEL))objc_msgSend)(_sx,sel_registerName("bounds"));
+                                                        CGRect _cnb=((CGRect(*)(id,SEL))objc_msgSend)(_sx,sel_registerName("nativeBounds"));
+                                                        CGFloat _csc=((CGFloat(*)(id,SEL))objc_msgSend)(_sx,sel_registerName("scale"));
+                                                        GG("CAR UIScreen: bounds=%.0fx%.0f scale=%.1f nativeBounds=%.0fx%.0f\n", _carb.size.width,_carb.size.height,_csc,_cnb.size.width,_cnb.size.height);
+                                                    }
+                                                }
+                                            } @catch(...) { GG("car UIScreen probe threw\n"); }
+                                            @try {
+                                                if (scn) {
+                                                    id _stx=[scn respondsToSelector:sel_registerName("settings")]?((id(*)(id,SEL))objc_msgSend)(scn,sel_registerName("settings")):nil;
+                                                    if (_stx && [_stx respondsToSelector:sel_registerName("contentReferenceSize")]) {
+                                                        CGSize _crsz=((CGSize(*)(id,SEL))objc_msgSend)(_stx,sel_registerName("contentReferenceSize"));
+                                                        GG("settings.contentReferenceSize=%.0fx%.0f\n", _crsz.width,_crsz.height);
+                                                    }
+                                                }
+                                            } @catch(...) {}
                                             GG("==== END ====\n");
                                             if(gf>=0)close(gf);
                                             #undef GG
@@ -2952,7 +2978,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.37 init - size window to real car screen (472x281 not 240x400)\n";
+        const char msg[] = "[CBR] v3.20.38 init - comprehensive geometry probe";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2961,7 +2987,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.37 init - size window to real car screen\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.38 init - comprehensive geometry probe";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
