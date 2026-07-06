@@ -1407,6 +1407,20 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                             @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mutableSettings, sel_registerName("setForeground:"), YES); } @catch(...) {}
                                             @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(mutableSettings, sel_registerName("setInterfaceOrientation:"), (NSInteger)3); } @catch(...) {}
                                             @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mutableSettings, sel_registerName("setDeactivated:"), NO); } @catch(...) {}
+                                            // v3.20.35: sync the app's content FRAME to the actual car window size so
+                                            // app-content-space == rendered-view-space == touch-space. Fixes zoom (content
+                                            // was 430x932 squished into a 240x400 view) AND touch-offset (scroll landed on
+                                            // the video because touch coords mapped through the wrong content size).
+                                            @try {
+                                                CGRect _wb = gCBRRootWindow ? ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds")) : CGRectZero;
+                                                if (_wb.size.width > 0 && _wb.size.height > 0) {
+                                                    SEL _sf = sel_registerName("setFrame:");
+                                                    if ([mutableSettings respondsToSelector:_sf]) {
+                                                        ((void(*)(id,SEL,CGRect))objc_msgSend)(mutableSettings, _sf, CGRectMake(0,0,_wb.size.width,_wb.size.height));
+                                                        CHF("[FIX-GEOM] settings.frame synced to car window %.0fx%.0f\n", _wb.size.width, _wb.size.height);
+                                                    }
+                                                }
+                                            } @catch(...) { CH("[FIX-GEOM] frame sync threw\n"); }
                                             // [FIX-CRS] v3.20.28: content reference size = the CAR's size (dynamic per vehicle),
                                             // so the app re-lays-out for the real display instead of stretching a phone-sized render.
                                             @try {
@@ -2915,7 +2929,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.34 init - geometry probe\n";
+        const char msg[] = "[CBR] v3.20.35 init - sync content frame to car window (fix zoom+touch)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2924,7 +2938,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.34 init - geometry probe\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.35 init - sync content frame to car window\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
