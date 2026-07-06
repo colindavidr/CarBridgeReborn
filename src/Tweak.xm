@@ -1367,6 +1367,22 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                             @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mutableSettings, sel_registerName("setForeground:"), YES); } @catch(...) {}
                                             @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(mutableSettings, sel_registerName("setInterfaceOrientation:"), (NSInteger)3); } @catch(...) {}
                                             @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mutableSettings, sel_registerName("setDeactivated:"), NO); } @catch(...) {}
+                                            // [FIX-CRS] v3.20.28: content reference size = the CAR's size (dynamic per vehicle),
+                                            // so the app re-lays-out for the real display instead of stretching a phone-sized render.
+                                            @try {
+                                                CGRect _cwb = gCBRRootWindow ? ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds")) : CGRectZero;
+                                                if (_cwb.size.width > 0 && _cwb.size.height > 0) {
+                                                    SEL _crs = sel_registerName("setContentReferenceSize:withInterfaceOrientation:");
+                                                    if ([mutableSettings respondsToSelector:_crs]) {
+                                                        ((void(*)(id,SEL,CGSize,NSInteger))objc_msgSend)(mutableSettings, _crs, _cwb.size, (NSInteger)3);
+                                                        CHF("[FIX-CRS] setContentReferenceSize %.0fx%.0f (car) applied\n", _cwb.size.width, _cwb.size.height);
+                                                    } else {
+                                                        SEL _crs2 = sel_registerName("setContentReferenceSize:");
+                                                        if ([mutableSettings respondsToSelector:_crs2]) { ((void(*)(id,SEL,CGSize))objc_msgSend)(mutableSettings, _crs2, _cwb.size); CH("[FIX-CRS] setContentReferenceSize (no-orient) applied\n"); }
+                                                        else CH("[FIX-CRS] NO setContentReferenceSize selector on settings\n");
+                                                    }
+                                                } else { CH("[FIX-CRS] car window bounds zero - skipped\n"); }
+                                            } @catch(...) { CH("[FIX-CRS] threw\n"); }
                                         };
                                         ((void(*)(id,SEL,id))objc_msgSend)(scn, updBlk, diff);
                                         CH("scene updateSettingsWithBlock: applied (fg+landscape)\n");
@@ -1523,7 +1539,50 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         } @catch (NSException *e) { HHF("sceneView frame EXC: %s\n", [[e reason] UTF8String]?:"?"); }
 
         @try { ((void(*)(id,SEL,double))objc_msgSend)(rootWindow, sel_registerName("setAlpha:"), (double)1.0); ((void(*)(id,SEL,BOOL))objc_msgSend)(rootWindow, sel_registerName("setHidden:"), NO); } @catch(...) {}
+        // [FIX-CHROME] v3.20.28: probe CarPlay's window topology on this display + attempt to
+        // let the stock chrome (sidebar/home button) show by lowering our window below it.
+        // Logs levels/frames so we can tune precisely if the sidebar still doesn't appear.
+        @try {
+            int cf = open("/var/mobile/CBR_chrome.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+            #define CF(...) do{ char _b[300]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(cf>=0)write(cf,_b,_n);}while(0)
+            CF("==== CHROME PROBE (car display window topology) ====\n");
+            // our window's current level
+            @try { double myLvl = ((double(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("windowLevel")); CF("our UIRootSceneWindow level = %.1f\n", myLvl); } @catch(...) {}
+            // enumerate all windows on the same UIScreen as our car window
+            @try {
+                id ourScreen = [gCBRRootWindow respondsToSelector:sel_registerName("screen")] ? ((id(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("screen")) : nil;
+                Class uiapp = objc_getClass("UIApplication");
+                id app = ((id(*)(id,SEL))objc_msgSend)(uiapp, sel_registerName("sharedApplication"));
+                id wins = app ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("windows")) : nil;
+                unsigned long wc = wins && [wins respondsToSelector:sel_registerName("count")] ? (unsigned long)[wins count] : 0;
+                CF("UIApplication.windows count = %lu\n", wc);
+                if (wins) for (id w in wins) {
+                    @try {
+                        id ws = [w respondsToSelector:sel_registerName("screen")] ? ((id(*)(id,SEL))objc_msgSend)(w, sel_registerName("screen")) : nil;
+                        int sameScr = (ws == ourScreen) ? 1 : 0;
+                        double lvl = ((double(*)(id,SEL))objc_msgSend)(w, sel_registerName("windowLevel"));
+                        CGRect wfr = ((CGRect(*)(id,SEL))objc_msgSend)(w, sel_registerName("frame"));
+                        int hid = ((BOOL(*)(id,SEL))objc_msgSend)(w, sel_registerName("isHidden"));
+                        CF("  win %s sameScreen=%d level=%.1f hidden=%d frame=%.0f,%.0f %.0fx%.0f\n",
+                           class_getName(object_getClass(w)), sameScr, lvl, hid, wfr.origin.x, wfr.origin.y, wfr.size.width, wfr.size.height);
+                    } @catch(...) {}
+                }
+            } @catch(...) { CF("window enum threw\n"); }
+            // ATTEMPT: lower our window level so CarPlay chrome (if it's a higher-level window) shows on top.
+            @try {
+                SEL slvl = sel_registerName("setWindowLevel:");
+                if ([gCBRRootWindow respondsToSelector:slvl]) {
+                    ((void(*)(id,SEL,double))objc_msgSend)(gCBRRootWindow, slvl, (double)1.0);  // low level, below chrome
+                    CF("ATTEMPT: set our window level -> 1.0 (below chrome)\n");
+                }
+            } @catch(...) { CF("level-set threw\n"); }
+            CF("==== END ====\n");
+            if(cf>=0)close(cf);
+            #undef CF
+        } @catch(...) {}
+
         // v3.20.23: exit/home button so the user can return to the CarPlay dashboard.
+        // NOTE: kept for now as a fallback. If stock chrome shows after the level change, we remove it next build.
         @try {
             if (!gCBRExitTarget) gCBRExitTarget = [[CBRExitTarget alloc] init];
             Class _btnCls = objc_getClass("UIButton");
@@ -2692,7 +2751,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.26 init - window rotate landscape\n";
+        const char msg[] = "[CBR] v3.20.28 combined init - orient+crs+chrome\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2701,7 +2760,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.26 init - window rotate landscape\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.28 combined init - orient+crs+chrome\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
