@@ -1379,7 +1379,19 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                                     } else {
                                                         SEL _crs2 = sel_registerName("setContentReferenceSize:");
                                                         if ([mutableSettings respondsToSelector:_crs2]) { ((void(*)(id,SEL,CGSize))objc_msgSend)(mutableSettings, _crs2, _cwb.size); CH("[FIX-CRS] setContentReferenceSize (no-orient) applied\n"); }
-                                                        else CH("[FIX-CRS] NO setContentReferenceSize selector on settings\n");
+                                                        else {
+                                                            CH("[FIX-CRS] NO setContentReferenceSize - dumping settings methods\n");
+                                                            // v3.20.29: dump the settings object's ACTUAL methods to find the iOS17 selector.
+                                                            static int _sd=0;
+                                                            if(!_sd){ _sd=1; int df2=open("/var/mobile/CBR_settings.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
+                                                                if(df2>=0){ const char *cn=class_getName(object_getClass(mutableSettings)); char hb[128]; int hl=snprintf(hb,sizeof(hb),"SETTINGS CLASS: %s\n",cn); write(df2,hb,hl); }
+                                                                Class _sc=object_getClass(mutableSettings); int _d=0;
+                                                                while(_sc && strcmp(class_getName(_sc),"NSObject")!=0 && _d<4){ unsigned int _n=0; Method *_m=class_copyMethodList(_sc,&_n);
+                                                                    for(unsigned int _i=0;_i<_n;_i++){ const char*_sn=sel_getName(method_getName(_m[_i]));
+                                                                        if(strncmp(_sn,"set",3)==0 && (strcasestr(_sn,"size")||strcasestr(_sn,"reference")||strcasestr(_sn,"content")||strcasestr(_sn,"bound")||strcasestr(_sn,"frame")||strcasestr(_sn,"canvas")||strcasestr(_sn,"scale"))){ char lb[200]; int ln=snprintf(lb,sizeof(lb),"-%s\n",_sn); if(df2>=0)write(df2,lb,ln);} }
+                                                                    if(_m)free(_m); _sc=class_getSuperclass(_sc); _d++; }
+                                                                if(df2>=0)close(df2); }
+                                                        }
                                                     }
                                                 } else { CH("[FIX-CRS] car window bounds zero - skipped\n"); }
                                             } @catch(...) { CH("[FIX-CRS] threw\n"); }
@@ -1569,13 +1581,9 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 }
             } @catch(...) { CF("window enum threw\n"); }
             // ATTEMPT: lower our window level so CarPlay chrome (if it's a higher-level window) shows on top.
-            @try {
-                SEL slvl = sel_registerName("setWindowLevel:");
-                if ([gCBRRootWindow respondsToSelector:slvl]) {
-                    ((void(*)(id,SEL,double))objc_msgSend)(gCBRRootWindow, slvl, (double)1.0);  // low level, below chrome
-                    CF("ATTEMPT: set our window level -> 1.0 (below chrome)\n");
-                }
-            } @catch(...) { CF("level-set threw\n"); }
+            // v3.20.29: REVERTED level-1.0 - it broke taps and can't reveal chrome anyway
+            // (CarPlay chrome is in the CarPlayApp process on a screen SpringBoard can't enumerate).
+            CF("NOTE: level change reverted - chrome unreachable from SpringBoard side\n");
             CF("==== END ====\n");
             if(cf>=0)close(cf);
             #undef CF
@@ -2751,7 +2759,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.28 combined init - orient+crs+chrome\n";
+        const char msg[] = "[CBR] v3.20.29 init - revert level+dump settings\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2760,7 +2768,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.28 combined init - orient+crs+chrome\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.29 init - revert level+dump settings\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
