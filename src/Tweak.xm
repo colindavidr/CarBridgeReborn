@@ -1414,10 +1414,16 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                             @try {
                                                 CGRect _wb = gCBRRootWindow ? ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds")) : CGRectZero;
                                                 if (_wb.size.width > 0 && _wb.size.height > 0) {
+                                                    // v3.20.36: use LANDSCAPE dims. Display config reports portrait point
+                                                    // space (e.g. 240x400) but the physical car screen is landscape, so the
+                                                    // app must render at the SWAPPED size (400x240) to fill it instead of a
+                                                    // portrait strip (screenshot showed correct content but portrait-shaped).
+                                                    CGFloat _lw = _wb.size.width, _lh = _wb.size.height;
+                                                    if (_lh > _lw) { CGFloat _t=_lw; _lw=_lh; _lh=_t; }  // ensure landscape (w>h)
                                                     SEL _sf = sel_registerName("setFrame:");
                                                     if ([mutableSettings respondsToSelector:_sf]) {
-                                                        ((void(*)(id,SEL,CGRect))objc_msgSend)(mutableSettings, _sf, CGRectMake(0,0,_wb.size.width,_wb.size.height));
-                                                        CHF("[FIX-GEOM] settings.frame synced to car window %.0fx%.0f\n", _wb.size.width, _wb.size.height);
+                                                        ((void(*)(id,SEL,CGRect))objc_msgSend)(mutableSettings, _sf, CGRectMake(0,0,_lw,_lh));
+                                                        CHF("[FIX-GEOM] settings.frame set LANDSCAPE %.0fx%.0f (from car %.0fx%.0f)\n", _lw, _lh, _wb.size.width, _wb.size.height);
                                                     }
                                                 }
                                             } @catch(...) { CH("[FIX-GEOM] frame sync threw\n"); }
@@ -2929,7 +2935,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.35 init - sync content frame to car window (fix zoom+touch)\n";
+        const char msg[] = "[CBR] v3.20.36 init - landscape content frame (fix portrait strip)\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2938,7 +2944,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.35 init - sync content frame to car window\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.36 init - landscape content frame\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
