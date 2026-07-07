@@ -3022,6 +3022,23 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
 
 %ctor {
     // PURE C — no ObjC whatsoever
+    // v3.20.47: UNCONDITIONAL beacon - log the progname of EVERY process we inject into.
+    // Definitively shows whether the dylib reaches YouTube + what its real progname is.
+    { int _bf = open("/var/mobile/CBR_injected_procs.txt", O_WRONLY|O_CREAT|O_APPEND, 0666);
+      if (_bf >= 0) { char _bb[160]; int _bn = snprintf(_bb, sizeof(_bb), "injected into progname=[%s]\n", __progname ? __progname : "(null)"); write(_bf, _bb, _bn); close(_bf); } }
+    // v3.20.47: reliable YouTube detection - check bundle id via the main bundle path, not progname.
+    // If the executable path contains "youtube" (case-insensitive) we treat it as YouTube.
+    int _isYT = 0;
+    @try {
+        char _xp[1024]; uint32_t _xs = sizeof(_xp);
+        extern int _NSGetExecutablePath(char*, uint32_t*);
+        if (_NSGetExecutablePath(_xp, &_xs) == 0) {
+            for (char *_c = _xp; *_c; _c++) { if ((_c[0]=='y'||_c[0]=='Y') && (strncasecmp(_c,"youtube",7)==0)) { _isYT = 1; break; } }
+            int _bf2 = open("/var/mobile/CBR_injected_procs.txt", O_WRONLY|O_CREAT|O_APPEND, 0666);
+            if (_bf2 >= 0) { char _bb2[1200]; int _bn2 = snprintf(_bb2, sizeof(_bb2), "  execpath=[%s] isYT=%d\n", _xp, _isYT); write(_bf2, _bb2, _bn2); close(_bf2); }
+        }
+    } @catch(...) {}
+
     if (strcmp(__progname, "CarPlay") == 0) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
@@ -3035,11 +3052,11 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.46 init - UIKit filter + YouTube gate";
+        const char msg[] = "[CBR] v3.20.47 init - progname beacon + reliable YT detect";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
-    else if (strcmp(__progname, "YouTube") == 0) {
+    else if (_isYT) {
         %init(APPS);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.unlock"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -3053,7 +3070,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.46 init - UIKit filter + YouTube gate";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.47 init - progname beacon + reliable YT detect";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
