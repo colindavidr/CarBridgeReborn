@@ -8,6 +8,7 @@
 		<array>
 			<string>com.apple.CarPlayApp</string>
 			<string>com.apple.springboard</string>
+			<string>com.google.ios.youtube</string>
 		</array>
 	</dict>
 </dict>

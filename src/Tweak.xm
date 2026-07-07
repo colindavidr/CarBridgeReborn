@@ -1313,6 +1313,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         // v3.20.18: mark this app keep-alive so the FBScene/lock hooks refuse to
         // background its scene while it is hosted on CarPlay (fixes the brief-death).
         @try { if (!gCBRKeepAlive) gCBRKeepAlive = [[NSMutableSet alloc] init]; [gCBRKeepAlive addObject:bid]; HH("marked keep-alive\n"); } @catch(...) {}
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.landscape"), NULL, NULL, YES);
         id caDisplay = cbrGetCarplayCADisplay();
         HHF("carplay CADisplay: %s\n", caDisplay ? class_getName(object_getClass(caDisplay)) : "nil");
         if (!caDisplay) { HH("no carplay CADisplay -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
@@ -2976,6 +2977,29 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
     if (fd >= 0 && n > 0) write(fd, buf, (size_t)n);
 }
 
+// v3.20.44: APP-SIDE orientation lock (carplay-cast technique, into YouTube via filter).
+static int gCBROrientOverride = -1;
+static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringRef name, const void *o, CFDictionaryRef ui) {
+    @try {
+        char nm[128]; nm[0]=0; if(name) CFStringGetCString(name,nm,sizeof(nm),kCFStringEncodingUTF8);
+        if (strstr(nm,"unlock")) { gCBROrientOverride = -1; return; }
+        gCBROrientOverride = 3;
+        Class uiapp = objc_getClass("UIApplication");
+        id app = uiapp ? ((id(*)(Class,SEL))objc_msgSend)(uiapp, sel_registerName("sharedApplication")) : nil;
+        id kw = app ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("keyWindow")) : nil;
+        SEL _sro = sel_registerName("_setRotatableViewOrientation:duration:force:");
+        if (kw && [kw respondsToSelector:_sro]) ((void(*)(id,SEL,int,float,int))objc_msgSend)(kw, _sro, 3, 0.0f, 1);
+    } @catch(...) {}
+}
+%group APPS
+%hook UIWindow
+- (void)_setRotatableViewOrientation:(int)orientation duration:(float)duration force:(int)force {
+    if (gCBROrientOverride > 0) orientation = gCBROrientOverride;
+    %orig;
+}
+%end
+%end
+
 %ctor {
     // PURE C — no ObjC whatsoever
     if (strcmp(__progname, "CarPlay") == 0) {
@@ -2991,16 +3015,23 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.43 init - chrome geometry probe\n";
+        const char msg[] = "[CBR] v3.20.44 init - app-side orientation lock";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
+    }
+    else if (strcmp(__progname, "SpringBoard") != 0) {
+        %init(APPS);
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.unlock"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        int _af=open("/var/mobile/CBR_appside.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
+        if(_af>=0){const char*m="[CBR-APP] orientation lock installed\n";write(_af,m,strlen(m));close(_af);}
     }
     else if (strcmp(__progname, "SpringBoard") == 0) {
         %init(SPRINGBOARD);
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.43 init - chrome geometry probe\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.44 init - app-side orientation lock";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
