@@ -1250,14 +1250,31 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         if (!rootWindow) { HH("no rootWindow -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
         gCBRRootWindow = rootWindow;
         @try { id layer = cb(rootWindow, "layer"); ((void(*)(id,SEL,CGFloat))objc_msgSend)(layer, sel_registerName("setCornerRadius:"), (CGFloat)13.0); ((void(*)(id,SEL,BOOL))objc_msgSend)(layer, sel_registerName("setMasksToBounds:"), YES); } @catch(...) {}
-        // v3.20.41: apps render uniformly 90deg LEFT (correct scale, wrong rotation). Apply a
-        // +90deg CoreAnimation rotation to the window to correct it. This is below the app's own
-        // orientation logic (which overrides setInterfaceOrientation) so it can't be fought.
+        // v3.20.42: rotate 90deg AND fix geometry so the rotated content fills the screen
+        // (v3.20.41 rotated but left bounds 400x240 -> stretch). Plus a chrome inset so CarPlay's
+        // sidebar stays visible (we simply don't draw over its area -> native navigation, no exit button).
         @try {
-            CGAffineTransform _rot90 = CGAffineTransformMakeRotation((CGFloat)(M_PI_2));  // +90deg clockwise
+            // Get the real car screen size (physical landscape, e.g. 400x240 points).
+            CGFloat _scrW = 400, _scrH = 240;  // fallback
+            @try {
+                id _scrs=((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("screens"));
+                for (id _sc in _scrs){ @try { if(((BOOL(*)(id,SEL))objc_msgSend)(_sc,sel_registerName("_isCarScreen"))){ CGRect _b=((CGRect(*)(id,SEL))objc_msgSend)(_sc,sel_registerName("bounds")); _scrW=_b.size.width; _scrH=_b.size.height; break; } } @catch(...) {} }
+            } @catch(...) {}
+
+            // CHROME INSET: leave the left CHROME_W points for CarPlay's sidebar (tune this value).
+            CGFloat CHROME_W = 0;   // v3.20.42: start at 0 (full screen) to first confirm stretch is fixed; raise to ~80 for sidebar
+            CGFloat _appW = _scrW - CHROME_W;   // app area width
+            CGFloat _appH = _scrH;
+
+            // For a 90deg rotation: set window bounds to the SWAPPED app size, so after rotation
+            // it presents as _appW x _appH on screen. Then position via center.
+            @try { ((void(*)(id,SEL,CGRect))objc_msgSend)(rootWindow, sel_registerName("setBounds:"), CGRectMake(0,0,_appH,_appW)); } @catch(...) {}
+            CGAffineTransform _rot90 = CGAffineTransformMakeRotation((CGFloat)(M_PI_2));
             ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(rootWindow, sel_registerName("setTransform:"), _rot90);
-            HH("v3.20.41: applied +90deg rotation transform to window\n");
-        } @catch(...) { HH("rotation transform threw\n"); }
+            // center the app area (shifted right by CHROME_W so the sidebar area stays clear)
+            @try { ((void(*)(id,SEL,CGPoint))objc_msgSend)(rootWindow, sel_registerName("setCenter:"), CGPointMake(CHROME_W + _appW/2.0, _appH/2.0)); } @catch(...) {}
+            HHF("v3.20.42: rotated + sized app area %.0fx%.0f (chrome inset %.0f, screen %.0fx%.0f)\n", _appW, _appH, CHROME_W, _scrW, _scrH);
+        } @catch(...) { HH("v3.20.42 geometry threw\n"); }
         Class entCls = objc_getClass("SBDeviceApplicationSceneEntity");
         id appSceneEntity = ((id(*)(id,SEL,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(entCls, sel_registerName("alloc")), sel_registerName("initWithApplicationSceneHandle:"), handle);
         HHF("appSceneEntity: %s\n", appSceneEntity ? class_getName(object_getClass(appSceneEntity)) : "nil");
@@ -2621,7 +2638,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.41 init - 90deg rotation transform on clean v3.20.22 base\n";
+        const char msg[] = "[CBR] v3.20.42 init - rotate+fit geometry + chrome inset\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2630,7 +2647,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.41 init - 90deg rotation transform on clean v3.20.22 base\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.42 init - rotate+fit geometry + chrome inset\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
