@@ -3013,16 +3013,28 @@ static void cbrYTGeomProbe(const char *tag) {
             for (NSUInteger w=0; w<wc; w++){
                 id win = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins, sel_registerName("objectAtIndex:"), w);
                 CGRect wb = ((CGRect(*)(id,SEL))objc_msgSend)(win, sel_registerName("bounds"));
-                id wsr = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("screen"));
-                CGRect wsb = wsr?((CGRect(*)(id,SEL))objc_msgSend)(wsr, sel_registerName("bounds")):CGRectZero;
                 id rvc = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("rootViewController"));
                 const char *rc = rvc?object_getClassName(rvc):"(nil)";
                 CGRect vb = CGRectZero; long so = 0;
                 if (rvc){ id v=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")); if(v) vb=((CGRect(*)(id,SEL))objc_msgSend)(v,sel_registerName("bounds"));
                     if ([rvc respondsToSelector:sel_registerName("supportedInterfaceOrientations")]) so=((long(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("supportedInterfaceOrientations")); }
                 BOOL key = ((BOOL(*)(id,SEL))objc_msgSend)(win, sel_registerName("isKeyWindow"));
-                fprintf(f,"    win[%lu]%s bounds=%.0fx%.0f screen=%.0fx%.0f rootVC=%s vcView=%.0fx%.0f supOrient=0x%lx\n",
-                        (unsigned long)w, key?"*KEY*":"", wb.size.width,wb.size.height, wsb.size.width,wsb.size.height, rc, vb.size.width,vb.size.height, (unsigned long)so);
+                fprintf(f,"    win[%lu]%s bounds=%.0fx%.0f rootVC=%s vcView=%.0fx%.0f supOrient=0x%lx\n",
+                        (unsigned long)w, key?"*KEY*":"", wb.size.width,wb.size.height, rc, vb.size.width,vb.size.height, (unsigned long)so);
+                id tc = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("traitCollection"));
+                long hsc = tc?((long(*)(id,SEL))objc_msgSend)(tc,sel_registerName("horizontalSizeClass")):-9;
+                long vsc = tc?((long(*)(id,SEL))objc_msgSend)(tc,sel_registerName("verticalSizeClass")):-9;
+                fprintf(f,"      traits hSizeClass=%ld vSizeClass=%ld (0=unspec 1=compact 2=regular)\n",hsc,vsc);
+                if (rvc){ id rv=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view"));
+                    if (rv){ id subs=((id(*)(id,SEL))objc_msgSend)(rv,sel_registerName("subviews"));
+                        NSUInteger nsub=subs?((NSUInteger(*)(id,SEL))objc_msgSend)(subs,sel_registerName("count")):0;
+                        fprintf(f,"      rootView subviews=%lu\n",(unsigned long)nsub);
+                        for (NSUInteger k=0;k<nsub && k<8;k++){ id sv=((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),k);
+                            CGRect svf=((CGRect(*)(id,SEL))objc_msgSend)(sv,sel_registerName("frame"));
+                            fprintf(f,"        sub[%lu] %s frame=%.0f,%.0f %.0fx%.0f\n",(unsigned long)k,object_getClassName(sv),svf.origin.x,svf.origin.y,svf.size.width,svf.size.height);
+                        }
+                    }
+                }
             }
         }
         fprintf(f, "==== END ====\n"); fclose(f);
@@ -3115,12 +3127,13 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.49 init - app-side scene geometry probe + car-scene size pin (scenes not keyWindow)";
+        const char msg[] = "[CBR] v3.20.50 init - force landscape at load (gCBROrientOverride) + extended geom probe";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
+        gCBROrientOverride = 3; // v3.20.50 force landscape at load
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(4*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrYTGeomProbe("load"); });
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.unlock"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -3134,7 +3147,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.49 init - app-side scene geometry probe + car-scene size pin (scenes not keyWindow)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.50 init - force landscape at load (gCBROrientOverride) + extended geom probe";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
