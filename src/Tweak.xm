@@ -2733,10 +2733,66 @@ static void cbrCPProbeChrome(void) {
     #undef PC
 }
 
+// v3.20.43: CHROME GEOMETRY probe - walk CarPlayApp's view tree on the car window and log
+// every view's class + frame, so we find the sidebar/dock position+width to crop our app window
+// around it (revealing CarPlay's native chrome instead of an exit button).
+static void cbrCPProbeChromeGeom(void) {
+    int cf = open("/var/mobile/CBR_chromegeom.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    #define CG(...) do{ char _b[360]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(cf>=0)write(cf,_b,_n);}while(0)
+    CG("==== CHROME GEOMETRY PROBE ====\n");
+    @try {
+        id app = ((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+        id conns = app ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("connectedScenes")) : nil;
+        id all = conns ? ((id(*)(id,SEL))objc_msgSend)(conns, sel_registerName("allObjects")) : nil;
+        NSUInteger cnt = all ? [all count] : 0;
+        for (NSUInteger i=0;i<cnt;i++){
+            id sc=[all objectAtIndex:i];
+            id wins=[sc respondsToSelector:sel_registerName("windows")]?((id(*)(id,SEL))objc_msgSend)(sc,sel_registerName("windows")):nil;
+            NSUInteger wc=wins?[wins count]:0;
+            for (NSUInteger j=0;j<wc;j++){
+                id w=[wins objectAtIndex:j];
+                CGRect wf=((CGRect(*)(id,SEL))objc_msgSend)(w,sel_registerName("frame"));
+                CG("WINDOW %s frame=%.0f,%.0f %.0fx%.0f\n", class_getName(object_getClass(w)), wf.origin.x,wf.origin.y,wf.size.width,wf.size.height);
+                // recursively walk the view tree, logging class+frame, depth-limited
+                id rvc=[w respondsToSelector:sel_registerName("rootViewController")]?((id(*)(id,SEL))objc_msgSend)(w,sel_registerName("rootViewController")):nil;
+                id rv=rvc?((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")):nil;
+                if (rv) {
+                    // iterative DFS with depth
+                    typedef struct { id v; int d; } _Node;
+                    NSMutableArray *stack = [NSMutableArray array];
+                    [stack addObject:@[rv, @0]];
+                    int _count=0;
+                    while ([stack count] > 0 && _count < 200) {
+                        NSArray *node = [stack lastObject]; [stack removeLastObject];
+                        id v = node[0]; int d = [node[1] intValue]; _count++;
+                        @try {
+                            CGRect vf=((CGRect(*)(id,SEL))objc_msgSend)(v,sel_registerName("frame"));
+                            const char *vn=class_getName(object_getClass(v));
+                            // indent by depth
+                            char ind[24]; int ii; for(ii=0;ii<d && ii<10;ii++) ind[ii]=' '; ind[ii]=0;
+                            // only log views wider/taller than trivial + name hints of chrome
+                            CG("  %s%s frame=%.0f,%.0f %.0fx%.0f\n", ind, vn, vf.origin.x,vf.origin.y,vf.size.width,vf.size.height);
+                            if (d < 4) {
+                                id subs=((id(*)(id,SEL))objc_msgSend)(v,sel_registerName("subviews"));
+                                NSUInteger sn=subs?[subs count]:0;
+                                for (NSUInteger k=0;k<sn;k++){ [stack addObject:@[[subs objectAtIndex:k], @(d+1)]]; }
+                            }
+                        } @catch(...) {}
+                    }
+                }
+            }
+        }
+    } @catch(NSException *e){ CG("PROBE EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+    CG("==== END ====\n");
+    if(cf>=0)close(cf);
+    #undef CG
+}
+
 %hook DBDashboardHomeViewController
 
 - (void)_setupIconModel {
     cbrCPProbeScenes();
+    cbrCPProbeChromeGeom();
     cbrCPProbeCarSceneGuts();
     cbrCPProbeChrome();
     CBLog("[CBR] _setupIconModel called");
@@ -2935,7 +2991,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.36 init - landscape content frame (fix portrait strip)\n";
+        const char msg[] = "[CBR] v3.20.43 init - chrome geometry probe\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2944,7 +3000,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.36 init - landscape content frame\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.43 init - chrome geometry probe\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
