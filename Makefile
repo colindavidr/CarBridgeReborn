@@ -8,7 +8,6 @@ CarBridgeReborn_FILES   = src/Tweak.xm
 CarBridgeReborn_CFLAGS  = -fobjc-arc -fexceptions -Wno-error -Wno-error=strict-prototypes
 CarBridgeReborn_CFLAGS += -Wno-unused-variable -Wno-deprecated-declarations
 CarBridgeReborn_FRAMEWORKS         = UIKit Foundation CoreGraphics
-CarBridgeReborn_PRIVATE_FRAMEWORKS = FrontBoardServices SpringBoardServices
 
 BUNDLE_NAME = CarBridgeRebornPrefs
 CarBridgeRebornPrefs_FILES         = prefs/CBRPrefsController.xm
