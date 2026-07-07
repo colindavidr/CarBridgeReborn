@@ -1250,6 +1250,14 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         if (!rootWindow) { HH("no rootWindow -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
         gCBRRootWindow = rootWindow;
         @try { id layer = cb(rootWindow, "layer"); ((void(*)(id,SEL,CGFloat))objc_msgSend)(layer, sel_registerName("setCornerRadius:"), (CGFloat)13.0); ((void(*)(id,SEL,BOOL))objc_msgSend)(layer, sel_registerName("setMasksToBounds:"), YES); } @catch(...) {}
+        // v3.20.41: apps render uniformly 90deg LEFT (correct scale, wrong rotation). Apply a
+        // +90deg CoreAnimation rotation to the window to correct it. This is below the app's own
+        // orientation logic (which overrides setInterfaceOrientation) so it can't be fought.
+        @try {
+            CGAffineTransform _rot90 = CGAffineTransformMakeRotation((CGFloat)(M_PI_2));  // +90deg clockwise
+            ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(rootWindow, sel_registerName("setTransform:"), _rot90);
+            HH("v3.20.41: applied +90deg rotation transform to window\n");
+        } @catch(...) { HH("rotation transform threw\n"); }
         Class entCls = objc_getClass("SBDeviceApplicationSceneEntity");
         id appSceneEntity = ((id(*)(id,SEL,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(entCls, sel_registerName("alloc")), sel_registerName("initWithApplicationSceneHandle:"), handle);
         HHF("appSceneEntity: %s\n", appSceneEntity ? class_getName(object_getClass(appSceneEntity)) : "nil");
@@ -2613,7 +2621,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.22 init - clientProcess keepalive fix\n";
+        const char msg[] = "[CBR] v3.20.41 init - 90deg rotation transform on clean v3.20.22 base\n";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2622,7 +2630,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.22 init - clientProcess keepalive fix\n";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.41 init - 90deg rotation transform on clean v3.20.22 base\n";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
