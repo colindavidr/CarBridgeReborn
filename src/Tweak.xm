@@ -2987,19 +2987,84 @@ static void cbrSBAppsideCallback(CFNotificationCenterRef c, void *obs, CFStringR
         if(fd>=0){char l[200];int n=snprintf(l,sizeof(l),"[appside] %s\n",nm);if(n>0)write(fd,l,(size_t)n);close(fd);}
     } @catch(...) {}
 }
+static void cbrYTGeomProbe(const char *tag) {
+    @try {
+        NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_yt_geom.txt"];
+        FILE *f = fopen([path fileSystemRepresentation], "a"); if (!f) return;
+        fprintf(f, "==== YT GEOM [%s] t=%ld ====\n", tag, (long)time(NULL));
+        id ms = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
+        CGRect mb = ((CGRect(*)(id,SEL))objc_msgSend)(ms, sel_registerName("bounds"));
+        CGRect nb = ((CGRect(*)(id,SEL))objc_msgSend)(ms, sel_registerName("nativeBounds"));
+        fprintf(f, "UIScreen.main bounds=%.0fx%.0f native=%.0fx%.0f\n", mb.size.width,mb.size.height, nb.size.width,nb.size.height);
+        id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+        id arr = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("connectedScenes")), sel_registerName("allObjects"));
+        NSUInteger sc = ((NSUInteger(*)(id,SEL))objc_msgSend)(arr, sel_registerName("count"));
+        fprintf(f, "connectedScenes=%lu\n", (unsigned long)sc);
+        for (NSUInteger i=0;i<sc;i++){
+            id scene = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(arr, sel_registerName("objectAtIndex:"), i);
+            const char *scls = object_getClassName(scene);
+            if (!strstr(scls,"WindowScene")) { fprintf(f,"  scene[%lu] %s (non-window)\n",(unsigned long)i,scls); continue; }
+            id ss = ((id(*)(id,SEL))objc_msgSend)(scene, sel_registerName("screen"));
+            CGRect sb = ss ? ((CGRect(*)(id,SEL))objc_msgSend)(ss, sel_registerName("bounds")) : CGRectZero;
+            long io = ((long(*)(id,SEL))objc_msgSend)(scene, sel_registerName("interfaceOrientation"));
+            fprintf(f,"  scene[%lu] %s screen=%.0fx%.0f io=%ld\n",(unsigned long)i,scls,sb.size.width,sb.size.height,io);
+            id wins = ((id(*)(id,SEL))objc_msgSend)(scene, sel_registerName("windows"));
+            NSUInteger wc = wins?((NSUInteger(*)(id,SEL))objc_msgSend)(wins, sel_registerName("count")):0;
+            for (NSUInteger w=0; w<wc; w++){
+                id win = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins, sel_registerName("objectAtIndex:"), w);
+                CGRect wb = ((CGRect(*)(id,SEL))objc_msgSend)(win, sel_registerName("bounds"));
+                id wsr = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("screen"));
+                CGRect wsb = wsr?((CGRect(*)(id,SEL))objc_msgSend)(wsr, sel_registerName("bounds")):CGRectZero;
+                id rvc = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("rootViewController"));
+                const char *rc = rvc?object_getClassName(rvc):"(nil)";
+                CGRect vb = CGRectZero; long so = 0;
+                if (rvc){ id v=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")); if(v) vb=((CGRect(*)(id,SEL))objc_msgSend)(v,sel_registerName("bounds"));
+                    if ([rvc respondsToSelector:sel_registerName("supportedInterfaceOrientations")]) so=((long(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("supportedInterfaceOrientations")); }
+                BOOL key = ((BOOL(*)(id,SEL))objc_msgSend)(win, sel_registerName("isKeyWindow"));
+                fprintf(f,"    win[%lu]%s bounds=%.0fx%.0f screen=%.0fx%.0f rootVC=%s vcView=%.0fx%.0f supOrient=0x%lx\n",
+                        (unsigned long)w, key?"*KEY*":"", wb.size.width,wb.size.height, wsb.size.width,wsb.size.height, rc, vb.size.width,vb.size.height, (unsigned long)so);
+            }
+        }
+        fprintf(f, "==== END ====\n"); fclose(f);
+    } @catch(...) {}
+}
+
 static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringRef name, const void *o, CFDictionaryRef ui) {
     @try {
         char nm[128]; nm[0]=0; if(name) CFStringGetCString(name,nm,sizeof(nm),kCFStringEncodingUTF8);
         if (strstr(nm,"unlock")) { gCBROrientOverride = -1; return; }
         gCBROrientOverride = 3;
-        Class uiapp = objc_getClass("UIApplication");
-        id app = uiapp ? ((id(*)(Class,SEL))objc_msgSend)(uiapp, sel_registerName("sharedApplication")) : nil;
-        id kw = app ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("keyWindow")) : nil;
-        SEL _sro = sel_registerName("_setRotatableViewOrientation:duration:force:");
-        if (kw && [kw respondsToSelector:_sro]) ((void(*)(id,SEL,int,float,int))objc_msgSend)(kw, _sro, 3, 0.0f, 1);
-        id rvc = kw ? ((id(*)(id,SEL))objc_msgSend)(kw, sel_registerName("rootViewController")) : nil;
-        SEL _upd = sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
-        if (rvc && [rvc respondsToSelector:_upd]) ((void(*)(id,SEL))objc_msgSend)(rvc, _upd);
+        id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+        id arr = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("connectedScenes")), sel_registerName("allObjects"));
+        NSUInteger sc = ((NSUInteger(*)(id,SEL))objc_msgSend)(arr, sel_registerName("count"));
+        for (NSUInteger i=0;i<sc;i++){
+            id scene=((id(*)(id,SEL,NSUInteger))objc_msgSend)(arr,sel_registerName("objectAtIndex:"),i);
+            if (!strstr(object_getClassName(scene),"WindowScene")) continue;
+            id ss=((id(*)(id,SEL))objc_msgSend)(scene,sel_registerName("screen"));
+            CGRect sb= ss?((CGRect(*)(id,SEL))objc_msgSend)(ss,sel_registerName("bounds")):CGRectZero;
+            CGFloat sw=sb.size.width, sh=sb.size.height;
+            CGFloat lw=(sw>sh)?sw:sh, lh=(sw>sh)?sh:sw;
+            int carScene = (lw>0 && lw<=520);
+            id wins=((id(*)(id,SEL))objc_msgSend)(scene,sel_registerName("windows"));
+            NSUInteger wc= wins?((NSUInteger(*)(id,SEL))objc_msgSend)(wins,sel_registerName("count")):0;
+            for (NSUInteger w=0; w<wc; w++){
+                id win=((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins,sel_registerName("objectAtIndex:"),w);
+                SEL _sro=sel_registerName("_setRotatableViewOrientation:duration:force:");
+                if ([win respondsToSelector:_sro]) ((void(*)(id,SEL,int,float,int))objc_msgSend)(win,_sro,3,0.0f,1);
+                if (carScene) {
+                    ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setBounds:"),CGRectMake(0,0,lw,lh));
+                    ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setFrame:"),CGRectMake(0,0,lw,lh));
+                }
+                id rvc=((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("rootViewController"));
+                if (rvc){
+                    if (carScene) { id v=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view"));
+                        if (v) ((void(*)(id,SEL,CGRect))objc_msgSend)(v,sel_registerName("setFrame:"),CGRectMake(0,0,lw,lh)); }
+                    SEL _upd=sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
+                    if ([rvc respondsToSelector:_upd]) ((void(*)(id,SEL))objc_msgSend)(rvc,_upd);
+                }
+            }
+        }
+        cbrYTGeomProbe("orient");
     } @catch(...) {}
 }
 %group APPS
@@ -3024,8 +3089,6 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
     // PURE C — no ObjC whatsoever
     // v3.20.47: UNCONDITIONAL beacon - log the progname of EVERY process we inject into.
     // Definitively shows whether the dylib reaches YouTube + what its real progname is.
-    { int _bf = open("/var/mobile/CBR_injected_procs.txt", O_WRONLY|O_CREAT|O_APPEND, 0666);
-      if (_bf >= 0) { char _bb[160]; int _bn = snprintf(_bb, sizeof(_bb), "injected into progname=[%s]\n", __progname ? __progname : "(null)"); write(_bf, _bb, _bn); close(_bf); } }
     // v3.20.47: reliable YouTube detection - check bundle id via the main bundle path, not progname.
     // If the executable path contains "youtube" (case-insensitive) we treat it as YouTube.
     int _isYT = 0;
@@ -3052,12 +3115,13 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.48 init - drop private-framework hard link (fixes App Store injection)";
+        const char msg[] = "[CBR] v3.20.49 init - app-side scene geometry probe + car-scene size pin (scenes not keyWindow)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(4*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrYTGeomProbe("load"); });
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.unlock"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.appside.loaded"), NULL, NULL, YES);
@@ -3070,7 +3134,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.48 init - drop private-framework hard link (fixes App Store injection)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.49 init - app-side scene geometry probe + car-scene size pin (scenes not keyWindow)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
