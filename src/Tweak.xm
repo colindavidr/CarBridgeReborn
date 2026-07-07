@@ -2979,6 +2979,14 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
 
 // v3.20.44: APP-SIDE orientation lock (carplay-cast technique, into YouTube via filter).
 static int gCBROrientOverride = -1;
+static int gCBRVCFired = 0;
+static void cbrSBAppsideCallback(CFNotificationCenterRef c, void *obs, CFStringRef name, const void *o, CFDictionaryRef ui) {
+    @try {
+        char nm[128]; nm[0]=0; if(name) CFStringGetCString(name,nm,sizeof(nm),kCFStringEncodingUTF8);
+        int fd=open("/var/mobile/CBR_appside_sb.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
+        if(fd>=0){char l[200];int n=snprintf(l,sizeof(l),"[appside] %s\n",nm);if(n>0)write(fd,l,(size_t)n);close(fd);}
+    } @catch(...) {}
+}
 static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringRef name, const void *o, CFDictionaryRef ui) {
     @try {
         char nm[128]; nm[0]=0; if(name) CFStringGetCString(name,nm,sizeof(nm),kCFStringEncodingUTF8);
@@ -2989,6 +2997,9 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
         id kw = app ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("keyWindow")) : nil;
         SEL _sro = sel_registerName("_setRotatableViewOrientation:duration:force:");
         if (kw && [kw respondsToSelector:_sro]) ((void(*)(id,SEL,int,float,int))objc_msgSend)(kw, _sro, 3, 0.0f, 1);
+        id rvc = kw ? ((id(*)(id,SEL))objc_msgSend)(kw, sel_registerName("rootViewController")) : nil;
+        SEL _upd = sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
+        if (rvc && [rvc respondsToSelector:_upd]) ((void(*)(id,SEL))objc_msgSend)(rvc, _upd);
     } @catch(...) {}
 }
 %group APPS
@@ -2996,6 +3007,15 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
 - (void)_setRotatableViewOrientation:(int)orientation duration:(float)duration force:(int)force {
     if (gCBROrientOverride > 0) orientation = gCBROrientOverride;
     %orig;
+}
+%end
+%hook UIViewController
+- (NSUInteger)supportedInterfaceOrientations {
+    if (gCBROrientOverride > 0) {
+        if (!gCBRVCFired) { gCBRVCFired = 1; CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.appside.vc-orient-fired"), NULL, NULL, YES); }
+        return (NSUInteger)((1UL<<3) | (1UL<<4));
+    }
+    return %orig;
 }
 %end
 %end
@@ -3015,7 +3035,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.44 init - app-side orientation lock";
+        const char msg[] = "[CBR] v3.20.45 init - appside confirm + VC orientation hook";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3023,15 +3043,17 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
         %init(APPS);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.unlock"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
-        int _af=open("/var/mobile/CBR_appside.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
-        if(_af>=0){const char*m="[CBR-APP] orientation lock installed\n";write(_af,m,strlen(m));close(_af);}
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.appside.loaded"), NULL, NULL, YES);
     }
     else if (strcmp(__progname, "SpringBoard") == 0) {
         %init(SPRINGBOARD);
         cbrSBRegisterListener();
+        unlink("/var/mobile/CBR_appside_sb.txt");
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.loaded"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.44 init - app-side orientation lock";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.45 init - appside confirm + VC orientation hook";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
