@@ -1400,7 +1400,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                     if ([scn respondsToSelector:updBlk]) {
                                         void (^diff)(id) = ^(id mutableSettings) {
                                             @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mutableSettings, sel_registerName("setForeground:"), YES); } @catch(...) {}
-                                            @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(mutableSettings, sel_registerName("setInterfaceOrientation:"), (NSInteger)3); } @catch(...) {}
+                                            @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(mutableSettings, sel_registerName("setInterfaceOrientation:"), (NSInteger)4); } @catch(...) {}
                                             @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mutableSettings, sel_registerName("setDeactivated:"), NO); } @catch(...) {}
                                             // v3.20.35: sync the app's content FRAME to the actual car window size so
                                             // app-content-space == rendered-view-space == touch-space. Fixes zoom (content
@@ -1606,7 +1606,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 if ([sceneNow respondsToSelector:_ub]) {
                     void (^_fgb)(id) = ^(id ms){
                         @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(ms, sel_registerName("setForeground:"), YES); } @catch(...) {}
-                        @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(ms, sel_registerName("setInterfaceOrientation:"), (NSInteger)3); } @catch(...) {}
+                        @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(ms, sel_registerName("setInterfaceOrientation:"), (NSInteger)4); } @catch(...) {}
                         @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(ms, sel_registerName("setDeactivated:"), NO); } @catch(...) {}
                     };
                     @try { ((void(*)(id,SEL,id))objc_msgSend)(sceneNow, _ub, _fgb); HH("reopen foreground via updateSettingsWithBlock applied\n"); } @catch(...) { HH("reopen fg block EXC\n"); }
@@ -1614,7 +1614,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 id mset = nil;
                 if (0) {   // dead: old mutableSettings path disabled
                     @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mset, sel_registerName("setForeground:"), YES); } @catch(...) {}
-                    @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(mset, sel_registerName("setInterfaceOrientation:"), (NSInteger)3); } @catch(...) {}
+                    @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(mset, sel_registerName("setInterfaceOrientation:"), (NSInteger)4); } @catch(...) {}
                     @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mset, sel_registerName("setDeactivated:"), NO); } @catch(...) {}
                     // apply the mutated settings back onto the scene.
                     @try {
@@ -2926,7 +2926,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.39 init - strip post-IMG2653 geometry forcing";
+        const char msg[] = "[CBR] v3.20.40 init - orientation 3->4 (unrotate content in landscape window)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -2935,7 +2935,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
         cbrSBRegisterListener();
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.39 init - strip post-IMG2653 geometry forcing";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.40 init - orientation 3->4 (unrotate content in landscape window)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
