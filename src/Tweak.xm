@@ -1442,13 +1442,20 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                                     // Fix: pass LANDSCAPE-swapped size + orientation 3, like the [FIX-GEOM] block above.
                                                     CGFloat _clw = _cwb.size.width, _clh = _cwb.size.height;
                                                     if (_clh > _clw) { CGFloat _t=_clw; _clw=_clh; _clh=_t; }  // ensure landscape (w>h)
-                                                    SEL _crs = sel_registerName("setContentReferenceSize:withInterfaceOrientation:");
+                                                    // v3.20.61: iOS17 has NO setContentReferenceSize; use ANGLE-based API (from settings dump).
+                                                    SEL _angM = sel_registerName("setHostReferenceAngleMode:");
+                                                    SEL _sbi  = sel_registerName("setScreenBoundsIgnoresSceneOrientation:");
+                                                    SEL _ang  = sel_registerName("setAngleFromHostReferenceUprightDirection:");
+                                                    static int _cal = 0;
+                                                    double _cands[4] = { 0.0, 1.5707963267948966, -1.5707963267948966, 3.141592653589793 };
+                                                    double _use = _cands[_cal % 4];
+                                                    if ([mutableSettings respondsToSelector:_sbi]) ((void(*)(id,SEL,BOOL))objc_msgSend)(mutableSettings, _sbi, YES);
+                                                    if ([mutableSettings respondsToSelector:_angM]) ((void(*)(id,SEL,NSInteger))objc_msgSend)(mutableSettings, _angM, (NSInteger)1);
+                                                    SEL _crs = _ang;
                                                     if ([mutableSettings respondsToSelector:_crs]) {
-                                                        ((void(*)(id,SEL,CGSize,NSInteger))objc_msgSend)(mutableSettings, _crs, CGSizeMake(_clw,_clh), (NSInteger)3);
-                                                        CHF("[FIX-CRS] setContentReferenceSize:withInterfaceOrientation: %.0fx%.0f io=3 APPLIED\n", _clw, _clh);
-                                                        // re-assert landscape frame after CRS, as insurance vs old stretch behavior
-                                                        SEL _sf2 = sel_registerName("setFrame:");
-                                                        if ([mutableSettings respondsToSelector:_sf2]) ((void(*)(id,SEL,CGRect))objc_msgSend)(mutableSettings, _sf2, CGRectMake(0,0,_clw,_clh));
+                                                        ((void(*)(id,SEL,double))objc_msgSend)(mutableSettings, _ang, _use);
+                                                        CHF("[FIX-CRS] iOS17 angle CAL idx=%d angle=%.4f ignoreBounds=1 APPLIED\n", _cal%4, _use);
+                                                        _cal++;
                                                     } else {
                                                         SEL _crs2 = sel_registerName("setContentReferenceSize:");
                                                         if ([mutableSettings respondsToSelector:_crs2]) { ((void(*)(id,SEL,CGSize))objc_msgSend)(mutableSettings, _crs2, CGSizeMake(_clw,_clh)); CH("[FIX-CRS] fallback 1-arg setContentReferenceSize applied\n"); }
@@ -3119,7 +3126,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.60 init - re-enable setContentReferenceSize:withInterfaceOrientation: (landscape+io3) - CarBridge canvas mechanism";
+        const char msg[] = "[CBR] v3.20.61 init - iOS17 angle-based orientation calibration";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3139,7 +3146,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.60 init - re-enable setContentReferenceSize:withInterfaceOrientation: (landscape+io3) - CarBridge canvas mechanism";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.61 init - iOS17 angle-based orientation calibration";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
