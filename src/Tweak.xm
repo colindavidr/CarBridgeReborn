@@ -3080,6 +3080,16 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
     } @catch(...) {}
 }
 %group APPS
+%hook YTAppViewControllerImpl
+- (NSUInteger)supportedInterfaceOrientations {
+    if (gCBROrientOverride > 0) return (NSUInteger)((1UL<<3)|(1UL<<4));
+    return %orig;
+}
+- (BOOL)shouldAutorotate {
+    if (gCBROrientOverride > 0) return YES;
+    return %orig;
+}
+%end
 %hook UIWindow
 - (void)_setRotatableViewOrientation:(int)orientation duration:(float)duration force:(int)force {
     if (gCBROrientOverride > 0) orientation = gCBROrientOverride;
@@ -3127,7 +3137,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.50 init - force landscape at load (gCBROrientOverride) + extended geom probe";
+        const char msg[] = "[CBR] v3.20.51 init - hook YTAppViewControllerImpl orientation (concrete class)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3147,7 +3157,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.50 init - force landscape at load (gCBROrientOverride) + extended geom probe";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.51 init - hook YTAppViewControllerImpl orientation (concrete class)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
