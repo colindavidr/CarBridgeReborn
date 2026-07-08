@@ -3080,14 +3080,38 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
     } @catch(...) {}
 }
 %group APPS
+
+static void cbrTrace(const char *ev, long liveSup) {
+    @try {
+        NSString *path=[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_yt_trace.txt"];
+        FILE *f=fopen([path fileSystemRepresentation],"a"); if(!f) return;
+        fprintf(f,"t=%ld ev=%-28s gOverride=%d liveSupOrient=0x%lx\n",(long)time(NULL),ev,gCBROrientOverride,(unsigned long)liveSup);
+        fclose(f);
+    } @catch(...) {}
+}
+static long cbrSupIO(id vc) {
+    SEL s=sel_registerName("supportedInterfaceOrientations");
+    if (vc && class_respondsToSelector(object_getClass(vc), s)) return ((long(*)(id,SEL))objc_msgSend)(vc, s);
+    return -1;
+}
+
 %hook YTAppViewControllerImpl
 - (NSUInteger)supportedInterfaceOrientations {
-    if (gCBROrientOverride > 0) return (NSUInteger)((1UL<<3)|(1UL<<4));
-    return %orig;
+    if (gCBROrientOverride > 0) { cbrTrace("YTAppVC.supportedIO(landscape)", (long)((1UL<<3)|(1UL<<4))); return (NSUInteger)((1UL<<3)|(1UL<<4)); }
+    NSUInteger o=%orig; cbrTrace("YTAppVC.supportedIO(orig)", (long)o); return o;
 }
 - (BOOL)shouldAutorotate {
     if (gCBROrientOverride > 0) return YES;
     return %orig;
+}
+- (void)viewWillAppear:(BOOL)animated {
+    gCBROrientOverride = 3;
+    cbrTrace("YTAppVC.viewWillAppear", cbrSupIO(self));
+    %orig;
+}
+- (void)viewDidLayoutSubviews {
+    cbrTrace("YTAppVC.viewDidLayoutSubviews", cbrSupIO(self));
+    %orig;
 }
 %end
 %hook UIWindow
@@ -3137,7 +3161,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.51 init - hook YTAppViewControllerImpl orientation (concrete class)";
+        const char msg[] = "[CBR] v3.20.52 init - lifecycle tracer (runtime msgs) + re-assert override in viewWillAppear";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3157,7 +3181,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.51 init - hook YTAppViewControllerImpl orientation (concrete class)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.52 init - lifecycle tracer (runtime msgs) + re-assert override in viewWillAppear";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
