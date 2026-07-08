@@ -2991,50 +2991,31 @@ static void cbrYTGeomProbe(const char *tag) {
     @try {
         NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_yt_geom.txt"];
         FILE *f = fopen([path fileSystemRepresentation], "a"); if (!f) return;
-        fprintf(f, "==== YT GEOM [%s] t=%ld ====\n", tag, (long)time(NULL));
-        id ms = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
-        CGRect mb = ((CGRect(*)(id,SEL))objc_msgSend)(ms, sel_registerName("bounds"));
-        CGRect nb = ((CGRect(*)(id,SEL))objc_msgSend)(ms, sel_registerName("nativeBounds"));
-        fprintf(f, "UIScreen.main bounds=%.0fx%.0f native=%.0fx%.0f\n", mb.size.width,mb.size.height, nb.size.width,nb.size.height);
+        fprintf(f, "==== YT WINDOWS [%s] t=%ld ====\n", tag, (long)time(NULL));
         id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
         id arr = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("connectedScenes")), sel_registerName("allObjects"));
         NSUInteger sc = ((NSUInteger(*)(id,SEL))objc_msgSend)(arr, sel_registerName("count"));
-        fprintf(f, "connectedScenes=%lu\n", (unsigned long)sc);
         for (NSUInteger i=0;i<sc;i++){
             id scene = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(arr, sel_registerName("objectAtIndex:"), i);
-            const char *scls = object_getClassName(scene);
-            if (!strstr(scls,"WindowScene")) { fprintf(f,"  scene[%lu] %s (non-window)\n",(unsigned long)i,scls); continue; }
+            if (!strstr(object_getClassName(scene),"WindowScene")) continue;
             id ss = ((id(*)(id,SEL))objc_msgSend)(scene, sel_registerName("screen"));
             CGRect sb = ss ? ((CGRect(*)(id,SEL))objc_msgSend)(ss, sel_registerName("bounds")) : CGRectZero;
             long io = ((long(*)(id,SEL))objc_msgSend)(scene, sel_registerName("interfaceOrientation"));
-            fprintf(f,"  scene[%lu] %s screen=%.0fx%.0f io=%ld\n",(unsigned long)i,scls,sb.size.width,sb.size.height,io);
+            fprintf(f,"  scene screen=%.0fx%.0f io=%ld\n",sb.size.width,sb.size.height,io);
             id wins = ((id(*)(id,SEL))objc_msgSend)(scene, sel_registerName("windows"));
             NSUInteger wc = wins?((NSUInteger(*)(id,SEL))objc_msgSend)(wins, sel_registerName("count")):0;
             for (NSUInteger w=0; w<wc; w++){
                 id win = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins, sel_registerName("objectAtIndex:"), w);
                 CGRect wb = ((CGRect(*)(id,SEL))objc_msgSend)(win, sel_registerName("bounds"));
+                CGAffineTransform t = ((CGAffineTransform(*)(id,SEL))objc_msgSend)(win, sel_registerName("transform"));
                 id rvc = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("rootViewController"));
                 const char *rc = rvc?object_getClassName(rvc):"(nil)";
-                CGRect vb = CGRectZero; long so = 0;
-                if (rvc){ id v=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")); if(v) vb=((CGRect(*)(id,SEL))objc_msgSend)(v,sel_registerName("bounds"));
-                    if ([rvc respondsToSelector:sel_registerName("supportedInterfaceOrientations")]) so=((long(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("supportedInterfaceOrientations")); }
                 BOOL key = ((BOOL(*)(id,SEL))objc_msgSend)(win, sel_registerName("isKeyWindow"));
-                fprintf(f,"    win[%lu]%s bounds=%.0fx%.0f rootVC=%s vcView=%.0fx%.0f supOrient=0x%lx\n",
-                        (unsigned long)w, key?"*KEY*":"", wb.size.width,wb.size.height, rc, vb.size.width,vb.size.height, (unsigned long)so);
-                id tc = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("traitCollection"));
-                long hsc = tc?((long(*)(id,SEL))objc_msgSend)(tc,sel_registerName("horizontalSizeClass")):-9;
-                long vsc = tc?((long(*)(id,SEL))objc_msgSend)(tc,sel_registerName("verticalSizeClass")):-9;
-                fprintf(f,"      traits hSizeClass=%ld vSizeClass=%ld (0=unspec 1=compact 2=regular)\n",hsc,vsc);
-                if (rvc){ id rv=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view"));
-                    if (rv){ id subs=((id(*)(id,SEL))objc_msgSend)(rv,sel_registerName("subviews"));
-                        NSUInteger nsub=subs?((NSUInteger(*)(id,SEL))objc_msgSend)(subs,sel_registerName("count")):0;
-                        fprintf(f,"      rootView subviews=%lu\n",(unsigned long)nsub);
-                        for (NSUInteger k=0;k<nsub && k<8;k++){ id sv=((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),k);
-                            CGRect svf=((CGRect(*)(id,SEL))objc_msgSend)(sv,sel_registerName("frame"));
-                            fprintf(f,"        sub[%lu] %s frame=%.0f,%.0f %.0fx%.0f\n",(unsigned long)k,object_getClassName(sv),svf.origin.x,svf.origin.y,svf.size.width,svf.size.height);
-                        }
-                    }
-                }
+                BOOL hid = ((BOOL(*)(id,SEL))objc_msgSend)(win, sel_registerName("isHidden"));
+                long wl = ((long(*)(id,SEL))objc_msgSend)(win, sel_registerName("windowLevel"));
+                fprintf(f,"    win[%lu]%s%s %s lvl=%ld bounds=%.0fx%.0f xform=[%.2f %.2f %.2f %.2f] rootVC=%s\n",
+                        (unsigned long)w, key?"*KEY*":"", hid?"(hidden)":"", object_getClassName(win), wl,
+                        wb.size.width,wb.size.height, t.a,t.b,t.c,t.d, rc);
             }
         }
         fprintf(f, "==== END ====\n"); fclose(f);
@@ -3081,39 +3062,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
 }
 %group APPS
 
-static void cbrTrace(const char *ev, long liveSup) {
-    @try {
-        NSString *path=[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_yt_trace.txt"];
-        FILE *f=fopen([path fileSystemRepresentation],"a"); if(!f) return;
-        fprintf(f,"t=%ld ev=%-28s gOverride=%d liveSupOrient=0x%lx\n",(long)time(NULL),ev,gCBROrientOverride,(unsigned long)liveSup);
-        fclose(f);
-    } @catch(...) {}
-}
-static long cbrSupIO(id vc) {
-    SEL s=sel_registerName("supportedInterfaceOrientations");
-    if (vc && class_respondsToSelector(object_getClass(vc), s)) return ((long(*)(id,SEL))objc_msgSend)(vc, s);
-    return -1;
-}
 
-%hook YTAppViewControllerImpl
-- (NSUInteger)supportedInterfaceOrientations {
-    if (gCBROrientOverride > 0) { cbrTrace("YTAppVC.supportedIO(landscape)", (long)((1UL<<3)|(1UL<<4))); return (NSUInteger)((1UL<<3)|(1UL<<4)); }
-    NSUInteger o=%orig; cbrTrace("YTAppVC.supportedIO(orig)", (long)o); return o;
-}
-- (BOOL)shouldAutorotate {
-    if (gCBROrientOverride > 0) return YES;
-    return %orig;
-}
-- (void)viewWillAppear:(BOOL)animated {
-    gCBROrientOverride = 3;
-    cbrTrace("YTAppVC.viewWillAppear", cbrSupIO(self));
-    %orig;
-}
-- (void)viewDidLayoutSubviews {
-    cbrTrace("YTAppVC.viewDidLayoutSubviews", cbrSupIO(self));
-    %orig;
-}
-%end
 %hook UIWindow
 - (void)_setRotatableViewOrientation:(int)orientation duration:(float)duration force:(int)force {
     if (gCBROrientOverride > 0) orientation = gCBROrientOverride;
@@ -3161,12 +3110,13 @@ static long cbrSupIO(id vc) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.52 init - lifecycle tracer (runtime msgs) + re-assert override in viewWillAppear";
+        const char msg[] = "[CBR] v3.20.53 init - revert concrete orientation hook; probe all windows+transforms; keyboard trigger";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
+        [[NSNotificationCenter defaultCenter] addObserverForName:@"UIKeyboardDidShowNotification" object:nil queue:nil usingBlock:^(id note){ cbrYTGeomProbe("kbd"); }];
         gCBROrientOverride = 3; // v3.20.50 force landscape at load
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(4*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrYTGeomProbe("load"); });
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -3181,7 +3131,7 @@ static long cbrSupIO(id vc) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.52 init - lifecycle tracer (runtime msgs) + re-assert override in viewWillAppear";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.53 init - revert concrete orientation hook; probe all windows+transforms; keyboard trigger";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
