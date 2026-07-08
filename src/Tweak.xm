@@ -3068,6 +3068,16 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
 
 
 %hook UIWindow
+- (void)setBounds:(CGRect)b {
+    @try {
+        if (b.size.width > 500.0 || b.size.height > 500.0) {
+            NSString *path=[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_yt_bounds.txt"];
+            FILE *f=fopen([path fileSystemRepresentation],"a");
+            if(f){ fprintf(f,"t=%ld %s setBounds %.0fx%.0f\n",(long)time(NULL),object_getClassName(self),b.size.width,b.size.height); fclose(f);}
+        }
+    } @catch(...) {}
+    %orig;
+}
 - (void)_setRotatableViewOrientation:(int)orientation duration:(float)duration force:(int)force {
     if (gCBROrientOverride > 0) orientation = gCBROrientOverride;
     %orig;
@@ -3114,7 +3124,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.55 init - probe: walk presented VCs + snapshot on window-visible (name the fullscreen player)";
+        const char msg[] = "[CBR] v3.20.56 init - log any UIWindow setBounds >500px (capture fullscreen/keyboard/startup phone-sized resizes)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3135,7 +3145,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.55 init - probe: walk presented VCs + snapshot on window-visible (name the fullscreen player)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.56 init - log any UIWindow setBounds >500px (capture fullscreen/keyboard/startup phone-sized resizes)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
