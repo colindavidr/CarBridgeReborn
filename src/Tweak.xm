@@ -1437,12 +1437,21 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                                     // portrait (281x472) so setFrame made the app render phone-portrait (stretch bug).
                                                     // Window rotation alone handled orientation correctly in earlier builds.
 
+                                                    // v3.20.60: RE-ENABLED two-arg canvas+orientation (CarBridge's linchpin).
+                                                    // Prior disable (v3.20.32) passed RAW portrait size (281x472) -> stretch bug.
+                                                    // Fix: pass LANDSCAPE-swapped size + orientation 3, like the [FIX-GEOM] block above.
+                                                    CGFloat _clw = _cwb.size.width, _clh = _cwb.size.height;
+                                                    if (_clh > _clw) { CGFloat _t=_clw; _clw=_clh; _clh=_t; }  // ensure landscape (w>h)
                                                     SEL _crs = sel_registerName("setContentReferenceSize:withInterfaceOrientation:");
-                                                    if (0 && [mutableSettings respondsToSelector:_crs]) {
-                                                        CHF("[FIX-CRS] (dead)\n");
+                                                    if ([mutableSettings respondsToSelector:_crs]) {
+                                                        ((void(*)(id,SEL,CGSize,NSInteger))objc_msgSend)(mutableSettings, _crs, CGSizeMake(_clw,_clh), (NSInteger)3);
+                                                        CHF("[FIX-CRS] setContentReferenceSize:withInterfaceOrientation: %.0fx%.0f io=3 APPLIED\n", _clw, _clh);
+                                                        // re-assert landscape frame after CRS, as insurance vs old stretch behavior
+                                                        SEL _sf2 = sel_registerName("setFrame:");
+                                                        if ([mutableSettings respondsToSelector:_sf2]) ((void(*)(id,SEL,CGRect))objc_msgSend)(mutableSettings, _sf2, CGRectMake(0,0,_clw,_clh));
                                                     } else {
                                                         SEL _crs2 = sel_registerName("setContentReferenceSize:");
-                                                        if ([mutableSettings respondsToSelector:_crs2]) { ((void(*)(id,SEL,CGSize))objc_msgSend)(mutableSettings, _crs2, _cwb.size); CH("[FIX-CRS] setContentReferenceSize (no-orient) applied\n"); }
+                                                        if ([mutableSettings respondsToSelector:_crs2]) { ((void(*)(id,SEL,CGSize))objc_msgSend)(mutableSettings, _crs2, CGSizeMake(_clw,_clh)); CH("[FIX-CRS] fallback 1-arg setContentReferenceSize applied\n"); }
                                                         else {
                                                             CH("[FIX-CRS] NO setContentReferenceSize - dumping settings methods\n");
                                                             // v3.20.29: dump the settings object's ACTUAL methods to find the iOS17 selector.
@@ -3110,7 +3119,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.59 init - revert to .54 baseline (browse upright); .58 window-resize disproven";
+        const char msg[] = "[CBR] v3.20.60 init - re-enable setContentReferenceSize:withInterfaceOrientation: (landscape+io3) - CarBridge canvas mechanism";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3130,7 +3139,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.59 init - revert to .54 baseline (browse upright); .58 window-resize disproven";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.60 init - re-enable setContentReferenceSize:withInterfaceOrientation: (landscape+io3) - CarBridge canvas mechanism";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
