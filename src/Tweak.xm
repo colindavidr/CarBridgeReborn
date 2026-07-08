@@ -3068,6 +3068,40 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
 
 
 %hook UIWindow
+%new
+- (void)cbrFitToCarWindow {
+    @try {
+        const char *cls = object_getClassName(self);
+        if (strcmp(cls,"YTMainWindow")==0) return;              // never touch the adopted main window
+        id app=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"),sel_registerName("sharedApplication"));
+        id arr=((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("connectedScenes")),sel_registerName("allObjects"));
+        NSUInteger sc=((NSUInteger(*)(id,SEL))objc_msgSend)(arr,sel_registerName("count"));
+        CGRect car=CGRectZero;
+        for(NSUInteger i=0;i<sc;i++){ id scene=((id(*)(id,SEL,NSUInteger))objc_msgSend)(arr,sel_registerName("objectAtIndex:"),i);
+            if(!strstr(object_getClassName(scene),"WindowScene")) continue;
+            id wins=((id(*)(id,SEL))objc_msgSend)(scene,sel_registerName("windows"));
+            NSUInteger wc=wins?((NSUInteger(*)(id,SEL))objc_msgSend)(wins,sel_registerName("count")):0;
+            for(NSUInteger w=0;w<wc;w++){ id win=((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins,sel_registerName("objectAtIndex:"),w);
+                if(strcmp(object_getClassName(win),"YTMainWindow")==0){ car=((CGRect(*)(id,SEL))objc_msgSend)(win,sel_registerName("bounds")); }
+            }
+        }
+        if(car.size.width<=0 || car.size.width>500 || car.size.height>500) return; // only trust a car-sized main window
+        CGRect b=((CGRect(*)(id,SEL))objc_msgSend)(self,sel_registerName("bounds"));
+        if((int)b.size.width==(int)car.size.width && (int)b.size.height==(int)car.size.height) return; // already fitted
+        ((void(*)(id,SEL,CGRect))objc_msgSend)(self,sel_registerName("setBounds:"),CGRectMake(0,0,car.size.width,car.size.height));
+        ((void(*)(id,SEL,CGRect))objc_msgSend)(self,sel_registerName("setFrame:"),CGRectMake(0,0,car.size.width,car.size.height));
+        id rvc=((id(*)(id,SEL))objc_msgSend)(self,sel_registerName("rootViewController"));
+        if(rvc){ id v=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")); if(v) ((void(*)(id,SEL,CGRect))objc_msgSend)(v,sel_registerName("setFrame:"),CGRectMake(0,0,car.size.width,car.size.height)); }
+    } @catch(...) {}
+}
+- (void)layoutSubviews {
+    %orig;
+    ((void(*)(id,SEL))objc_msgSend)(self, sel_registerName("cbrFitToCarWindow"));
+}
+- (void)becomeKeyWindow {
+    %orig;
+    ((void(*)(id,SEL))objc_msgSend)(self, sel_registerName("cbrFitToCarWindow"));
+}
 - (id)initWithFrame:(CGRect)fr {
     id w=%orig;
     @try {
@@ -3143,7 +3177,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.57 init - trace UIWindow initWithFrame:/initWithWindowScene: (windows born phone-sized)";
+        const char msg[] = "[CBR] v3.20.58 - fit non-main windows to YTMainWindow car size (runtime-dispatched helper)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3164,7 +3198,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.57 init - trace UIWindow initWithFrame:/initWithWindowScene: (windows born phone-sized)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.58 - fit non-main windows to YTMainWindow car size (runtime-dispatched helper)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
