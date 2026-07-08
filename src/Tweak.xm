@@ -3068,6 +3068,25 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
 
 
 %hook UIWindow
+- (id)initWithFrame:(CGRect)fr {
+    id w=%orig;
+    @try {
+        NSString *path=[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_yt_births.txt"];
+        FILE *f=fopen([path fileSystemRepresentation],"a");
+        if(f){ fprintf(f,"t=%ld initWithFrame %s %.0fx%.0f\n",(long)time(NULL),object_getClassName(w),fr.size.width,fr.size.height); fclose(f);}
+    } @catch(...) {}
+    return w;
+}
+- (id)initWithWindowScene:(id)ws {
+    id w=%orig;
+    @try {
+        CGRect b=((CGRect(*)(id,SEL))objc_msgSend)(w,sel_registerName("bounds"));
+        NSString *path=[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_yt_births.txt"];
+        FILE *f=fopen([path fileSystemRepresentation],"a");
+        if(f){ fprintf(f,"t=%ld initWithScene %s %.0fx%.0f\n",(long)time(NULL),object_getClassName(w),b.size.width,b.size.height); fclose(f);}
+    } @catch(...) {}
+    return w;
+}
 - (void)setBounds:(CGRect)b {
     @try {
         if (b.size.width > 500.0 || b.size.height > 500.0) {
@@ -3124,7 +3143,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.56 init - log any UIWindow setBounds >500px (capture fullscreen/keyboard/startup phone-sized resizes)";
+        const char msg[] = "[CBR] v3.20.57 init - trace UIWindow initWithFrame:/initWithWindowScene: (windows born phone-sized)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3145,7 +3164,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.56 init - log any UIWindow setBounds >500px (capture fullscreen/keyboard/startup phone-sized resizes)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.57 init - trace UIWindow initWithFrame:/initWithWindowScene: (windows born phone-sized)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
