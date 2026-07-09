@@ -2603,6 +2603,54 @@ static void cbrCPProbeScenes(void) {
     close(fd);
     CBLog("[CBR] CarPlayApp scene probe written to CBR_cp_scenes.txt");
 }
+// v3.20.75: HOST-SIDE fullscreen topology probe. Read-only; decoupled from the host path.
+static void cbrHostLayerDump(id layer, int depth, int fd) {
+    if(!layer || depth>6) return;
+    @try {
+        CGRect f=((CGRect(*)(id,SEL))objc_msgSend)(layer,sel_registerName("frame"));
+        CGAffineTransform t=((CGAffineTransform(*)(id,SEL))objc_msgSend)(layer,sel_registerName("affineTransform"));
+        char b[240];int n=snprintf(b,sizeof(b),"%*sL:%s %.0fx%.0f xf=[%.2f %.2f %.2f %.2f]\n",depth*2,"",object_getClassName(layer),f.size.width,f.size.height,t.a,t.b,t.c,t.d);if(n>0)write(fd,b,(size_t)n);
+        id subs=((id(*)(id,SEL))objc_msgSend)(layer,sel_registerName("sublayers"));
+        NSUInteger sc=subs?((NSUInteger(*)(id,SEL))objc_msgSend)(subs,sel_registerName("count")):0;
+        for(NSUInteger i=0;i<sc && i<12;i++){id sl=((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),i);cbrHostLayerDump(sl,depth+1,fd);}
+    } @catch(...) {}
+}
+static void cbrHostFSProbe(void) {
+    @try {
+        if(!gCBRAppVC) return;
+        int fd=open("/var/mobile/CBR_host_fs.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
+        if(fd<0) return;
+        write(fd,"==== HOST FS PROBE ====\n",24);
+        id screens=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("screens"));
+        NSUInteger nsc=screens?((NSUInteger(*)(id,SEL))objc_msgSend)(screens,sel_registerName("count")):0;
+        for(NSUInteger i=0;i<nsc;i++){id sc=((id(*)(id,SEL,NSUInteger))objc_msgSend)(screens,sel_registerName("objectAtIndex:"),i);
+            CGRect b=((CGRect(*)(id,SEL))objc_msgSend)(sc,sel_registerName("bounds"));
+            int car=[sc respondsToSelector:sel_registerName("_isCarScreen")]?((BOOL(*)(id,SEL))objc_msgSend)(sc,sel_registerName("_isCarScreen")):0;
+            char sb[128];int sn=snprintf(sb,sizeof(sb),"SCREEN%lu %.0fx%.0f car=%d\n",(unsigned long)i,b.size.width,b.size.height,car);if(sn>0)write(fd,sb,(size_t)sn);
+        }
+        Class fbm=objc_getClass("FBSceneManager");
+        id mgr=fbm?((id(*)(id,SEL))objc_msgSend)(fbm,sel_registerName("sharedInstance")):nil;
+        id scenes=(mgr && [mgr respondsToSelector:sel_registerName("scenes")])?((id(*)(id,SEL))objc_msgSend)(mgr,sel_registerName("scenes")):nil;
+        NSUInteger nsn=scenes?((NSUInteger(*)(id,SEL))objc_msgSend)(scenes,sel_registerName("count")):0;
+        char cb[96];int cbn=snprintf(cb,sizeof(cb),"== FBScenes total=%lu (youtube only) ==\n",(unsigned long)nsn);if(cbn>0)write(fd,cb,(size_t)cbn);
+        for(NSUInteger i=0;i<nsn && i<60;i++){id scn=((id(*)(id,SEL,NSUInteger))objc_msgSend)(scenes,sel_registerName("objectAtIndex:"),i);
+            id ident=((id(*)(id,SEL))objc_msgSend)(scn,sel_registerName("identifier"));
+            const char* idc=ident?[[ident description] UTF8String]:"?";
+            if(idc && (strcasestr(idc,"youtube")||strcasestr(idc,"google"))){
+                char s2b[320];int s2=snprintf(s2b,sizeof(s2b),"  SCENE cls=%s id=%s\n",object_getClassName(scn),idc);if(s2>0)write(fd,s2b,(size_t)s2);
+            }
+        }
+        id dvc=getIvar(gCBRAppVC,"_deviceAppViewController");
+        id sv=dvc?getIvar(dvc,"_sceneView"):nil;
+        char hb[128];int hn=snprintf(hb,sizeof(hb),"== hosted sceneView=%s ==\n",sv?object_getClassName(sv):"nil");if(hn>0)write(fd,hb,(size_t)hn);
+        if(sv){id lyr=((id(*)(id,SEL))objc_msgSend)(sv,sel_registerName("layer"));cbrHostLayerDump(lyr,0,fd);}
+        close(fd);
+    } @catch(...) {}
+}
+static void cbrHostFSSchedule(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrHostFSProbe(); cbrHostFSSchedule(); });
+}
+
 %group CARPLAY
 
 // ── Phase 1: DashBoard._newApplicationLibrary ─────────────────────────────────
@@ -3150,52 +3198,6 @@ static void cbrNoteLandscape(void) {
             ((void(*)(id,SEL,long,double,BOOL,BOOL,id))objc_msgSend)(app, note, (long)3, (double)0.0, (BOOL)YES, (BOOL)YES, @"CBR");
     } @catch(...) {}
 }
-// v3.20.74: video is a REMOTE/HOSTED layer. Log PGHostedWindow scene interfaceOrientation + layer tree; shot at rotating host layer.
-static void cbrWalkLayers(id layer, int depth, int fd) {
-    if (!layer || depth > 9) return;
-    @try {
-        CGRect f = ((CGRect(*)(id,SEL))objc_msgSend)(layer, sel_registerName("frame"));
-        CGAffineTransform t = ((CGAffineTransform(*)(id,SEL))objc_msgSend)(layer, sel_registerName("affineTransform"));
-        id contents = ((id(*)(id,SEL))objc_msgSend)(layer, sel_registerName("contents"));
-        if (fd>=0){ char b[260]; int n=snprintf(b,sizeof(b),"%*sL:%s f=%.0f,%.0f %.0fx%.0f xf=[%.2f %.2f %.2f %.2f] contents=%d\n", depth*2,"",object_getClassName(layer),f.origin.x,f.origin.y,f.size.width,f.size.height,t.a,t.b,t.c,t.d, contents?1:0); if(n>0) write(fd,b,(size_t)n); }
-        id subs = ((id(*)(id,SEL))objc_msgSend)(layer, sel_registerName("sublayers"));
-        NSUInteger sc = subs?((NSUInteger(*)(id,SEL))objc_msgSend)(subs,sel_registerName("count")):0;
-        for (NSUInteger i=0;i<sc && i<16;i++){ id sl=((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),i); cbrWalkLayers(sl, depth+1, fd); }
-    } @catch(...) {}
-}
-static void cbrFullscreenProbe(void) {
-    @try {
-        NSString *_pp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_pg.txt"];
-        int fd = open([_pp fileSystemRepresentation], O_WRONLY|O_CREAT|O_APPEND, 0644);
-        id app=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"),sel_registerName("sharedApplication"));
-        id wins=app?((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("windows")):nil;
-        NSUInteger wc= wins?((NSUInteger(*)(id,SEL))objc_msgSend)(wins,sel_registerName("count")):0;
-        id mainWin=nil, pgWin=nil; CGRect mainB=CGRectZero, mainF=CGRectZero;
-        for(NSUInteger w=0; w<wc; w++){
-            id win=((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins,sel_registerName("objectAtIndex:"),w);
-            const char *cn=object_getClassName(win);
-            if(cn && strstr(cn,"YTMainWindow")){ mainWin=win; mainB=((CGRect(*)(id,SEL))objc_msgSend)(win,sel_registerName("bounds")); mainF=((CGRect(*)(id,SEL))objc_msgSend)(win,sel_registerName("frame")); }
-            else if(cn && strstr(cn,"PGHosted")){ pgWin=win; }
-        }
-        if(pgWin && mainWin && gCBROrientOverride>0 && mainB.size.width>0){
-            id psc=((id(*)(id,SEL))objc_msgSend)(pgWin,sel_registerName("windowScene"));
-            id msc=((id(*)(id,SEL))objc_msgSend)(mainWin,sel_registerName("windowScene"));
-            NSInteger pio= (psc&&[psc respondsToSelector:sel_registerName("interfaceOrientation")])?((NSInteger(*)(id,SEL))objc_msgSend)(psc,sel_registerName("interfaceOrientation")):-9;
-            NSInteger mio= (msc&&[msc respondsToSelector:sel_registerName("interfaceOrientation")])?((NSInteger(*)(id,SEL))objc_msgSend)(msc,sel_registerName("interfaceOrientation")):-9;
-            if(fd>=0){char hb[200];int hbn=snprintf(hb,sizeof(hb),"==== PG override=%d | PGscene=%s io=%ld sameScene=%d | MAINscene io=%ld ====\n",gCBROrientOverride, psc?object_getClassName(psc):"nil",(long)pio,(psc==msc),(long)mio);if(hbn>0)write(fd,hb,(size_t)hbn);}
-            id lyr=((id(*)(id,SEL))objc_msgSend)(pgWin,sel_registerName("layer"));
-            cbrWalkLayers(lyr, 0, fd);
-            id subs=lyr?((id(*)(id,SEL))objc_msgSend)(lyr,sel_registerName("sublayers")):nil;
-            NSUInteger n= subs?((NSUInteger(*)(id,SEL))objc_msgSend)(subs,sel_registerName("count")):0;
-            if(n>0){ id l0=((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),0);
-                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(l0,sel_registerName("setAffineTransform:"),CGAffineTransformMakeRotation(-M_PI_2));
-                if(fd>=0){const char*m="   -> rotated L0 -90\n";write(fd,m,strlen(m));}
-            }
-        }
-        if(fd>=0) close(fd);
-    } @catch(...) {}
-}
-
 %group APPS
 
 
@@ -3243,6 +3245,8 @@ static void cbrFullscreenProbe(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
+        unlink("/var/mobile/CBR_host_fs.txt");
+        cbrHostFSSchedule();
         { int hf = open("/var/mobile/CBR_cp_hooks.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
           cbrLogHook(hf, "DashBoard", '+', "_newApplicationLibrary");
           cbrLogHook(hf, "DBEnvironmentConfiguration", '-', "policyForApplicationInfo:");
@@ -3252,16 +3256,14 @@ static void cbrFullscreenProbe(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.74 init - gated orient + PG layer-tree/scene probe";
+        const char msg[] = "[CBR] v3.20.75 init - gated orient + host-side FS topology probe";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
-        // v3.20.74: GATED - stay -1 until hosted. Timer drives layer-tree + scene-orientation probe.
+        // v3.20.75: GATED - stay -1 until hosted (keeps the phone keyboard fix).
         gCBROrientOverride = -1;
-        unlink([[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_pg.txt"] fileSystemRepresentation]);
-        for (int _r=1;_r<=60;_r++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((double)_r*1.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrFullscreenProbe(); }); }
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.unlock"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.appside.loaded"), NULL, NULL, YES);
@@ -3274,7 +3276,7 @@ static void cbrFullscreenProbe(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.74 init - gated orient + PG layer-tree/scene probe";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.75 init - gated orient + host-side FS topology probe";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
