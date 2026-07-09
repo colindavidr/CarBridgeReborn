@@ -2603,7 +2603,7 @@ static void cbrCPProbeScenes(void) {
     close(fd);
     CBLog("[CBR] CarPlayApp scene probe written to CBR_cp_scenes.txt");
 }
-// v3.20.75: HOST-SIDE fullscreen topology probe. Read-only; decoupled from the host path.
+// v3.20.76: HOST-SIDE fullscreen topology probe (runs in SpringBoard, where hosting happens). Read-only.
 static void cbrHostLayerDump(id layer, int depth, int fd) {
     if(!layer || depth>6) return;
     @try {
@@ -2617,10 +2617,9 @@ static void cbrHostLayerDump(id layer, int depth, int fd) {
 }
 static void cbrHostFSProbe(void) {
     @try {
-        if(!gCBRAppVC) return;
         int fd=open("/var/mobile/CBR_host_fs.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
         if(fd<0) return;
-        write(fd,"==== HOST FS PROBE ====\n",24);
+        char ov[64];int ovn=snprintf(ov,sizeof(ov),"==== HOST FS (appVC=%d) ====\n",gCBRAppVC?1:0);if(ovn>0)write(fd,ov,(size_t)ovn);
         id screens=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("screens"));
         NSUInteger nsc=screens?((NSUInteger(*)(id,SEL))objc_msgSend)(screens,sel_registerName("count")):0;
         for(NSUInteger i=0;i<nsc;i++){id sc=((id(*)(id,SEL,NSUInteger))objc_msgSend)(screens,sel_registerName("objectAtIndex:"),i);
@@ -2633,14 +2632,14 @@ static void cbrHostFSProbe(void) {
         id scenes=(mgr && [mgr respondsToSelector:sel_registerName("scenes")])?((id(*)(id,SEL))objc_msgSend)(mgr,sel_registerName("scenes")):nil;
         NSUInteger nsn=scenes?((NSUInteger(*)(id,SEL))objc_msgSend)(scenes,sel_registerName("count")):0;
         char cb[96];int cbn=snprintf(cb,sizeof(cb),"== FBScenes total=%lu (youtube only) ==\n",(unsigned long)nsn);if(cbn>0)write(fd,cb,(size_t)cbn);
-        for(NSUInteger i=0;i<nsn && i<60;i++){id scn=((id(*)(id,SEL,NSUInteger))objc_msgSend)(scenes,sel_registerName("objectAtIndex:"),i);
+        for(NSUInteger i=0;i<nsn && i<80;i++){id scn=((id(*)(id,SEL,NSUInteger))objc_msgSend)(scenes,sel_registerName("objectAtIndex:"),i);
             id ident=((id(*)(id,SEL))objc_msgSend)(scn,sel_registerName("identifier"));
             const char* idc=ident?[[ident description] UTF8String]:"?";
             if(idc && (strcasestr(idc,"youtube")||strcasestr(idc,"google"))){
                 char s2b[320];int s2=snprintf(s2b,sizeof(s2b),"  SCENE cls=%s id=%s\n",object_getClassName(scn),idc);if(s2>0)write(fd,s2b,(size_t)s2);
             }
         }
-        id dvc=getIvar(gCBRAppVC,"_deviceAppViewController");
+        id dvc=gCBRAppVC?getIvar(gCBRAppVC,"_deviceAppViewController"):nil;
         id sv=dvc?getIvar(dvc,"_sceneView"):nil;
         char hb[128];int hn=snprintf(hb,sizeof(hb),"== hosted sceneView=%s ==\n",sv?object_getClassName(sv):"nil");if(hn>0)write(fd,hb,(size_t)hn);
         if(sv){id lyr=((id(*)(id,SEL))objc_msgSend)(sv,sel_registerName("layer"));cbrHostLayerDump(lyr,0,fd);}
@@ -2648,7 +2647,7 @@ static void cbrHostFSProbe(void) {
     } @catch(...) {}
 }
 static void cbrHostFSSchedule(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrHostFSProbe(); cbrHostFSSchedule(); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ if(gCBRAppVC) cbrHostFSProbe(); cbrHostFSSchedule(); });
 }
 
 %group CARPLAY
@@ -3245,8 +3244,6 @@ static void cbrNoteLandscape(void) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
-        unlink("/var/mobile/CBR_host_fs.txt");
-        cbrHostFSSchedule();
         { int hf = open("/var/mobile/CBR_cp_hooks.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
           cbrLogHook(hf, "DashBoard", '+', "_newApplicationLibrary");
           cbrLogHook(hf, "DBEnvironmentConfiguration", '-', "policyForApplicationInfo:");
@@ -3256,13 +3253,13 @@ static void cbrNoteLandscape(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.75 init - gated orient + host-side FS topology probe";
+        const char msg[] = "[CBR] v3.20.76 init - gated orient + host-side FS probe (SpringBoard)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
-        // v3.20.75: GATED - stay -1 until hosted (keeps the phone keyboard fix).
+        // v3.20.76: GATED - stay -1 until hosted (keeps the phone keyboard fix).
         gCBROrientOverride = -1;
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.unlock"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -3271,12 +3268,14 @@ static void cbrNoteLandscape(void) {
     else if (strcmp(__progname, "SpringBoard") == 0) {
         %init(SPRINGBOARD);
         cbrSBRegisterListener();
+        unlink("/var/mobile/CBR_host_fs.txt");
+        cbrHostFSSchedule();
         unlink("/var/mobile/CBR_appside_sb.txt");
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.loaded"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.75 init - gated orient + host-side FS topology probe";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.76 init - gated orient + host-side FS probe (SpringBoard)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
