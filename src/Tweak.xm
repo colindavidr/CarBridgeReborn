@@ -3150,21 +3150,17 @@ static void cbrNoteLandscape(void) {
             ((void(*)(id,SEL,long,double,BOOL,BOOL,id))objc_msgSend)(app, note, (long)3, (double)0.0, (BOOL)YES, (BOOL)YES, @"CBR");
     } @catch(...) {}
 }
-// v3.20.73: the rotation lives INSIDE PGHostedWindow. Walk its view tree, log transforms, reset ~90deg to identity.
-static void cbrWalkFix(id view, int depth, int fd, int doFix) {
-    if (!view || depth > 9) return;
+// v3.20.74: video is a REMOTE/HOSTED layer. Log PGHostedWindow scene interfaceOrientation + layer tree; shot at rotating host layer.
+static void cbrWalkLayers(id layer, int depth, int fd) {
+    if (!layer || depth > 9) return;
     @try {
-        CGAffineTransform t = ((CGAffineTransform(*)(id,SEL))objc_msgSend)(view, sel_registerName("transform"));
-        CGRect f = ((CGRect(*)(id,SEL))objc_msgSend)(view, sel_registerName("frame"));
-        int rot90 = (fabs(t.a) < 0.15 && fabs(t.d) < 0.15 && fabs(t.b) > 0.85 && fabs(t.c) > 0.85);
-        if (fd>=0){ char b[260]; int n=snprintf(b,sizeof(b),"%*s%s f=%.0f,%.0f %.0fx%.0f xf=[%.2f %.2f %.2f %.2f]%s\n", depth*2,"",object_getClassName(view),f.origin.x,f.origin.y,f.size.width,f.size.height,t.a,t.b,t.c,t.d, rot90?" <ROT90>":""); if(n>0) write(fd,b,(size_t)n); }
-        if (doFix && rot90) {
-            ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(view, sel_registerName("setTransform:"), CGAffineTransformIdentity);
-            if (fd>=0){ const char*m="      -> reset to identity\n"; write(fd,m,strlen(m)); }
-        }
-        id subs = ((id(*)(id,SEL))objc_msgSend)(view, sel_registerName("subviews"));
+        CGRect f = ((CGRect(*)(id,SEL))objc_msgSend)(layer, sel_registerName("frame"));
+        CGAffineTransform t = ((CGAffineTransform(*)(id,SEL))objc_msgSend)(layer, sel_registerName("affineTransform"));
+        id contents = ((id(*)(id,SEL))objc_msgSend)(layer, sel_registerName("contents"));
+        if (fd>=0){ char b[260]; int n=snprintf(b,sizeof(b),"%*sL:%s f=%.0f,%.0f %.0fx%.0f xf=[%.2f %.2f %.2f %.2f] contents=%d\n", depth*2,"",object_getClassName(layer),f.origin.x,f.origin.y,f.size.width,f.size.height,t.a,t.b,t.c,t.d, contents?1:0); if(n>0) write(fd,b,(size_t)n); }
+        id subs = ((id(*)(id,SEL))objc_msgSend)(layer, sel_registerName("sublayers"));
         NSUInteger sc = subs?((NSUInteger(*)(id,SEL))objc_msgSend)(subs,sel_registerName("count")):0;
-        for (NSUInteger i=0;i<sc && i<24;i++){ id sv=((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),i); cbrWalkFix(sv, depth+1, fd, doFix); }
+        for (NSUInteger i=0;i<sc && i<16;i++){ id sl=((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),i); cbrWalkLayers(sl, depth+1, fd); }
     } @catch(...) {}
 }
 static void cbrFullscreenProbe(void) {
@@ -3182,12 +3178,19 @@ static void cbrFullscreenProbe(void) {
             else if(cn && strstr(cn,"PGHosted")){ pgWin=win; }
         }
         if(pgWin && mainWin && gCBROrientOverride>0 && mainB.size.width>0){
-            ((void(*)(id,SEL,CGRect))objc_msgSend)(pgWin,sel_registerName("setBounds:"),mainB);
-            ((void(*)(id,SEL,CGRect))objc_msgSend)(pgWin,sel_registerName("setFrame:"),mainF);
-            if(fd>=0){char hb[96];int hbn=snprintf(hb,sizeof(hb),"==== PG TREE (override=%d) ====\n",gCBROrientOverride);if(hbn>0)write(fd,hb,(size_t)hbn);}
-            id rvc=((id(*)(id,SEL))objc_msgSend)(pgWin,sel_registerName("rootViewController"));
-            id rv = rvc?((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")):nil;
-            cbrWalkFix(rv?rv:pgWin, 0, fd, 1);
+            id psc=((id(*)(id,SEL))objc_msgSend)(pgWin,sel_registerName("windowScene"));
+            id msc=((id(*)(id,SEL))objc_msgSend)(mainWin,sel_registerName("windowScene"));
+            NSInteger pio= (psc&&[psc respondsToSelector:sel_registerName("interfaceOrientation")])?((NSInteger(*)(id,SEL))objc_msgSend)(psc,sel_registerName("interfaceOrientation")):-9;
+            NSInteger mio= (msc&&[msc respondsToSelector:sel_registerName("interfaceOrientation")])?((NSInteger(*)(id,SEL))objc_msgSend)(msc,sel_registerName("interfaceOrientation")):-9;
+            if(fd>=0){char hb[200];int hbn=snprintf(hb,sizeof(hb),"==== PG override=%d | PGscene=%s io=%ld sameScene=%d | MAINscene io=%ld ====\n",gCBROrientOverride, psc?object_getClassName(psc):"nil",(long)pio,(psc==msc),(long)mio);if(hbn>0)write(fd,hb,(size_t)hbn);}
+            id lyr=((id(*)(id,SEL))objc_msgSend)(pgWin,sel_registerName("layer"));
+            cbrWalkLayers(lyr, 0, fd);
+            id subs=lyr?((id(*)(id,SEL))objc_msgSend)(lyr,sel_registerName("sublayers")):nil;
+            NSUInteger n= subs?((NSUInteger(*)(id,SEL))objc_msgSend)(subs,sel_registerName("count")):0;
+            if(n>0){ id l0=((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),0);
+                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(l0,sel_registerName("setAffineTransform:"),CGAffineTransformMakeRotation(-M_PI_2));
+                if(fd>=0){const char*m="   -> rotated L0 -90\n";write(fd,m,strlen(m));}
+            }
         }
         if(fd>=0) close(fd);
     } @catch(...) {}
@@ -3249,13 +3252,13 @@ static void cbrFullscreenProbe(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.73 init - gated orient + in-window fullscreen un-rotate";
+        const char msg[] = "[CBR] v3.20.74 init - gated orient + PG layer-tree/scene probe";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
-        // v3.20.73: GATED - stay -1 until hosted. Timer drives the in-window rotation fix.
+        // v3.20.74: GATED - stay -1 until hosted. Timer drives layer-tree + scene-orientation probe.
         gCBROrientOverride = -1;
         unlink([[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_pg.txt"] fileSystemRepresentation]);
         for (int _r=1;_r<=60;_r++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((double)_r*1.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrFullscreenProbe(); }); }
@@ -3271,7 +3274,7 @@ static void cbrFullscreenProbe(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.73 init - gated orient + in-window fullscreen un-rotate";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.74 init - gated orient + PG layer-tree/scene probe";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
