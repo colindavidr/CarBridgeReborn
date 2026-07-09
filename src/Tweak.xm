@@ -3139,6 +3139,15 @@ static void cbrViewProbe(void) {
     } @catch(...) {}
 }
 
+static void cbrNoteLandscape(void) {
+    @try {
+        id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+        if (!app) return;
+        SEL note = sel_registerName("noteInterfaceOrientationChanged:duration:updateMirroredDisplays:force:logMessage:");
+        if ([app respondsToSelector:note])
+            ((void(*)(id,SEL,long,double,BOOL,BOOL,id))objc_msgSend)(app, note, (long)3, (double)0.0, (BOOL)YES, (BOOL)YES, @"CBR");
+    } @catch(...) {}
+}
 %group APPS
 
 
@@ -3154,6 +3163,12 @@ static void cbrViewProbe(void) {
         if (!gCBRVCFired) { gCBRVCFired = 1; CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.appside.vc-orient-fired"), NULL, NULL, YES); }
         return (NSUInteger)((1UL<<3) | (1UL<<4));
     }
+    return %orig;
+}
+%end
+%hook UIDevice
+- (NSInteger)orientation {
+    if (gCBROrientOverride > 0) return 3;
     return %orig;
 }
 %end
@@ -3189,16 +3204,15 @@ static void cbrViewProbe(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.64 init - layer-tree probe (MDXView layers) to locate fullscreen rotation below the view tree";
+        const char msg[] = "[CBR] v3.20.66 init - device-landscape trick";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
-        for (int _r=1;_r<=30;_r++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(_r*2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrViewProbe(); }); }
-        for (int _q=1;_q<=30;_q++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(_q*2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrYTGeomProbe("tick"); }); }
-        [[NSNotificationCenter defaultCenter] addObserverForName:@"UIKeyboardDidShowNotification" object:nil queue:nil usingBlock:^(id note){ cbrYTGeomProbe("kbd"); }];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(4*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrYTGeomProbe("load"); });
+        gCBROrientOverride = 3;
+        cbrNoteLandscape();
+        for (int _r=1;_r<=8;_r++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((double)_r*1.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrNoteLandscape(); }); }
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.unlock"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.appside.loaded"), NULL, NULL, YES);
@@ -3211,7 +3225,7 @@ static void cbrViewProbe(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.64 init - layer-tree probe (MDXView layers) to locate fullscreen rotation below the view tree";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.66 init - device-landscape trick";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
