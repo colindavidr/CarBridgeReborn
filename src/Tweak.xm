@@ -3076,6 +3076,47 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
         cbrYTGeomProbe("orient");
     } @catch(...) {}
 }
+
+static void cbrDumpV(FILE *f, id v, int depth) {
+    if (!v || depth>60) return;
+    @try {
+        CGRect b=((CGRect(*)(id,SEL))objc_msgSend)(v,sel_registerName("bounds"));
+        if (b.size.width>250.0 || b.size.height>250.0) {
+            CGAffineTransform t=((CGAffineTransform(*)(id,SEL))objc_msgSend)(v,sel_registerName("transform"));
+            id lyr=((id(*)(id,SEL))objc_msgSend)(v,sel_registerName("layer"));
+            const char *lc = lyr?object_getClassName(lyr):"-";
+            const char *rot=(t.b!=0.0||t.c!=0.0)?"  <<<ROT":"";
+            fprintf(f,"%*s%s b=%.0fx%.0f xf=[%.2f %.2f %.2f %.2f] layer=%s%s\n",depth*2,"",object_getClassName(v),b.size.width,b.size.height,t.a,t.b,t.c,t.d,lc,rot);
+        }
+        id subs=((id(*)(id,SEL))objc_msgSend)(v,sel_registerName("subviews"));
+        NSUInteger n=subs?((NSUInteger(*)(id,SEL))objc_msgSend)(subs,sel_registerName("count")):0;
+        for(NSUInteger k=0;k<n;k++){ id sv=((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),k); cbrDumpV(f,sv,depth+1); }
+    } @catch(...) {}
+}
+static void cbrViewProbe(void) {
+    @try {
+        NSString *path=[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_yt_views.txt"];
+        FILE *f=fopen([path fileSystemRepresentation],"a"); if(!f) return;
+        fprintf(f,"==== VIEWS t=%ld ====\n",(long)time(NULL));
+        id app=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"),sel_registerName("sharedApplication"));
+        id arr=((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("connectedScenes")),sel_registerName("allObjects"));
+        NSUInteger sc=((NSUInteger(*)(id,SEL))objc_msgSend)(arr,sel_registerName("count"));
+        for(NSUInteger i=0;i<sc;i++){ id scene=((id(*)(id,SEL,NSUInteger))objc_msgSend)(arr,sel_registerName("objectAtIndex:"),i);
+            if(!strstr(object_getClassName(scene),"WindowScene")) continue;
+            id wins=((id(*)(id,SEL))objc_msgSend)(scene,sel_registerName("windows"));
+            NSUInteger wc=wins?((NSUInteger(*)(id,SEL))objc_msgSend)(wins,sel_registerName("count")):0;
+            for(NSUInteger w=0;w<wc;w++){ id win=((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins,sel_registerName("objectAtIndex:"),w);
+                BOOL key=((BOOL(*)(id,SEL))objc_msgSend)(win,sel_registerName("isKeyWindow"));
+                if(!key) continue;
+                id rvc=((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("rootViewController"));
+                fprintf(f,"  KEY %s rootVC=%s\n",object_getClassName(win),rvc?object_getClassName(rvc):"(nil)");
+                if(rvc){ id rv=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")); if(rv) cbrDumpV(f,rv,2); }
+            }
+        }
+        fprintf(f,"==== END ====\n"); fclose(f);
+    } @catch(...) {}
+}
+
 %group APPS
 
 
@@ -3126,12 +3167,13 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.62 init - repeating window snapshot to capture fullscreen (angle0 locked for home)";
+        const char msg[] = "[CBR] v3.20.63 init - standalone view-tree probe (CBR_yt_views) for fullscreen video view";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
+        for (int _r=1;_r<=30;_r++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(_r*2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrViewProbe(); }); }
         for (int _q=1;_q<=30;_q++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(_q*2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrYTGeomProbe("tick"); }); }
         [[NSNotificationCenter defaultCenter] addObserverForName:@"UIKeyboardDidShowNotification" object:nil queue:nil usingBlock:^(id note){ cbrYTGeomProbe("kbd"); }];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(4*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrYTGeomProbe("load"); });
@@ -3147,7 +3189,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.62 init - repeating window snapshot to capture fullscreen (angle0 locked for home)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.63 init - standalone view-tree probe (CBR_yt_views) for fullscreen video view";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
