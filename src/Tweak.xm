@@ -3150,33 +3150,37 @@ static void cbrNoteLandscape(void) {
             ((void(*)(id,SEL,long,double,BOOL,BOOL,id))objc_msgSend)(app, note, (long)3, (double)0.0, (BOOL)YES, (BOOL)YES, @"CBR");
     } @catch(...) {}
 }
-// v3.20.71: fullscreen diagnostic. App Store apps are sandboxed and CANNOT write /var/mobile,
-// so write to the app's OWN tmp (NSTemporaryDirectory). Dumps override + every window + layers.
+// v3.20.72: fullscreen FIX. Make PGHostedWindow (phone-sized fullscreen player) mimic the
+// adopted YTMainWindow (car bounds + landscape). Only touches PGHostedWindow; browse is safe.
 static void cbrFullscreenProbe(void) {
     @try {
         NSString *_pp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_pg.txt"];
         int fd = open([_pp fileSystemRepresentation], O_WRONLY|O_CREAT|O_APPEND, 0644);
-        if (fd < 0) return;
-        char hb[128]; int hbn=snprintf(hb,sizeof(hb),"==== PROBE override=%d ====\n", gCBROrientOverride); if(hbn>0) write(fd,hb,(size_t)hbn);
         id app=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"),sel_registerName("sharedApplication"));
         id wins=app?((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("windows")):nil;
         NSUInteger wc= wins?((NSUInteger(*)(id,SEL))objc_msgSend)(wins,sel_registerName("count")):0;
+        id mainWin=nil, pgWin=nil; CGRect mainB=CGRectZero, mainF=CGRectZero;
+        if(fd>=0){char hb[128];int hbn=snprintf(hb,sizeof(hb),"==== PROBE override=%d ====\n",gCBROrientOverride);if(hbn>0)write(fd,hb,(size_t)hbn);}
         for(NSUInteger w=0; w<wc; w++){
             id win=((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins,sel_registerName("objectAtIndex:"),w);
+            const char *cn=object_getClassName(win);
             CGRect b=((CGRect(*)(id,SEL))objc_msgSend)(win,sel_registerName("bounds"));
-            CGAffineTransform wt=((CGAffineTransform(*)(id,SEL))objc_msgSend)(win,sel_registerName("transform"));
-            char wbuf[240]; int wbn=snprintf(wbuf,sizeof(wbuf),"W%lu %s %.0fx%.0f xf=[%.2f %.2f %.2f %.2f]\n",(unsigned long)w,object_getClassName(win),b.size.width,b.size.height,wt.a,wt.b,wt.c,wt.d); if(wbn>0) write(fd,wbuf,(size_t)wbn);
-            id layer=((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("layer"));
-            id subs=layer?((id(*)(id,SEL))objc_msgSend)(layer,sel_registerName("sublayers")):nil;
-            NSUInteger ln= subs?((NSUInteger(*)(id,SEL))objc_msgSend)(subs,sel_registerName("count")):0;
-            for(NSUInteger i=0;i<ln && i<10;i++){
-                id sl=((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),i);
-                CGRect lb=((CGRect(*)(id,SEL))objc_msgSend)(sl,sel_registerName("frame"));
-                CGAffineTransform t=((CGAffineTransform(*)(id,SEL))objc_msgSend)(sl,sel_registerName("affineTransform"));
-                char lbuf[240]; int lbn=snprintf(lbuf,sizeof(lbuf),"   L%lu %s %.0fx%.0f xf=[%.2f %.2f %.2f %.2f]\n",(unsigned long)i,object_getClassName(sl),lb.size.width,lb.size.height,t.a,t.b,t.c,t.d); if(lbn>0) write(fd,lbuf,(size_t)lbn);
-            }
+            if(fd>=0){char wb[200];int wbn=snprintf(wb,sizeof(wb),"W%lu %s %.0fx%.0f\n",(unsigned long)w,cn?cn:"?",b.size.width,b.size.height);if(wbn>0)write(fd,wb,(size_t)wbn);}
+            if(cn && strstr(cn,"YTMainWindow")){ mainWin=win; mainB=b; mainF=((CGRect(*)(id,SEL))objc_msgSend)(win,sel_registerName("frame")); }
+            else if(cn && strstr(cn,"PGHosted")){ pgWin=win; }
         }
-        close(fd);
+        if(pgWin && mainWin && gCBROrientOverride>0 && mainB.size.width>0){
+            ((void(*)(id,SEL,CGRect))objc_msgSend)(pgWin,sel_registerName("setBounds:"),mainB);
+            ((void(*)(id,SEL,CGRect))objc_msgSend)(pgWin,sel_registerName("setFrame:"),mainF);
+            SEL sro=sel_registerName("_setRotatableViewOrientation:duration:force:");
+            if([pgWin respondsToSelector:sro]) ((void(*)(id,SEL,int,float,int))objc_msgSend)(pgWin,sro,3,0.0f,1);
+            SEL rot=sel_registerName("_rotateWindowToOrientation:updateStatusBar:duration:skipCallbacks:");
+            if([pgWin respondsToSelector:rot]) ((void(*)(id,SEL,int,int,int,int))objc_msgSend)(pgWin,rot,3,0,0,0);
+            id rvc=((id(*)(id,SEL))objc_msgSend)(pgWin,sel_registerName("rootViewController"));
+            if(rvc){ id v=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")); if(v) ((void(*)(id,SEL,CGRect))objc_msgSend)(v,sel_registerName("setFrame:"),CGRectMake(0,0,mainB.size.width,mainB.size.height)); }
+            if(fd>=0){char fbb[160];int fbn=snprintf(fbb,sizeof(fbb),"   -> FIXED PGHosted -> %.0fx%.0f + landscape\n",mainB.size.width,mainB.size.height);if(fbn>0)write(fd,fbb,(size_t)fbn);}
+        }
+        if(fd>=0) close(fd);
     } @catch(...) {}
 }
 
@@ -3236,16 +3240,16 @@ static void cbrFullscreenProbe(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.71 init - gated orient + fullscreen probe (app sandbox tmp)";
+        const char msg[] = "[CBR] v3.20.72 init - gated orient + PGHostedWindow fullscreen fix";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
-        // v3.20.71: GATED - stay -1 until hosted (fixes the phone-keyboard leak). Plus a diagnostic probe.
+        // v3.20.72: GATED - stay -1 until hosted. Timer drives the PGHostedWindow fullscreen fix.
         gCBROrientOverride = -1;
         unlink([[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_pg.txt"] fileSystemRepresentation]);
-        for (int _r=1;_r<=45;_r++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((double)_r*2.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrFullscreenProbe(); }); }
+        for (int _r=1;_r<=60;_r++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((double)_r*1.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrFullscreenProbe(); }); }
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.unlock"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.appside.loaded"), NULL, NULL, YES);
@@ -3258,7 +3262,7 @@ static void cbrFullscreenProbe(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.71 init - gated orient + fullscreen probe (app sandbox tmp)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.72 init - gated orient + PGHostedWindow fullscreen fix";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
