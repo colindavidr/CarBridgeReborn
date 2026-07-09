@@ -3093,6 +3093,28 @@ static void cbrDumpV(FILE *f, id v, int depth) {
         for(NSUInteger k=0;k<n;k++){ id sv=((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),k); cbrDumpV(f,sv,depth+1); }
     } @catch(...) {}
 }
+static void cbrDumpLayers(FILE *f, id layer, int depth) {
+    if (!layer || depth>60) return;
+    @try {
+        CGRect b=((CGRect(*)(id,SEL))objc_msgSend)(layer,sel_registerName("bounds"));
+        CGAffineTransform t=((CGAffineTransform(*)(id,SEL))objc_msgSend)(layer,sel_registerName("affineTransform"));
+        const char *cn=object_getClassName(layer);
+        int rot=(t.b!=0.0||t.c!=0.0);
+        int big=(b.size.width>150.0||b.size.height>150.0);
+        int interesting = rot || strcasestr(cn,"player")||strcasestr(cn,"video")||strcasestr(cn,"sample")||strcasestr(cn,"mdx")||strcasestr(cn,"host")||strcasestr(cn,"context")||strcasestr(cn,"remote")||strcasestr(cn,"stream");
+        if (big || interesting) {
+            CGRect cr=((CGRect(*)(id,SEL))objc_msgSend)(layer,sel_registerName("contentsRect"));
+            id cg=((id(*)(id,SEL))objc_msgSend)(layer,sel_registerName("contentsGravity"));
+            char cgs[64]; cgs[0]=0; if(cg) CFStringGetCString((CFStringRef)cg,cgs,sizeof(cgs),kCFStringEncodingUTF8);
+            const char *rr=rot?"  <<<LAYERROT":"";
+            fprintf(f,"%*sL:%s b=%.0fx%.0f af=[%.2f %.2f %.2f %.2f] cr=[%.2f %.2f %.1fx%.1f] g=%s%s\n",depth*2,"",cn,b.size.width,b.size.height,t.a,t.b,t.c,t.d,cr.origin.x,cr.origin.y,cr.size.width,cr.size.height,cgs,rr);
+        }
+        id subs=((id(*)(id,SEL))objc_msgSend)(layer,sel_registerName("sublayers"));
+        NSUInteger n=subs?((NSUInteger(*)(id,SEL))objc_msgSend)(subs,sel_registerName("count")):0;
+        for(NSUInteger k=0;k<n;k++){ id sl=((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),k); cbrDumpLayers(f,sl,depth+1); }
+    } @catch(...) {}
+}
+
 static void cbrViewProbe(void) {
     @try {
         NSString *path=[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_yt_views.txt"];
@@ -3110,7 +3132,7 @@ static void cbrViewProbe(void) {
                 if(!key) continue;
                 id rvc=((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("rootViewController"));
                 fprintf(f,"  KEY %s rootVC=%s\n",object_getClassName(win),rvc?object_getClassName(rvc):"(nil)");
-                if(rvc){ id rv=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")); if(rv) cbrDumpV(f,rv,2); }
+                if(rvc){ id rv=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")); if(rv){ cbrDumpV(f,rv,2); id ly=((id(*)(id,SEL))objc_msgSend)(rv,sel_registerName("layer")); if(ly){ fprintf(f,"  -- LAYER TREE --\n"); cbrDumpLayers(f,ly,2); } } }
             }
         }
         fprintf(f,"==== END ====\n"); fclose(f);
@@ -3167,7 +3189,7 @@ static void cbrViewProbe(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.63 init - standalone view-tree probe (CBR_yt_views) for fullscreen video view";
+        const char msg[] = "[CBR] v3.20.64 init - layer-tree probe (MDXView layers) to locate fullscreen rotation below the view tree";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3189,7 +3211,7 @@ static void cbrViewProbe(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.63 init - standalone view-tree probe (CBR_yt_views) for fullscreen video view";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.64 init - layer-tree probe (MDXView layers) to locate fullscreen rotation below the view tree";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
