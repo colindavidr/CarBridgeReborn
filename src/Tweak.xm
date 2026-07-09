@@ -3126,12 +3126,13 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.61 init - iOS17 angle-based orientation calibration";
+        const char msg[] = "[CBR] v3.20.62 init - repeating window snapshot to capture fullscreen (angle0 locked for home)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
+        for (int _q=1;_q<=30;_q++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(_q*2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrYTGeomProbe("tick"); }); }
         [[NSNotificationCenter defaultCenter] addObserverForName:@"UIKeyboardDidShowNotification" object:nil queue:nil usingBlock:^(id note){ cbrYTGeomProbe("kbd"); }];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(4*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrYTGeomProbe("load"); });
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -3146,7 +3147,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.61 init - iOS17 angle-based orientation calibration";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.62 init - repeating window snapshot to capture fullscreen (angle0 locked for home)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
