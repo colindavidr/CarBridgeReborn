@@ -3194,14 +3194,13 @@ static void cbrForceYT(void) {
                 if(!(wcn && strstr(wcn,"YTMainWindow"))) continue;
                 CGRect wb=((CGRect(*)(id,SEL))objc_msgSend)(win,sel_registerName("bounds"));
                 if(wb.size.width<=0) continue;
-                CGFloat mx=wb.size.width>wb.size.height?wb.size.width:wb.size.height;
-                CGFloat mn=wb.size.width>wb.size.height?wb.size.height:wb.size.width;
-                ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setBounds:"),CGRectMake(0,0,mx,mn));
-                ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setFrame:"),CGRectMake(0,0,mx,mn));
+                if(wb.size.height>wb.size.width){ CGFloat mx=wb.size.height,mn=wb.size.width;
+                    ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setBounds:"),CGRectMake(0,0,mx,mn));
+                    ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setFrame:"),CGRectMake(0,0,mx,mn)); }
                 id rvc=((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("rootViewController"));
                 id rv=rvc?((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")):nil;
-                if(rv){ ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(rv,sel_registerName("setTransform:"),CGAffineTransformIdentity);
-                    ((void(*)(id,SEL,CGRect))objc_msgSend)(rv,sel_registerName("setFrame:"),CGRectMake(0,0,mx,mn)); }
+                if(rv){ CGAffineTransform rt=((CGAffineTransform(*)(id,SEL))objc_msgSend)(rv,sel_registerName("transform"));
+                    if(fabs(rt.b)>0.5 || fabs(rt.c)>0.5) ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(rv,sel_registerName("setTransform:"),CGAffineTransformIdentity); }
             }
         }
     } @catch(...) {}
@@ -3226,6 +3225,12 @@ static void cbrForceYT(void) {
 }
 - (NSUInteger)__supportedInterfaceOrientations {
     if (gCBROrientOverride > 0) return (NSUInteger)((1UL<<3) | (1UL<<4));
+    return %orig;
+}
+%end
+%hook UITraitCollection
+- (long)horizontalSizeClass {
+    if (gCBROrientOverride > 0) return 2;
     return %orig;
 }
 %end
@@ -3267,15 +3272,15 @@ static void cbrForceYT(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.85 init - self-detect gating + YTMainWindow landscape force";
+        const char msg[] = "[CBR] v3.20.87 init - conditional fix + Regular size class";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
-        // v3.20.85: self-detect hosting via window size; force YTMainWindow landscape. No unrotate/relayout.
+        // v3.20.87: self-detect hosting; conditional YTMainWindow fix + Regular size class.
         gCBROrientOverride = -1;
-        for (int _r=1;_r<=200;_r++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((double)_r*0.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrForceYT(); }); }
+        for (int _r=1;_r<=400;_r++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((double)_r*0.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrForceYT(); }); }
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.unlock"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.appside.loaded"), NULL, NULL, YES);
@@ -3288,7 +3293,7 @@ static void cbrForceYT(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.85 init - self-detect gating + YTMainWindow landscape force";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.87 init - conditional fix + Regular size class";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
