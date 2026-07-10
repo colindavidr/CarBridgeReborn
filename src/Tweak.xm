@@ -3163,6 +3163,16 @@ static void cbrNoteLandscape(void) {
             ((void(*)(id,SEL,long,double,BOOL,BOOL,id))objc_msgSend)(app, note, (long)3, (double)0.0, (BOOL)YES, (BOOL)YES, @"CBR");
     } @catch(...) {}
 }
+static void cbrWidthProbe(id view, int depth, int fd) {
+    if(!view || depth>16 || fd<0) return;
+    @try {
+        CGRect f=((CGRect(*)(id,SEL))objc_msgSend)(view,sel_registerName("frame"));
+        if(f.size.width>=100){ char b[220]; int n=snprintf(b,sizeof(b),"%*s%s x=%.0f w=%.0f h=%.0f\n",depth,"",object_getClassName(view),f.origin.x,f.size.width,f.size.height); if(n>0) write(fd,b,(size_t)n); }
+        id subs=((id(*)(id,SEL))objc_msgSend)(view,sel_registerName("subviews"));
+        NSUInteger sc=subs?((NSUInteger(*)(id,SEL))objc_msgSend)(subs,sel_registerName("count")):0;
+        for(NSUInteger i=0;i<sc && i<40;i++) cbrWidthProbe(((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),i),depth+1,fd);
+    } @catch(...) {}
+}
 static void cbrForceYT(void) {
     @try {
         id app=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"),sel_registerName("sharedApplication"));
@@ -3200,7 +3210,9 @@ static void cbrForceYT(void) {
                 id rvc=((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("rootViewController"));
                 id rv=rvc?((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")):nil;
                 if(rv){ CGAffineTransform rt=((CGAffineTransform(*)(id,SEL))objc_msgSend)(rv,sel_registerName("transform"));
-                    if(fabs(rt.b)>0.5 || fabs(rt.c)>0.5) ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(rv,sel_registerName("setTransform:"),CGAffineTransformIdentity); }
+                    if(fabs(rt.b)>0.5 || fabs(rt.c)>0.5) ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(rv,sel_registerName("setTransform:"),CGAffineTransformIdentity);
+                    int _wf=open([[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_width.txt"] fileSystemRepresentation],O_WRONLY|O_CREAT|O_TRUNC,0644);
+                    if(_wf>=0){ CGRect _rb=((CGRect(*)(id,SEL))objc_msgSend)(rv,sel_registerName("bounds")); char _h[80]; int _hn=snprintf(_h,sizeof(_h),"rootView w=%.0f h=%.0f\n",_rb.size.width,_rb.size.height); if(_hn>0) write(_wf,_h,(size_t)_hn); cbrWidthProbe(rv,0,_wf); close(_wf); } }
             }
         }
     } @catch(...) {}
@@ -3284,7 +3296,7 @@ static void cbrForceYT(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.88 init - UIScreen landscape-swap (fill width)";
+        const char msg[] = "[CBR] v3.20.89 init - width probe";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3305,7 +3317,7 @@ static void cbrForceYT(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.88 init - UIScreen landscape-swap (fill width)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.89 init - width probe";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
