@@ -3168,11 +3168,10 @@ static void cbrSizeProbe(void) {
     @try {
         NSString *_pp=[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_size.txt"];
         int fd=open([_pp fileSystemRepresentation],O_WRONLY|O_CREAT|O_APPEND,0644);
-        if(fd<0) return;
-        write(fd,"==== SIZE ====\n",15);
         id app=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"),sel_registerName("sharedApplication"));
         id arr=((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("connectedScenes")),sel_registerName("allObjects"));
         NSUInteger nc=arr?((NSUInteger(*)(id,SEL))objc_msgSend)(arr,sel_registerName("count")):0;
+        if(fd>=0) write(fd,"==== SIZE ====\n",15);
         for(NSUInteger i=0;i<nc;i++){
             id scene=((id(*)(id,SEL,NSUInteger))objc_msgSend)(arr,sel_registerName("objectAtIndex:"),i);
             if(!strstr(object_getClassName(scene),"WindowScene")) continue;
@@ -3180,14 +3179,25 @@ static void cbrSizeProbe(void) {
             NSUInteger wc=wins?((NSUInteger(*)(id,SEL))objc_msgSend)(wins,sel_registerName("count")):0;
             for(NSUInteger w=0;w<wc;w++){
                 id win=((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins,sel_registerName("objectAtIndex:"),w);
+                const char* wcn=object_getClassName(win);
                 CGRect wb=((CGRect(*)(id,SEL))objc_msgSend)(win,sel_registerName("bounds"));
                 id rvc=((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("rootViewController"));
                 id rv=rvc?((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")):nil;
                 CGRect rvb=rv?((CGRect(*)(id,SEL))objc_msgSend)(rv,sel_registerName("bounds")):CGRectZero;
-                char wbuf[220];int wn=snprintf(wbuf,sizeof(wbuf),"  W %s win=%.0fx%.0f rootView=%.0fx%.0f\n",object_getClassName(win),wb.size.width,wb.size.height,rvb.size.width,rvb.size.height);if(wn>0)write(fd,wbuf,(size_t)wn);
+                CGAffineTransform rt=rv?((CGAffineTransform(*)(id,SEL))objc_msgSend)(rv,sel_registerName("transform")):CGAffineTransformIdentity;
+                if(fd>=0){char wbuf[260];int wn=snprintf(wbuf,sizeof(wbuf),"  W %s win=%.0fx%.0f rootView=%.0fx%.0f rvXf=[%.2f %.2f %.2f %.2f]\n",wcn,wb.size.width,wb.size.height,rvb.size.width,rvb.size.height,rt.a,rt.b,rt.c,rt.d);if(wn>0)write(fd,wbuf,(size_t)wn);}
+                if(wcn && strstr(wcn,"YTMainWindow") && wb.size.width>0){
+                    CGFloat mx=wb.size.width>wb.size.height?wb.size.width:wb.size.height;
+                    CGFloat mn=wb.size.width>wb.size.height?wb.size.height:wb.size.width;
+                    ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setBounds:"),CGRectMake(0,0,mx,mn));
+                    ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setFrame:"),CGRectMake(0,0,mx,mn));
+                    if(rv){ ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(rv,sel_registerName("setTransform:"),CGAffineTransformIdentity);
+                        ((void(*)(id,SEL,CGRect))objc_msgSend)(rv,sel_registerName("setFrame:"),CGRectMake(0,0,mx,mn)); }
+                    if(fd>=0){const char*_m="   -> forced YTMainWindow landscape + rootView identity\n";write(fd,_m,strlen(_m));}
+                }
             }
         }
-        close(fd);
+        if(fd>=0) close(fd);
     } @catch(...) {}
 }
 
@@ -3198,15 +3208,6 @@ static void cbrSizeProbe(void) {
 - (void)_setRotatableViewOrientation:(int)orientation duration:(float)duration force:(int)force {
     if (gCBROrientOverride > 0) orientation = gCBROrientOverride;
     %orig;
-}
-- (void)setBounds:(CGRect)b {
-    if (gCBROrientOverride > 0) {
-        CGFloat _mx = b.size.width>b.size.height?b.size.width:b.size.height;
-        if (_mx > 0 && _mx <= 520 && b.size.height > b.size.width) {
-            CGFloat _t=b.size.width; b.size.width=b.size.height; b.size.height=_t;
-        }
-    }
-    %orig(b);
 }
 %end
 %hook UIViewController
@@ -3260,16 +3261,16 @@ static void cbrSizeProbe(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.82 init - gamble + private-orient + setBounds landscape pin";
+        const char msg[] = "[CBR] v3.20.83 init - gamble + direct-force YTMainWindow landscape";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
-        // v3.20.82: GATED. gamble + private-orient + setBounds landscape pin.
+        // v3.20.83: GATED. gamble + private-orient + DIRECT force of YTMainWindow landscape.
         gCBROrientOverride = -1;
         unlink([[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_size.txt"] fileSystemRepresentation]);
-        for (int _r=1;_r<=30;_r++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((double)_r*2.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrSizeProbe(); }); }
+        for (int _r=1;_r<=90;_r++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((double)_r*1.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrSizeProbe(); }); }
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.unlock"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.appside.loaded"), NULL, NULL, YES);
@@ -3282,7 +3283,7 @@ static void cbrSizeProbe(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.82 init - gamble + private-orient + setBounds landscape pin";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.83 init - gamble + direct-force YTMainWindow landscape";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
