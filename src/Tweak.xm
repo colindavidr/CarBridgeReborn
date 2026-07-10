@@ -1292,6 +1292,48 @@ static void cbrReferenceProbe(void) {
 }
 
 
+static void cbrHostGeomLog(void) {
+    @try {
+        if(!gCBRAppVC || !gCBRRootWindow) return;
+        int fd=open("/var/mobile/CBR_hostgeom.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
+        if(fd<0) return;
+        #define HG(...) do{char _b[320];int _n=snprintf(_b,sizeof(_b),__VA_ARGS__);if(_n>0)write(fd,_b,(size_t)_n);}while(0)
+        id screens=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("screens"));
+        NSUInteger nsc=screens?((NSUInteger(*)(id,SEL))objc_msgSend)(screens,sel_registerName("count")):0;
+        for(NSUInteger i=0;i<nsc;i++){ id sc=((id(*)(id,SEL,NSUInteger))objc_msgSend)(screens,sel_registerName("objectAtIndex:"),i);
+            int car=[sc respondsToSelector:sel_registerName("_isCarScreen")]?((BOOL(*)(id,SEL))objc_msgSend)(sc,sel_registerName("_isCarScreen")):0;
+            CGRect b=((CGRect(*)(id,SEL))objc_msgSend)(sc,sel_registerName("bounds"));
+            CGRect nb=((CGRect(*)(id,SEL))objc_msgSend)(sc,sel_registerName("nativeBounds"));
+            CGFloat scl=((CGFloat(*)(id,SEL))objc_msgSend)(sc,sel_registerName("scale"));
+            HG("SCREEN car=%d bounds=%.0fx%.0f native=%.0fx%.0f scale=%.1f\n",car,b.size.width,b.size.height,nb.size.width,nb.size.height,scl);
+        }
+        CGRect wf=((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow,sel_registerName("frame"));
+        CGAffineTransform wt=((CGAffineTransform(*)(id,SEL))objc_msgSend)(gCBRRootWindow,sel_registerName("transform"));
+        HG("rootWindow frame=%.0f,%.0f %.0fx%.0f xf=[%.2f %.2f %.2f %.2f]\n",wf.origin.x,wf.origin.y,wf.size.width,wf.size.height,wt.a,wt.b,wt.c,wt.d);
+        id vcv=((id(*)(id,SEL))objc_msgSend)(gCBRAppVC,sel_registerName("view"));
+        if(vcv){ CGRect vf=((CGRect(*)(id,SEL))objc_msgSend)(vcv,sel_registerName("frame")); CGAffineTransform vt=((CGAffineTransform(*)(id,SEL))objc_msgSend)(vcv,sel_registerName("transform"));
+            HG("appVC.view frame=%.0f,%.0f %.0fx%.0f xf=[%.2f %.2f %.2f %.2f]\n",vf.origin.x,vf.origin.y,vf.size.width,vf.size.height,vt.a,vt.b,vt.c,vt.d); }
+        id dvc=getIvar(gCBRAppVC,"_deviceAppViewController");
+        id sv=dvc?getIvar(dvc,"_sceneView"):nil;
+        if(sv){ CGRect sf=((CGRect(*)(id,SEL))objc_msgSend)(sv,sel_registerName("frame")); CGAffineTransform st=((CGAffineTransform(*)(id,SEL))objc_msgSend)(sv,sel_registerName("transform"));
+            HG("sceneView %s frame=%.0f,%.0f %.0fx%.0f xf=[%.2f %.2f %.2f %.2f]\n",object_getClassName(sv),sf.origin.x,sf.origin.y,sf.size.width,sf.size.height,st.a,st.b,st.c,st.d);
+            id ccv=getIvar(sv,"_sceneContentContainerView"); if(!ccv) ccv=getIvar(sv,"_contentContainerView");
+            if(ccv){ CGRect cf=((CGRect(*)(id,SEL))objc_msgSend)(ccv,sel_registerName("frame")); CGAffineTransform ct=((CGAffineTransform(*)(id,SEL))objc_msgSend)(ccv,sel_registerName("transform"));
+                HG("  contentContainer %s frame=%.0f,%.0f %.0fx%.0f xf=[%.2f %.2f %.2f %.2f]\n",object_getClassName(ccv),cf.origin.x,cf.origin.y,cf.size.width,cf.size.height,ct.a,ct.b,ct.c,ct.d);
+                id subs=((id(*)(id,SEL))objc_msgSend)(ccv,sel_registerName("subviews"));
+                NSUInteger sn=subs?((NSUInteger(*)(id,SEL))objc_msgSend)(subs,sel_registerName("count")):0;
+                for(NSUInteger j=0;j<sn && j<6;j++){ id sub=((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),j);
+                    CGRect subf=((CGRect(*)(id,SEL))objc_msgSend)(sub,sel_registerName("frame"));
+                    HG("    sub %s %.0f,%.0f %.0fx%.0f\n",object_getClassName(sub),subf.origin.x,subf.origin.y,subf.size.width,subf.size.height); }
+            }
+        }
+        close(fd);
+        #undef HG
+    } @catch(...) {}
+}
+static void cbrHostGeomSchedule(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrHostGeomLog(); cbrHostGeomSchedule(); });
+}
 static void cbrSBHostScene(const char *bid_cstr, id handle) {
     int fd = open("/var/mobile/CBR_sb_host.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
     #define HH(s)  do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
@@ -3302,7 +3344,7 @@ static void cbrForceYT(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.90 init - zero safe-area (fill width)";
+        const char msg[] = "[CBR] v3.20.91 init - host geometry probe";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3318,12 +3360,13 @@ static void cbrForceYT(void) {
     else if (strcmp(__progname, "SpringBoard") == 0) {
         %init(SPRINGBOARD);
         cbrSBRegisterListener();
+        cbrHostGeomSchedule();
         unlink("/var/mobile/CBR_appside_sb.txt");
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.loaded"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.90 init - zero safe-area (fill width)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.91 init - host geometry probe";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
