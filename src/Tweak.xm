@@ -1327,12 +1327,28 @@ static void cbrHostGeomLog(void) {
                     HG("    sub %s %.0f,%.0f %.0fx%.0f\n",object_getClassName(sub),subf.origin.x,subf.origin.y,subf.size.width,subf.size.height); }
             }
         }
+        @try {
+            id ms=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("mainScreen"));
+            CGFloat msc=((CGFloat(*)(id,SEL))objc_msgSend)(ms,sel_registerName("scale"));
+            CGFloat csc=2.0;
+            for(NSUInteger i=0;i<nsc;i++){ id scn=((id(*)(id,SEL,NSUInteger))objc_msgSend)(screens,sel_registerName("objectAtIndex:"),i);
+                if([scn respondsToSelector:sel_registerName("_isCarScreen")] && ((BOOL(*)(id,SEL))objc_msgSend)(scn,sel_registerName("_isCarScreen"))) csc=((CGFloat(*)(id,SEL))objc_msgSend)(scn,sel_registerName("scale")); }
+            if(sv && msc>0 && csc>0 && fabs(msc-csc)>0.05){
+                CGFloat factor=msc/csc;
+                CGRect wb=((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow,sel_registerName("bounds"));
+                CGFloat bw=wb.size.width*factor, bh=wb.size.height*factor;
+                ((void(*)(id,SEL,CGRect))objc_msgSend)(sv,sel_registerName("setBounds:"),CGRectMake(0,0,bw,bh));
+                ((void(*)(id,SEL,CGPoint))objc_msgSend)(sv,sel_registerName("setCenter:"),CGPointMake(wb.size.width/2.0,wb.size.height/2.0));
+                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(sv,sel_registerName("setTransform:"),CGAffineTransformMakeScale(1.0/factor,1.0/factor));
+                HG("FIT sceneView bounds=%.0fx%.0f scale=%.3f (msc=%.1f csc=%.1f)\n",bw,bh,1.0/factor,msc,csc);
+            }
+        } @catch(...) {}
         close(fd);
         #undef HG
     } @catch(...) {}
 }
 static void cbrHostGeomSchedule(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrHostGeomLog(); cbrHostGeomSchedule(); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrHostGeomLog(); cbrHostGeomSchedule(); });
 }
 static void cbrSBHostScene(const char *bid_cstr, id handle) {
     int fd = open("/var/mobile/CBR_sb_host.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
@@ -3305,14 +3321,6 @@ static void cbrForceYT(void) {
     if (gCBROrientOverride > 0 && r.size.height > r.size.width) return CGRectMake(0, 0, r.size.height, r.size.width);
     return r;
 }
-- (CGFloat)scale {
-    if (gCBROrientOverride > 0) return (CGFloat)2.0;
-    return %orig;
-}
-- (CGFloat)nativeScale {
-    if (gCBROrientOverride > 0) return (CGFloat)2.0;
-    return %orig;
-}
 %end
 %hook UIView
 - (UIEdgeInsets)safeAreaInsets {
@@ -3352,7 +3360,7 @@ static void cbrForceYT(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.92 init - UIScreen scale 2.0 (fix 3x/2x mismatch)";
+        const char msg[] = "[CBR] v3.20.93 init - scene-view scale-fit (3x/2x)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3374,7 +3382,7 @@ static void cbrForceYT(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.92 init - UIScreen scale 2.0 (fix 3x/2x mismatch)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.93 init - scene-view scale-fit (3x/2x)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
