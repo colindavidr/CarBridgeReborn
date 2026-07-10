@@ -3240,6 +3240,18 @@ static void cbrForceYT(void) {
     return %orig;
 }
 %end
+%hook UIScreen
+- (CGRect)bounds {
+    CGRect r = %orig;
+    if (gCBROrientOverride > 0 && r.size.height > r.size.width) return CGRectMake(0, 0, r.size.height, r.size.width);
+    return r;
+}
+- (CGRect)nativeBounds {
+    CGRect r = %orig;
+    if (gCBROrientOverride > 0 && r.size.height > r.size.width) return CGRectMake(0, 0, r.size.height, r.size.width);
+    return r;
+}
+%end
 %end
 
 %ctor {
@@ -3272,7 +3284,7 @@ static void cbrForceYT(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.87 init - conditional fix + Regular size class";
+        const char msg[] = "[CBR] v3.20.88 init - UIScreen landscape-swap (fill width)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3293,7 +3305,7 @@ static void cbrForceYT(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.87 init - conditional fix + Regular size class";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.88 init - UIScreen landscape-swap (fill width)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
