@@ -1327,8 +1327,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         HHF("rootWindow: %s\n", rootWindow ? class_getName(object_getClass(rootWindow)) : "nil");
         if (!rootWindow) { HH("no rootWindow -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
         gCBRRootWindow = rootWindow;
-        // v3.20.77 GAMBLE: host at the car screen's TRUE landscape size (e.g. 472x281) instead of
-        // display-config portrait 281x472, so the whole chain is natively landscape (no compositor rotation).
+        // v3.20.77 GAMBLE: host at the car screen's TRUE landscape size instead of portrait 281x472.
         @try {
             id _scr=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("screens"));
             NSUInteger _sn=_scr?((NSUInteger(*)(id,SEL))objc_msgSend)(_scr,sel_registerName("count")):0;
@@ -1348,7 +1347,6 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         @try {
             SEL _rot = sel_registerName("_rotateWindowToOrientation:updateStatusBar:duration:skipCallbacks:");
             if ([rootWindow respondsToSelector:_rot]) {
-                // v3.20.77 GAMBLE: skip window rotation - window is now natively landscape.
                 (void)_rot;
                 HH("[GAMBLE] window rotation SKIPPED (native landscape host)\n");
             } else {
@@ -3183,6 +3181,10 @@ static void cbrNoteLandscape(void) {
     }
     return %orig;
 }
+- (NSUInteger)__supportedInterfaceOrientations {
+    if (gCBROrientOverride > 0) return (NSUInteger)((1UL<<3) | (1UL<<4));
+    return %orig;
+}
 %end
 %hook UIDevice
 - (NSInteger)orientation {
@@ -3222,13 +3224,13 @@ static void cbrNoteLandscape(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.77 init - gated orient + native-landscape host gamble";
+        const char msg[] = "[CBR] v3.20.78 init - landscape host + private-orient force";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
-        // v3.20.77: GATED - stay -1 until hosted (keeps the phone keyboard fix).
+        // v3.20.78: GATED - stay -1 until hosted (keeps the phone keyboard fix).
         gCBROrientOverride = -1;
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.unlock"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -3242,7 +3244,7 @@ static void cbrNoteLandscape(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.77 init - gated orient + native-landscape host gamble";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.78 init - landscape host + private-orient force";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
