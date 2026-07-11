@@ -3168,7 +3168,24 @@ static void cbrNoteLandscape(void) {
 // Observe-only. Writes the full orientation/geometry state to a FIXED path every 1s while
 // hosted, so the good-boot and sideways-boot states can be captured and diffed. Nothing here
 // mutates the app -- no bounds pinning, no orientation kick, no screen/safe-area hooks.
+#import <stdarg.h>
 static CGFloat gCBRCarW = 0, gCBRCarH = 0;
+static int gCBRSroCalls = 0;
+static int gCBRSroLastVal = -99;
+static long gCBRLastVcIfo = -99;
+static long gCBRLastAct = -99;
+static double gCBRT0 = 0;
+static double cbrNowMs(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec*1000.0 + ts.tv_nsec/1000000.0; }
+static void cbrEvent(const char *fmt, ...) {
+    @try {
+        if (gCBRT0 == 0) gCBRT0 = cbrNowMs();
+        char line[300]; va_list ap; va_start(ap, fmt); int n = vsnprintf(line, sizeof(line), fmt, ap); va_end(ap);
+        if (n <= 0) return;
+        char stamped[360]; int m = snprintf(stamped, sizeof(stamped), "[+%8.1fms] %s\n", cbrNowMs()-gCBRT0, line);
+        NSString *pp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_events.txt"];
+        FILE *f = fopen([pp fileSystemRepresentation], "a"); if (f) { fwrite(stamped,1,(size_t)m,f); fclose(f); }
+    } @catch(...) {}
+}
 
 static void cbrProbeDiscover(id app) {
     if (gCBRCarW > 0 || !app) return;
@@ -3212,9 +3229,10 @@ static void cbrProbeTick(void) {
         cbrProbeDiscover(app);
 
         static int _tick = 0; _tick++;
+        cbrEvent("tick %d (heartbeat)", _tick);
         NSMutableString *out = [NSMutableString string];
-        [out appendFormat:@"=== CBR PROBE v3.22.2 tick=%d override=%d hosted=%s car=%.0fx%.0f ===\n",
-            _tick, gCBROrientOverride, (gCBROrientOverride > 0 ? "YES" : "no"), gCBRCarW, gCBRCarH];
+        [out appendFormat:@"=== CBR PROBE v3.22.4 tick=%d override=%d hosted=%s car=%.0fx%.0f sroCalls=%d lastAsk=%d ===\n",
+            _tick, gCBROrientOverride, (gCBROrientOverride > 0 ? "YES" : "no"), gCBRCarW, gCBRCarH, gCBRSroCalls, gCBRSroLastVal];
 
         id ms = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
         CGRect mb = ((CGRect(*)(id,SEL))objc_msgSend)(ms, sel_registerName("bounds"));
@@ -3231,7 +3249,10 @@ static void cbrProbeTick(void) {
             SEL _iscar = sel_registerName("_isCarScreen");
             BOOL isCar = scr && [scr respondsToSelector:_iscar] ? ((BOOL(*)(id,SEL))objc_msgSend)(scr, _iscar) : NO;
             long io = ((long(*)(id,SEL))objc_msgSend)(scene, sel_registerName("interfaceOrientation"));
-            [out appendFormat:@"scene[%lu] %s car=%d ifo=%ld\n", (unsigned long)i, object_getClassName(scene), isCar, io];
+            long act = ((long(*)(id,SEL))objc_msgSend)(scene, sel_registerName("activationState"));
+            const char *actn = (act==0?"FG-ACTIVE":(act==1?"FG-INACTIVE":(act==2?"BACKGROUND":"UNATTACHED")));
+            [out appendFormat:@"scene[%lu] %s car=%d ifo=%ld act=%ld(%s)\n", (unsigned long)i, object_getClassName(scene), isCar, io, act, actn];
+            if (act != gCBRLastAct) { cbrEvent("scene activationState %ld -> %ld (%s)", gCBRLastAct, act, actn); gCBRLastAct = act; }
             id wins = ((id(*)(id,SEL))objc_msgSend)(scene, sel_registerName("windows"));
             NSUInteger wc = wins ? ((NSUInteger(*)(id,SEL))objc_msgSend)(wins, sel_registerName("count")) : 0;
             for (NSUInteger w = 0; w < wc; w++) {
@@ -3243,6 +3264,10 @@ static void cbrProbeTick(void) {
                 [out appendFormat:@"  win[%lu] %s bounds=%.0fx%.0f rootVC=%s vcIfo=%ld\n",
                     (unsigned long)w, object_getClassName(win), wb.size.width, wb.size.height,
                     rvc ? object_getClassName(rvc) : "nil", vio];
+                if (rvc && strcmp(object_getClassName(win), "YTMainWindow") == 0 && vio != gCBRLastVcIfo) {
+                    cbrEvent("YTMainWindow vcIfo %ld -> %ld (bounds=%.0fx%.0f sroCalls=%d lastAsk=%d)", gCBRLastVcIfo, vio, wb.size.width, wb.size.height, gCBRSroCalls, gCBRSroLastVal);
+                    gCBRLastVcIfo = vio;
+                }
                 if (rvc) {
                     id v = ((id(*)(id,SEL))objc_msgSend)(rvc, sel_registerName("view"));
                     if (v) {
@@ -3277,7 +3302,11 @@ static void cbrProbeSchedule(void) {
 
 %hook UIWindow
 - (void)_setRotatableViewOrientation:(int)orientation duration:(float)duration force:(int)force {
-    if (gCBROrientOverride > 0) orientation = gCBROrientOverride;
+    gCBRSroCalls++; gCBRSroLastVal = orientation;
+    if (gCBROrientOverride > 0) {
+        cbrEvent("_setRotatableViewOrientation asked=%d force=%d -> FORCED %d on %s", orientation, force, gCBROrientOverride, object_getClassName(self));
+        orientation = gCBROrientOverride;
+    }
     %orig;
 }
 %end
@@ -3332,13 +3361,14 @@ static void cbrProbeSchedule(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.22.2 init - v77 baseline + read-only probe (app-tmp path, always-on)";
+        const char msg[] = "[CBR] v3.22.4 init - v77 baseline + race probe + scene activation/heartbeat";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
-        cbrProbeSchedule();   // v3.22.2: read-only state probe -> app tmp CBR_probe.txt
+        cbrProbeSchedule();
+        @try { NSString *ep=[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_events.txt"]; [[NSFileManager defaultManager] removeItemAtPath:ep error:nil]; } @catch(...) {}
         // v3.20.78: GATED - stay -1 until hosted (keeps the phone keyboard fix).
         gCBROrientOverride = -1;
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -3353,7 +3383,7 @@ static void cbrProbeSchedule(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.22.2 init - v77 baseline + read-only probe (app-tmp path, always-on)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.22.4 init - v77 baseline + race probe + scene activation/heartbeat";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
