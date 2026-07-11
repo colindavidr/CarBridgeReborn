@@ -3077,12 +3077,15 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
                 SEL _sro=sel_registerName("_setRotatableViewOrientation:duration:force:");
                 if ([win respondsToSelector:_sro]) ((void(*)(id,SEL,int,float,int))objc_msgSend)(win,_sro,3,0.0f,1);
                 if (carScene) {
-                    ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setBounds:"),CGRectMake(0,0,lw,lh));
-                    ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setFrame:"),CGRectMake(0,0,lw,lh));
+                    // v3.24.0: PORTRAIT (lh x lw = 281x472), NOT landscape. Portrait is what makes
+                    // the dash come out upright - proven by the event log correlation.
+                    ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setBounds:"),CGRectMake(0,0,lh,lw));
+                    ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setFrame:"),CGRectMake(0,0,lh,lw));
                 }
                 id rvc=((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("rootViewController"));
                 if (rvc){
-                    if (carScene) { id v=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view"));
+                    // v3.24.0: root-view landscape force DISABLED - UIKit sizes it to the window.
+                    if (0) { id v=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view"));
                         if (v) ((void(*)(id,SEL,CGRect))objc_msgSend)(v,sel_registerName("setFrame:"),CGRectMake(0,0,lw,lh)); }
                     SEL _upd=sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
                     if ([rvc respondsToSelector:_upd]) ((void(*)(id,SEL))objc_msgSend)(rvc,_upd);
@@ -3174,7 +3177,6 @@ static int gCBRSroCalls = 0;
 static int gCBRSroLastVal = -99;
 static long gCBRLastVcIfo = -99;
 static long gCBRLastAct = -99;
-static int gCBRRepostsLeft = 6;
 static double gCBRT0 = 0;
 static double cbrNowMs(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec*1000.0 + ts.tv_nsec/1000000.0; }
 static void cbrEvent(const char *fmt, ...) {
@@ -3232,7 +3234,7 @@ static void cbrProbeTick(void) {
         static int _tick = 0; _tick++;
         cbrEvent("tick %d (heartbeat)", _tick);
         NSMutableString *out = [NSMutableString string];
-        [out appendFormat:@"=== CBR PROBE v3.23.1 tick=%d override=%d hosted=%s car=%.0fx%.0f sroCalls=%d lastAsk=%d ===\n",
+        [out appendFormat:@"=== CBR PROBE v3.24.0 tick=%d override=%d hosted=%s car=%.0fx%.0f sroCalls=%d lastAsk=%d ===\n",
             _tick, gCBROrientOverride, (gCBROrientOverride > 0 ? "YES" : "no"), gCBRCarW, gCBRCarH, gCBRSroCalls, gCBRSroLastVal];
 
         id ms = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
@@ -3269,14 +3271,16 @@ static void cbrProbeTick(void) {
                     cbrEvent("YTMainWindow vcIfo %ld -> %ld (bounds=%.0fx%.0f sroCalls=%d lastAsk=%d)", gCBRLastVcIfo, vio, wb.size.width, wb.size.height, gCBRSroCalls, gCBRSroLastVal);
                     gCBRLastVcIfo = vio;
                 }
-                // v3.23.1 EXPERIMENT: the VC now EXISTS (rvc != nil). Our 0ms forcing fired before
-                // it did (sroCalls froze at 2). Re-post landscape so cbrAppOrientCallback re-runs
-                // WITH the VC present, a few times, logging each - do we see vcIfo flip to 3 + a
-                // 3rd/4th _setRotatableViewOrientation land? This tests the timing fix directly.
-                if (rvc && strcmp(object_getClassName(win), "YTMainWindow") == 0 && gCBRRepostsLeft > 0) {
-                    gCBRRepostsLeft--;
-                    cbrEvent("REPOST landscape #%d (vc present, vcIfo=%ld, sroCalls before=%d)", 6 - gCBRRepostsLeft, vio, gCBRSroCalls);
-                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.landscape"), NULL, NULL, YES);
+                // v3.24.0: PERSISTENT PORTRAIT RE-PIN. YouTube reverts the window bounds, so the
+                // one-shot pin in cbrAppOrientCallback is not enough. Portrait (281x472) is the
+                // shape that yields an upright dash; landscape (472x281) yields sideways.
+                if (strcmp(object_getClassName(win), "YTMainWindow") == 0 && gCBRCarW > 0) {
+                    CGFloat pw = gCBRCarH, ph = gCBRCarW;   // portrait = 281 x 472
+                    if (fabs(wb.size.width - pw) > 1.0 || fabs(wb.size.height - ph) > 1.0) {
+                        cbrEvent("REPIN portrait: %.0fx%.0f -> %.0fx%.0f (vcIfo=%ld)", wb.size.width, wb.size.height, pw, ph, vio);
+                        ((void(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("setBounds:"), CGRectMake(0,0,pw,ph));
+                        ((void(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("setFrame:"),  CGRectMake(0,0,pw,ph));
+                    }
                 }
                 if (rvc) {
                     id v = ((id(*)(id,SEL))objc_msgSend)(rvc, sel_registerName("view"));
@@ -3371,7 +3375,7 @@ static void cbrProbeSchedule(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.23.1 init - v77 baseline + late-repost timing experiment";
+        const char msg[] = "[CBR] v3.24.0 init - v77 baseline + PORTRAIT window pin (upright dash)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3393,7 +3397,7 @@ static void cbrProbeSchedule(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.23.1 init - v77 baseline + late-repost timing experiment";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.24.0 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
