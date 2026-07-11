@@ -2989,6 +2989,18 @@ static void cbrKLLog(const char *fmt, ...) {
                          [bid UTF8String], object_getClassName(arg1), (int)isFg, (int)isDeact, (unsigned long)dr, _act);
                 if (respFg && !isFg) { return; }         // block background
                 if (isDeact || dr != 0) { return; }      // block deactivation -> keep foreground-ACTIVE
+                // v3.25.6: PERSISTENCE. Re-drive the LIVE scene (fresh block via cbrSBSilentActivate,
+                // the call that works at startup) after each pass, so the correct render is held for
+                // the whole session instead of only the first 6s. Async (no re-entry) + debounced.
+                {
+                    static double _lastRedrive = 0;
+                    struct timespec _ts; clock_gettime(CLOCK_MONOTONIC, &_ts);
+                    double _now = _ts.tv_sec + _ts.tv_nsec / 1e9;
+                    if (_now - _lastRedrive > 0.9) {
+                        _lastRedrive = _now;
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.05*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrSBSilentActivate(); });
+                    }
+                }
             }
         }
     } @catch(...) {}
