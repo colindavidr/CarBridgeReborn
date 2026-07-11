@@ -3225,21 +3225,42 @@ static void cbrProbeSchedule(void);
 // v3.24.4: iOS16 PUBLIC orientation command. requestGeometryUpdateWithPreferences: actively rotates
 // the scene (the same thing a phone-tap triggers) - unlike _setRotatableViewOrientation, which we
 // proved is a dead lever. Command LandscapeRight (vcIfo=3, the good-boot value) until it sticks.
+static void cbrSwizzleLandscape(Class cls) {
+    @try {
+        if (!cls) return;
+        const char *cn = class_getName(cls);
+        if (strcmp(cn, "YTAppViewControllerImpl") == 0) return;
+        static NSMutableSet *done = nil;
+        if (!done) done = [[NSMutableSet alloc] init];
+        NSString *key = [NSString stringWithUTF8String:cn];
+        if ([done containsObject:key]) return;
+        [done addObject:key];
+        const char *sels[2] = {"supportedInterfaceOrientations", "__supportedInterfaceOrientations"};
+        for (int i=0;i<2;i++){
+            SEL sel = sel_registerName(sels[i]);
+            Method m = class_getInstanceMethod(cls, sel);
+            if (!m) continue;
+            IMP orig = method_getImplementation(m);
+            IMP newImp = imp_implementationWithBlock(^NSUInteger(id sf){
+                if (gCBROrientOverride > 0) return (NSUInteger)((1UL<<3)|(1UL<<4));
+                return ((NSUInteger(*)(id,SEL))orig)(sf, sel);
+            });
+            const char *types = method_getTypeEncoding(m);
+            if (!class_addMethod(cls, sel, newImp, types)) method_setImplementation(m, newImp);
+        }
+        cbrEvent("swizzled landscape on %s", cn);
+    } @catch(...) {}
+}
 static void cbrForceLandscapeGeometry(id win) {
     @try {
-        id ws = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("windowScene"));
-        if (!ws) return;
-        Class prefCls = objc_getClass("UIWindowSceneGeometryPreferencesIOS");
-        if (!prefCls) return;
-        id prefs = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)((id)prefCls, sel_registerName("alloc")), sel_registerName("init"));
-        ((void(*)(id,SEL,NSUInteger))objc_msgSend)(prefs, sel_registerName("setInterfaceOrientations:"), (NSUInteger)(1UL<<3)); // LandscapeRight
-        SEL req = sel_registerName("requestGeometryUpdateWithPreferences:errorHandler:");
-        if ([ws respondsToSelector:req]) {
-            static int _gq=0; if(_gq++ < 8) cbrEvent("geomReq LandscapeRight -> %s", object_getClassName(ws));
-            ((void(*)(id,SEL,id,void(^)(NSError*)))objc_msgSend)(ws, req, prefs, ^(NSError *e){
-                static int _ge=0; if (e && _ge++ < 8) cbrEvent("geomReq REJECTED: %s", [[e localizedDescription] UTF8String] ?: "?");
-            });
-        }
+        id rvc = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("rootViewController"));
+        if (!rvc) return;
+        SEL snu = sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
+        if ([rvc respondsToSelector:snu]) ((void(*)(id,SEL))objc_msgSend)(rvc, snu);
+        SEL arto = sel_registerName("attemptRotationToDeviceOrientation");
+        Class vcCls = objc_getClass("UIViewController");
+        if ([vcCls respondsToSelector:arto]) ((void(*)(Class,SEL))objc_msgSend)(vcCls, arto);
+        static int _rq=0; if(_rq++ < 8) cbrEvent("reeval landscape on %s", object_getClassName(rvc));
     } @catch(...) {}
 }
 static void cbrProbeTick(void) {
@@ -3299,8 +3320,9 @@ static void cbrProbeTick(void) {
                         wb.size.width, wb.size.height, gCBRSroCalls, gCBRSroLastVal);
                     gCBRLastVcIfo = vio;
                 }
-                if (rvc && strcmp(object_getClassName(win), "YTMainWindow") == 0 && vio != 3) {
-                    cbrForceLandscapeGeometry(win);   // v3.24.4: command landscape until vcIfo=3
+                if (rvc && gCBROrientOverride > 0 && vio != 3) {
+                    cbrSwizzleLandscape(object_getClass(rvc));
+                    cbrForceLandscapeGeometry(win);
                 }
                 // v3.24.0: PERSISTENT PORTRAIT RE-PIN. YouTube reverts the window bounds, so the
                 // one-shot pin in cbrAppOrientCallback is not enough. Portrait (281x472) is the
@@ -3446,7 +3468,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.24.5 init - v77 baseline + PORTRAIT window pin (upright dash)";
+        const char msg[] = "[CBR] v3.24.6 init - v77 baseline + PORTRAIT window pin (upright dash)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3468,7 +3490,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.24.5 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.24.6 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
