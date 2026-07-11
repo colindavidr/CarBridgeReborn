@@ -3400,6 +3400,20 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
     return %orig;
 }
 %end
+// v3.24.5: YouTube's ROOT vc overrides supportedInterfaceOrientations with 0x2 (portrait), which
+// bypasses our base-UIViewController hook (that's the supp=0x2 in every log) and makes iOS veto the
+// landscape geometry request (BSActionErrorDomain err 1). Hook the concrete class directly so it
+// reports landscape while hosted: the decision reads landscape AND requestGeometryUpdate is accepted.
+%hook YTAppViewControllerImpl
+- (NSUInteger)supportedInterfaceOrientations {
+    if (gCBROrientOverride > 0) return (NSUInteger)((1UL<<3) | (1UL<<4));
+    return %orig;
+}
+- (NSUInteger)__supportedInterfaceOrientations {
+    if (gCBROrientOverride > 0) return (NSUInteger)((1UL<<3) | (1UL<<4));
+    return %orig;
+}
+%end
 %end
 
 %ctor {
@@ -3432,7 +3446,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.24.4 init - v77 baseline + PORTRAIT window pin (upright dash)";
+        const char msg[] = "[CBR] v3.24.5 init - v77 baseline + PORTRAIT window pin (upright dash)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3454,7 +3468,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.24.4 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.24.5 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
