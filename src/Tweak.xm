@@ -3164,101 +3164,104 @@ static void cbrNoteLandscape(void) {
             ((void(*)(id,SEL,long,double,BOOL,BOOL,id))objc_msgSend)(app, note, (long)3, (double)0.0, (BOOL)YES, (BOOL)YES, @"CBR");
     } @catch(...) {}
 }
-// ===================== v3.22.0 CANVAS FORCING =====================
-// The window is already car-landscape (v77 gamble). The APP's canvas is not: it reads 281pt
-// (car portrait) at cold boot and 932pt (phone landscape) after you tap the app on the phone.
-// It must be 472x281. Everything below exists to make that true and keep it true.
-static CGFloat gCBRCarW = 0, gCBRCarH = 0;   // car screen, LANDSCAPE, in points
-static int gCBRNoScreenHook = 0;             // re-entrancy guard for the UIScreen hook
+// ===================== v3.22.1 READ-ONLY PROBE =====================
+// Observe-only. Writes the full orientation/geometry state to a FIXED path every 1s while
+// hosted, so the good-boot and sideways-boot states can be captured and diffed. Nothing here
+// mutates the app -- no bounds pinning, no orientation kick, no screen/safe-area hooks.
+static CGFloat gCBRCarW = 0, gCBRCarH = 0;
 
-static void cbrDiscoverCarSize(void) {
-    if (gCBRCarW > 0) return;
-    gCBRNoScreenHook = 1;                    // read the REAL bounds, not our hooked ones
+static void cbrProbeDiscover(id app) {
+    if (gCBRCarW > 0 || !app) return;
     @try {
-        id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
-        if (app) {
-            id scenes = ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("connectedScenes"));
-            id arr = scenes ? ((id(*)(id,SEL))objc_msgSend)(scenes, sel_registerName("allObjects")) : nil;
-            NSUInteger sc = arr ? ((NSUInteger(*)(id,SEL))objc_msgSend)(arr, sel_registerName("count")) : 0;
-            for (NSUInteger i = 0; i < sc; i++) {
-                id scene = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(arr, sel_registerName("objectAtIndex:"), i);
-                if (!scene || !strstr(object_getClassName(scene), "WindowScene")) continue;
-                id scr = ((id(*)(id,SEL))objc_msgSend)(scene, sel_registerName("screen"));
-                if (!scr) continue;
-                CGRect b = ((CGRect(*)(id,SEL))objc_msgSend)(scr, sel_registerName("bounds"));
-                CGFloat mx = b.size.width > b.size.height ? b.size.width : b.size.height;
-                CGFloat mn = b.size.width > b.size.height ? b.size.height : b.size.width;
-                if (mx > 0 && mx <= 520) { gCBRCarW = mx; gCBRCarH = mn; break; }   // the car display
-            }
-        }
-    } @catch(...) {}
-    gCBRNoScreenHook = 0;
-}
-
-static void cbrScheduleCanvasTick(void);
-static void cbrCanvasTick(void) {
-    if (gCBROrientOverride <= 0) return;     // hosted-only; complete no-op on the phone
-    cbrDiscoverCarSize();
-    if (gCBRCarW <= 0) return;
-    @try {
-        id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
-        if (!app) return;
+        // 1) the correct way: a connected scene whose screen is the car screen
         id scenes = ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("connectedScenes"));
         id arr = scenes ? ((id(*)(id,SEL))objc_msgSend)(scenes, sel_registerName("allObjects")) : nil;
         NSUInteger sc = arr ? ((NSUInteger(*)(id,SEL))objc_msgSend)(arr, sel_registerName("count")) : 0;
-        SEL _sro = sel_registerName("_setRotatableViewOrientation:duration:force:");
-        SEL _snu = sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
-        int pinned = 0, forced = 0;
+        SEL _iscar = sel_registerName("_isCarScreen");
         for (NSUInteger i = 0; i < sc; i++) {
             id scene = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(arr, sel_registerName("objectAtIndex:"), i);
-            if (!scene || !strstr(object_getClassName(scene), "WindowScene")) continue;
+            if (!scene || ![scene isKindOfClass:objc_getClass("UIWindowScene")]) continue;
+            id scr = ((id(*)(id,SEL))objc_msgSend)(scene, sel_registerName("screen"));
+            BOOL isCar = scr && [scr respondsToSelector:_iscar] ? ((BOOL(*)(id,SEL))objc_msgSend)(scr, _iscar) : NO;
+            if (isCar) {
+                CGRect b = ((CGRect(*)(id,SEL))objc_msgSend)(scr, sel_registerName("bounds"));
+                gCBRCarW = b.size.width > b.size.height ? b.size.width : b.size.height;
+                gCBRCarH = b.size.width > b.size.height ? b.size.height : b.size.width;
+                return;
+            }
+        }
+        // 2) fallback: our hosted key window IS the car-landscape window
+        id kw = ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("keyWindow"));
+        if (kw) {
+            CGRect b = ((CGRect(*)(id,SEL))objc_msgSend)(kw, sel_registerName("bounds"));
+            CGFloat mx = b.size.width > b.size.height ? b.size.width : b.size.height;
+            CGFloat mn = b.size.width > b.size.height ? b.size.height : b.size.width;
+            if (mx > 0 && mx <= 520) { gCBRCarW = mx; gCBRCarH = mn; }
+        }
+    } @catch(...) {}
+}
+
+static void cbrProbeSchedule(void);
+static void cbrProbeTick(void) {
+    if (gCBROrientOverride <= 0) return;   // hosted-only
+    @try {
+        id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+        if (!app) return;
+        cbrProbeDiscover(app);
+
+        NSMutableString *out = [NSMutableString string];
+        [out appendFormat:@"=== CBR PROBE t=%.1f override=%d car=%.0fx%.0f ===\n",
+            (double)(((uint64_t)time(NULL)) % 100000), gCBROrientOverride, gCBRCarW, gCBRCarH];
+
+        id ms = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
+        CGRect mb = ((CGRect(*)(id,SEL))objc_msgSend)(ms, sel_registerName("bounds"));
+        CGFloat msc = ((CGFloat(*)(id,SEL))objc_msgSend)(ms, sel_registerName("scale"));
+        [out appendFormat:@"UIScreen.main bounds=%.0fx%.0f scale=%.1f\n", mb.size.width, mb.size.height, msc];
+
+        id scenes = ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("connectedScenes"));
+        id arr = scenes ? ((id(*)(id,SEL))objc_msgSend)(scenes, sel_registerName("allObjects")) : nil;
+        NSUInteger sc = arr ? ((NSUInteger(*)(id,SEL))objc_msgSend)(arr, sel_registerName("count")) : 0;
+        for (NSUInteger i = 0; i < sc; i++) {
+            id scene = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(arr, sel_registerName("objectAtIndex:"), i);
+            if (!scene || ![scene isKindOfClass:objc_getClass("UIWindowScene")]) continue;
+            id scr = ((id(*)(id,SEL))objc_msgSend)(scene, sel_registerName("screen"));
+            SEL _iscar = sel_registerName("_isCarScreen");
+            BOOL isCar = scr && [scr respondsToSelector:_iscar] ? ((BOOL(*)(id,SEL))objc_msgSend)(scr, _iscar) : NO;
+            long io = ((long(*)(id,SEL))objc_msgSend)(scene, sel_registerName("interfaceOrientation"));
+            [out appendFormat:@"scene[%lu] %s car=%d ifo=%ld\n", (unsigned long)i, object_getClassName(scene), isCar, io];
             id wins = ((id(*)(id,SEL))objc_msgSend)(scene, sel_registerName("windows"));
             NSUInteger wc = wins ? ((NSUInteger(*)(id,SEL))objc_msgSend)(wins, sel_registerName("count")) : 0;
             for (NSUInteger w = 0; w < wc; w++) {
                 id win = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins, sel_registerName("objectAtIndex:"), w);
                 if (!win) continue;
-                // (a) PIN THE CANVAS. YTMainWindow overrides setBounds: and reverts (v3.20.83),
-                //     so this must be re-applied, not set once.
                 CGRect wb = ((CGRect(*)(id,SEL))objc_msgSend)(win, sel_registerName("bounds"));
-                if (fabs(wb.size.width - gCBRCarW) > 1.0 || fabs(wb.size.height - gCBRCarH) > 1.0) {
-                    ((void(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("setBounds:"), CGRectMake(0,0,gCBRCarW,gCBRCarH));
-                    ((void(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("setFrame:"),  CGRectMake(0,0,gCBRCarW,gCBRCarH));
-                    pinned++;
-                }
-                // (b) the layout/orientation update the phone tap delivers and cold launch does not
-                if ([win respondsToSelector:_sro]) { ((void(*)(id,SEL,int,float,int))objc_msgSend)(win, _sro, 3, 0.0f, 1); forced++; }
-                id vc = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("rootViewController"));
-                for (int d = 0; vc && d < 6; d++) {
-                    if ([vc respondsToSelector:_snu]) ((void(*)(id,SEL))objc_msgSend)(vc, _snu);
-                    vc = ((id(*)(id,SEL))objc_msgSend)(vc, sel_registerName("presentedViewController"));
+                id rvc = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("rootViewController"));
+                long vio = rvc ? ((long(*)(id,SEL))objc_msgSend)(rvc, sel_registerName("interfaceOrientation")) : -1;
+                [out appendFormat:@"  win[%lu] %s bounds=%.0fx%.0f rootVC=%s vcIfo=%ld\n",
+                    (unsigned long)w, object_getClassName(win), wb.size.width, wb.size.height,
+                    rvc ? object_getClassName(rvc) : "nil", vio];
+                if (rvc) {
+                    id v = ((id(*)(id,SEL))objc_msgSend)(rvc, sel_registerName("view"));
+                    if (v) {
+                        CGRect vb = ((CGRect(*)(id,SEL))objc_msgSend)(v, sel_registerName("bounds"));
+                        id lyr = ((id(*)(id,SEL))objc_msgSend)(v, sel_registerName("layer"));
+                        CGAffineTransform tf = ((CGAffineTransform(*)(id,SEL))objc_msgSend)(v, sel_registerName("transform"));
+                        [out appendFormat:@"    view bounds=%.0fx%.0f tf=[%.2f %.2f %.2f %.2f]\n",
+                            vb.size.width, vb.size.height, tf.a, tf.b, tf.c, tf.d];
+                        (void)lyr;
+                    }
                 }
             }
         }
-        static int _t = 0;
-        _t++;
-        // (c) v3.22.0: UIApplication's WHOLE-APP orientation kick --
-        //     noteInterfaceOrientationChanged:duration:updateMirroredDisplays:YES force:YES
-        //     This is the closest API there is to "tap the app on the phone", and
-        //     updateMirroredDisplays:YES is CarPlay-specific. v3.20.77 already defines it as
-        //     cbrNoteLandscape() -- and NEVER CALLS IT. It has been dead code the whole time.
-        //     Fire it when the canvas actually changed (the app reverted and we re-pinned), and
-        //     on the first few ticks while the cold-boot screens are still loading in. NOT every
-        //     tick: constant re-firing is what caused the "oscillating reinforcement" removed in
-        //     v3.20.82.
-        if (pinned > 0 || _t <= 6) cbrNoteLandscape();
-        if ((_t % 5) == 1) {
-            @try {
-                NSString *pp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_canvas.txt"];
-                FILE *f = fopen([pp fileSystemRepresentation], "w");
-                if (f) { fprintf(f, "car=%.0fx%.0f override=%d pinned=%d forced=%d tick=%d\n", gCBRCarW, gCBRCarH, gCBROrientOverride, pinned, forced, _t); fclose(f); }
-            } @catch(...) {}
-        }
+
+        NSString *pp = @"/var/mobile/CBR_probe.txt";
+        [out writeToFile:pp atomically:YES encoding:NSUTF8StringEncoding error:nil];
     } @catch(...) {}
 }
-static void cbrScheduleCanvasTick(void) {
+static void cbrProbeSchedule(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        cbrCanvasTick();
-        cbrScheduleCanvasTick();
+        cbrProbeTick();
+        cbrProbeSchedule();
     });
 }
 
@@ -3287,34 +3290,6 @@ static void cbrScheduleCanvasTick(void) {
 %hook UIDevice
 - (NSInteger)orientation {
     if (gCBROrientOverride > 0) return 3;
-    return %orig;
-}
-%end
-%hook UIScreen
-// v3.22.0 CORE FIX. YouTube sizes its layout off UIScreen, not its window. Hosted, that reads
-// the car display in PORTRAIT (281 wide) at cold boot -> content crops to the left 59%; after
-// the app is touched on the phone it reads the PHONE (932 wide) -> content overflows the window.
-// Report the CAR's LANDSCAPE size instead, so the app lays out at exactly the window size.
-- (CGRect)bounds {
-    if (gCBROrientOverride > 0 && !gCBRNoScreenHook && gCBRCarW > 0)
-        return CGRectMake(0, 0, gCBRCarW, gCBRCarH);
-    return %orig;
-}
-- (CGRect)nativeBounds {
-    if (gCBROrientOverride > 0 && !gCBRNoScreenHook && gCBRCarW > 0) {
-        CGFloat sk = ((CGFloat(*)(id,SEL))objc_msgSend)(self, sel_registerName("scale"));
-        if (sk < 1.0) sk = 3.0;
-        return CGRectMake(0, 0, gCBRCarW * sk, gCBRCarH * sk);
-    }
-    return %orig;
-}
-%end
-%hook UIView
-// v3.22.0 (v3.20.90's finding): YTWrapperView pins to the safe-area layout guide and shrinks by
-// ~59pt per side (the phone's landscape Dynamic Island inset), so even a correct canvas renders
-// narrow. Zero it while hosted -- the car screen has no notch.
-- (UIEdgeInsets)safeAreaInsets {
-    if (gCBROrientOverride > 0) return UIEdgeInsetsZero;
     return %orig;
 }
 %end
@@ -3350,13 +3325,13 @@ static void cbrScheduleCanvasTick(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.22.0 init - v77 gamble + canvas forced to car landscape (UIScreen/safe-area/window pin)";
+        const char msg[] = "[CBR] v3.22.1 init - v77 baseline + read-only orientation probe (no invasive hooks)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
-        cbrScheduleCanvasTick();   // v3.22.0: keep the app's canvas pinned to the car's landscape size
+        cbrProbeSchedule();   // v3.22.1: read-only state probe -> /var/mobile/CBR_probe.txt
         // v3.20.78: GATED - stay -1 until hosted (keeps the phone keyboard fix).
         gCBROrientOverride = -1;
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -3371,7 +3346,7 @@ static void cbrScheduleCanvasTick(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.22.0 init - v77 gamble + canvas forced to car landscape (UIScreen/safe-area/window pin)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.22.1 init - v77 baseline + read-only orientation probe (no invasive hooks)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
