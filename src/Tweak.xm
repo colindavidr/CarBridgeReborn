@@ -2343,6 +2343,7 @@ static void cbrSBProbeTxnCtx(const char *bid_cstr) {
     if(fd>=0) close(fd);
 }
 
+static void cbrSBSilentActivateSchedule(void);
 static void cbrSBSilentActivate(void) {
     @try {
         if (!gCBRSceneHandle) return;
@@ -2363,6 +2364,15 @@ static void cbrSBSilentActivate(void) {
         int fd=open("/var/mobile/CBR_silent.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
         if(fd>=0){const char*m="[silent] foreground-activate delivered\n";write(fd,m,strlen(m));close(fd);}
     } @catch(...) {}
+}
+static void cbrSBSilentActivateSchedule(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        // keep going only while something is hosted (keep-alive non-empty). Stops after dismiss.
+        if (gCBRKeepAlive && [gCBRKeepAlive count] && gCBRSceneHandle) {
+            cbrSBSilentActivate();
+            cbrSBSilentActivateSchedule();
+        }
+    });
 }
 static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
                                 CFStringRef name, const void *object,
@@ -2385,8 +2395,8 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     // cbrSBProbeSceneHandle(bid);      // diagnostic only - off hot path
     id _cbrHandle = cbrSBCreateSceneHandle(bid);
     cbrSBHostScene(bid, _cbrHandle);
-    for (int _i=0; _i<4; _i++) { double _d = 1.5 + _i*1.5;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(_d*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrSBSilentActivate(); }); }
+    // v3.25.1: self-rescheduling silent activation (backstop for any path the FBScene hook misses).
+    cbrSBSilentActivateSchedule();
     // cbrSBReassignToCarPlay(bid);     // PATH-A - caused the load runaway - REMOVED
     // cbrSBProbeTransition(bid);       // diagnostic only - off hot path
     // cbrSBProbeTxnCtx(bid);           // diagnostic only - off hot path
@@ -2984,11 +2994,22 @@ static void cbrKLLog(const char *fmt, ...) {
                 BOOL isDeact = [arg1 respondsToSelector:gDeact] ? ((BOOL(*)(id,SEL))objc_msgSend)(arg1, gDeact) : NO;
                 SEL gDR = sel_registerName("deactivationReasons");
                 NSUInteger dr = [arg1 respondsToSelector:gDR] ? ((NSUInteger(*)(id,SEL))objc_msgSend)(arg1, gDR) : 0;
-                const char *_act = (respFg && !isFg) ? "BLOCK-bg" : ((isDeact || dr) ? "BLOCK-deact" : "pass");
+                const char *_act = ((respFg && !isFg) || isDeact || dr) ? "REASSERT-active" : "pass";
                 cbrKLLog("[fbscene] bid=%s argClass=%s isFg=%d deact=%d dr=%lu => %s\n",
                          [bid UTF8String], object_getClassName(arg1), (int)isFg, (int)isDeact, (unsigned long)dr, _act);
-                if (respFg && !isFg) { return; }         // block background
-                if (isDeact || dr != 0) { return; }      // block deactivation -> keep foreground-ACTIVE
+                // v3.25.1: don't just BLOCK a deactivation - REASSERT active on this very settings
+                // object so the scene is driven foreground-ACTIVE by every update it receives. The
+                // fixed 4-pulse timer lost the race whenever a dr=0/bg update arrived after 6s; this
+                // is reactive to EVERY update, so our activation always comes last. This is exactly
+                // what the phone-tap does, applied continuously.
+                if ((respFg && !isFg) || isDeact || dr != 0) {
+                    SEL sF=sel_registerName("setForeground:");          if([arg1 respondsToSelector:sF]) ((void(*)(id,SEL,BOOL))objc_msgSend)(arg1,sF,YES);
+                    SEL sB=sel_registerName("setBackgrounded:");        if([arg1 respondsToSelector:sB]) ((void(*)(id,SEL,BOOL))objc_msgSend)(arg1,sB,NO);
+                    SEL sD=sel_registerName("setDeactivated:");         if([arg1 respondsToSelector:sD]) ((void(*)(id,SEL,BOOL))objc_msgSend)(arg1,sD,NO);
+                    SEL sO=sel_registerName("setOccluded:");            if([arg1 respondsToSelector:sO]) ((void(*)(id,SEL,BOOL))objc_msgSend)(arg1,sO,NO);
+                    SEL sR=sel_registerName("setDeactivationReasons:"); if([arg1 respondsToSelector:sR]) ((void(*)(id,SEL,NSUInteger))objc_msgSend)(arg1,sR,(NSUInteger)0);
+                    // fall through to %orig WITH the corrected settings (do NOT return)
+                }
             }
         }
     } @catch(...) {}
