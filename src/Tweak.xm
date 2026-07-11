@@ -3312,6 +3312,22 @@ static void cbrProbeSchedule(void) {
     });
 }
 
+// v3.24.3: GATE-FREE self-detecting lock. v3.24.2 never fired because gCBRCarW is 0 until the 1s
+// probe tick and the vcIfo decision lands as early as 81ms. Detect the car scene from the window's
+// OWN windowScene.screen (<=520pt) - no override / gCBRCarW dependency - so it fires the instant
+// YTMainWindow is first sized. Phone-safe: on the phone YTMainWindow's screen is >520pt.
+static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) {
+    id ws = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("windowScene"));
+    id scr = ws ? ((id(*)(id,SEL))objc_msgSend)(ws, sel_registerName("screen")) : nil;
+    if (!scr) return 0;
+    CGRect sb = ((CGRect(*)(id,SEL))objc_msgSend)(scr, sel_registerName("bounds"));
+    CGFloat mx = sb.size.width>sb.size.height?sb.size.width:sb.size.height;
+    CGFloat mn = sb.size.width>sb.size.height?sb.size.height:sb.size.width;
+    if (mx <= 0 || mx > 520) return 0;
+    if (gCBRCarW <= 0) { gCBRCarW = mx; gCBRCarH = mn; }
+    *outMin = mn; *outMax = mx; return 1;
+}
+
 %group APPS
 
 
@@ -3325,15 +3341,19 @@ static void cbrProbeSchedule(void) {
     %orig;
 }
 - (void)setBounds:(CGRect)bounds {
-    if (gCBROrientOverride > 0 && gCBRCarW > 0 && strstr(object_getClassName(self), "YTMainWindow") && bounds.size.width > bounds.size.height) {
-        static int _lk=0; if(_lk++ < 10) cbrEvent("LOCK setBounds portrait: %.0fx%.0f -> %.0fx%.0f", bounds.size.width, bounds.size.height, gCBRCarH, gCBRCarW);
-        bounds.size.width = gCBRCarH; bounds.size.height = gCBRCarW;
+    if (bounds.size.width > bounds.size.height && strstr(object_getClassName(self), "YTMainWindow")) {
+        CGFloat mn=0, mx=0;
+        if (cbrCarSizeForWindow(self, &mn, &mx)) {
+            static int _lk=0; if(_lk++ < 12) cbrEvent("LOCK setBounds portrait: %.0fx%.0f -> %.0fx%.0f", bounds.size.width, bounds.size.height, mn, mx);
+            bounds.size.width = mn; bounds.size.height = mx;
+        }
     }
     %orig(bounds);
 }
 - (void)setFrame:(CGRect)frame {
-    if (gCBROrientOverride > 0 && gCBRCarW > 0 && strstr(object_getClassName(self), "YTMainWindow") && frame.size.width > frame.size.height) {
-        frame.size.width = gCBRCarH; frame.size.height = gCBRCarW;
+    if (frame.size.width > frame.size.height && strstr(object_getClassName(self), "YTMainWindow")) {
+        CGFloat mn=0, mx=0;
+        if (cbrCarSizeForWindow(self, &mn, &mx)) { frame.size.width = mn; frame.size.height = mx; }
     }
     %orig(frame);
 }
@@ -3389,7 +3409,7 @@ static void cbrProbeSchedule(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.24.2 init - v77 baseline + PORTRAIT window pin (upright dash)";
+        const char msg[] = "[CBR] v3.24.3 init - v77 baseline + PORTRAIT window pin (upright dash)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3411,7 +3431,7 @@ static void cbrProbeSchedule(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.24.2 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.24.3 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
