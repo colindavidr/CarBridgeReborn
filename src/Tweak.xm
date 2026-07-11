@@ -3324,6 +3324,19 @@ static void cbrProbeSchedule(void) {
     }
     %orig;
 }
+- (void)setBounds:(CGRect)bounds {
+    if (gCBROrientOverride > 0 && gCBRCarW > 0 && strstr(object_getClassName(self), "YTMainWindow") && bounds.size.width > bounds.size.height) {
+        static int _lk=0; if(_lk++ < 10) cbrEvent("LOCK setBounds portrait: %.0fx%.0f -> %.0fx%.0f", bounds.size.width, bounds.size.height, gCBRCarH, gCBRCarW);
+        bounds.size.width = gCBRCarH; bounds.size.height = gCBRCarW;
+    }
+    %orig(bounds);
+}
+- (void)setFrame:(CGRect)frame {
+    if (gCBROrientOverride > 0 && gCBRCarW > 0 && strstr(object_getClassName(self), "YTMainWindow") && frame.size.width > frame.size.height) {
+        frame.size.width = gCBRCarH; frame.size.height = gCBRCarW;
+    }
+    %orig(frame);
+}
 %end
 %hook UIViewController
 - (NSUInteger)supportedInterfaceOrientations {
@@ -3376,7 +3389,7 @@ static void cbrProbeSchedule(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.24.1 init - v77 baseline + PORTRAIT window pin (upright dash)";
+        const char msg[] = "[CBR] v3.24.2 init - v77 baseline + PORTRAIT window pin (upright dash)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3398,7 +3411,7 @@ static void cbrProbeSchedule(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.24.1 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.24.2 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
