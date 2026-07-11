@@ -1124,8 +1124,8 @@ static id gCBRTxn = nil;         // v3.19.5: strong-hold txn for safe completion
 static NSMutableSet *gCBRKeepAlive = nil;  // v3.20.18: bundle IDs whose scenes must NOT be backgrounded while hosted on CarPlay
 static void cbrSBHostDismiss(void) {
     @try {
-        // v3.20.99 (v3.20.78): release the landscape override on teardown, or phone YouTube
-        // stays landscape-locked after leaving CarPlay (the gate really fires now).
+        // v3.20.98 (v3.20.78): release the landscape override on teardown. Required now that
+        // the gate actually fires, else phone YouTube stays landscape-locked after CarPlay.
         @try { CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.unlock"), NULL, NULL, YES); } @catch(...) {}
         int fd=open("/var/mobile/CBR_sb_host.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
         #define DD(m) do{ if(fd>=0){const char*_m=(m);write(fd,_m,strlen(_m));} }while(0)
@@ -1329,36 +1329,16 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         HHF("rootWindow: %s\n", rootWindow ? class_getName(object_getClass(rootWindow)) : "nil");
         if (!rootWindow) { HH("no rootWindow -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
         gCBRRootWindow = rootWindow;
-        // ================= v3.20.99 [GAMBLE] (from v3.20.77) =================
-        // Host at the car screen's TRUE LANDSCAPE bounds and DO NOT rotate the window.
-        // v64 made a PORTRAIT window (281x472) then spun it +90. That +90 only looked right
-        // while the app rendered PORTRAIT content (portrait-only VCs, orientation gate dead).
-        // v3.20.98 made every VC render true LANDSCAPE -> the +90 then rotated an already
-        // correct landscape UI: every screen 90 deg right, home indicator on the screen's LEFT.
-        // Removing the host spin is the fix. TO REVERT: restore the _rotateWindowToOrientation
-        // call in the block below and delete this @try.
-        @try {
-            id _scr=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("screens"));
-            NSUInteger _sn=_scr?((NSUInteger(*)(id,SEL))objc_msgSend)(_scr,sel_registerName("count")):0;
-            for(NSUInteger _i=0;_i<_sn;_i++){ id _s=((id(*)(id,SEL,NSUInteger))objc_msgSend)(_scr,sel_registerName("objectAtIndex:"),_i);
-                int _c=[_s respondsToSelector:sel_registerName("_isCarScreen")]?((BOOL(*)(id,SEL))objc_msgSend)(_s,sel_registerName("_isCarScreen")):0;
-                if(_c){ CGRect _cb=((CGRect(*)(id,SEL))objc_msgSend)(_s,sel_registerName("bounds"));
-                    CGFloat _lw=_cb.size.width>_cb.size.height?_cb.size.width:_cb.size.height;
-                    CGFloat _lh=_cb.size.width>_cb.size.height?_cb.size.height:_cb.size.width;
-                    if(_lw>0){ ((void(*)(id,SEL,CGRect))objc_msgSend)(rootWindow,sel_registerName("setBounds:"),CGRectMake(0,0,_lw,_lh));
-                        ((void(*)(id,SEL,CGRect))objc_msgSend)(rootWindow,sel_registerName("setFrame:"),CGRectMake(0,0,_lw,_lh));
-                        HHF("[GAMBLE] window forced to car-native landscape %.0fx%.0f\n",_lw,_lh); }
-                    break; } }
-        } @catch(...) { HH("[GAMBLE] window resize threw\n"); }
         @try { id layer = cb(rootWindow, "layer"); ((void(*)(id,SEL,CGFloat))objc_msgSend)(layer, sel_registerName("setCornerRadius:"), (CGFloat)13.0); ((void(*)(id,SEL,BOOL))objc_msgSend)(layer, sel_registerName("setMasksToBounds:"), YES); } @catch(...) {}
-        // v3.20.99: the host-side +90 rotation is now SKIPPED (see [GAMBLE] above).
+        // v3.20.26: force the WINDOW itself to landscape (orientation 3); scene orientation
+        // alone leaves it portrait on auto-launch. Guarded + logged for iOS 17.
         @try {
             SEL _rot = sel_registerName("_rotateWindowToOrientation:updateStatusBar:duration:skipCallbacks:");
             if ([rootWindow respondsToSelector:_rot]) {
-                (void)_rot;
-                HH("[GAMBLE] host window rotation SKIPPED (native landscape host)\n");
+                ((void(*)(id,SEL,int,int,int,int))objc_msgSend)(rootWindow, _rot, 3, 1, 0, 0);
+                HH("window rotated to landscape via _rotateWindowToOrientation:3\n");
             } else {
-                HH("_rotateWindowToOrientation: NOT on iOS 17\n");
+                HH("_rotateWindowToOrientation: NOT on iOS 17 - need fallback\n");
             }
         } @catch(...) { HH("window rotate threw\n"); }
         Class entCls = objc_getClass("SBDeviceApplicationSceneEntity");
@@ -1430,10 +1410,13 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                         void (^diff)(id) = ^(id mutableSettings) {
                                             @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mutableSettings, sel_registerName("setForeground:"), YES); } @catch(...) {}
                                             @try { ((void(*)(id,SEL,NSInteger))objc_msgSend)(mutableSettings, sel_registerName("setInterfaceOrientation:"), (NSInteger)3); } @catch(...) {}
-                                            // v3.20.99 [FG-ACTIVE]: UIScene.activationState =
+                                            // v3.20.98 [FG-ACTIVE]: UIScene.activationState =
                                             //   (foreground && deactivationReasons==0) ? ForegroundActive : ForegroundInactive
-                                            // v64 sets foreground=YES but never clears the reasons, so the hosted scene stays
-                                            // INACTIVE and UIKit defers orientation work for it. Logs to CBR_sb_host.txt.
+                                            // v64 sets foreground=YES but NEVER clears the deactivation reasons, so the hosted
+                                            // scene stays INACTIVE and UIKit defers orientation passes for it. That is why the
+                                            // app only snaps to perfect landscape when you foreground it on the PHONE (which
+                                            // clears them). Clear them ourselves. Never attempted in 167 commits.
+                                            // TO DISABLE: delete this one @try line.
                                             @try { SEL _sdr = sel_registerName("setDeactivationReasons:"); if ([mutableSettings respondsToSelector:_sdr]) { ((void(*)(id,SEL,NSUInteger))objc_msgSend)(mutableSettings, _sdr, (NSUInteger)0); CH("[FG-ACTIVE] deactivationReasons=0 -> scene ForegroundActive\n"); } else { CH("[FG-ACTIVE] setDeactivationReasons: NOT available\n"); } } @catch(...) {}
                                             @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(mutableSettings, sel_registerName("setDeactivated:"), NO); } @catch(...) {}
                                             // v3.20.35: sync the app's content FRAME to the actual car window size so
@@ -3029,8 +3012,8 @@ static void cbrSBAppsideCallback(CFNotificationCenterRef c, void *obs, CFStringR
         char nm[128]; nm[0]=0; if(name) CFStringGetCString(name,nm,sizeof(nm),kCFStringEncodingUTF8);
         int fd=open("/var/mobile/CBR_appside_sb.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
         if(fd>=0){char l[200];int n=snprintf(l,sizeof(l),"[appside] %s hosting=%d\n",nm,gCBRRootWindow?1:0);if(n>0)write(fd,l,(size_t)n);close(fd);}
-        // v3.20.99 GATE FIX (v3.20.78): v64 posted landscape at the TOP of cbrSBHostScene,
-        // before the app's Darwin observer existed -> it landed in the void, gCBROrientOverride
+        // v3.20.98 GATE FIX (v3.20.78): v64 posted landscape at the TOP of cbrSBHostScene,
+        // before the app's Darwin observer existed -> it landed in the void, the override
         // stayed -1, and every app-side orientation hook was dead code. Reply to the app's
         // "loaded" ping instead. Gated on gCBRRootWindow -> can never fire off-CarPlay.
         if (strstr(nm,"loaded") && gCBRRootWindow) { CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.landscape"), NULL, NULL, YES); }
@@ -3093,13 +3076,22 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
                 id win=((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins,sel_registerName("objectAtIndex:"),w);
                 SEL _sro=sel_registerName("_setRotatableViewOrientation:duration:force:");
                 if ([win respondsToSelector:_sro]) ((void(*)(id,SEL,int,float,int))objc_msgSend)(win,_sro,3,0.0f,1);
-                if (carScene) {
+                // v3.21.0: WINDOW-BOUNDS PIN DISABLED. This is the v3.20.98 regression.
+                // Keeping the app window PORTRAIT (281x472) is what makes UIKit apply its own
+                // internal 90 deg rotation (scene says landscape -> content laid out 472x281 and
+                // transformed) -- and the host's +90 CANCELS that, giving upright, 100%-fill
+                // output. Forcing the window landscape makes UIKit use identity instead, so the
+                // host's +90 has nothing to cancel and every surface spins. In v64 this block was
+                // dead code (the gate never fired); v3.20.98 opened the gate and it ran for the
+                // first time. TO RE-ENABLE: change the 0 back to carScene.
+                if (0) {
                     ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setBounds:"),CGRectMake(0,0,lw,lh));
                     ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setFrame:"),CGRectMake(0,0,lw,lh));
                 }
                 id rvc=((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("rootViewController"));
                 if (rvc){
-                    if (carScene) { id v=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view"));
+                    // v3.21.0: root-view landscape frame force DISABLED for the same reason.
+                    if (0) { id v=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view"));
                         if (v) ((void(*)(id,SEL,CGRect))objc_msgSend)(v,sel_registerName("setFrame:"),CGRectMake(0,0,lw,lh)); }
                     SEL _upd=sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
                     if ([rvc respondsToSelector:_upd]) ((void(*)(id,SEL))objc_msgSend)(rvc,_upd);
@@ -3172,14 +3164,18 @@ static void cbrViewProbe(void) {
     } @catch(...) {}
 }
 
-// v3.20.99 [RE-TRIGGER] (introduced v3.20.98 -- it worked, keep it).
-// -[UIWindow _setRotatableViewOrientation:duration:force:] is the call UIKit makes to rotate a
-// window, and we HOOK it to force landscape -- but UIKit only fires an orientation pass while the
-// app is frontmost, so while hosted the hook is never INVOKED. v64 called it directly exactly ONCE
-// at host time, so any window born LATER (fullscreen player, search, splash) never got it.
-// Re-assert on a 1s tick while hosted. STRICTLY NON-DESTRUCTIVE: no bounds/frame mutation, no
-// transform reset, no recursive view walking (that trio broke v3.20.84 and was reverted in v85,
-// taking setNeedsUpdateOfSupportedInterfaceOrientations down with it).
+// v3.20.98 [RE-TRIGGER] -- THE ROOT-CAUSE FIX.
+// Colin's v77 finding: hosted YouTube snaps to perfect, stretched landscape the instant the
+// app is foregrounded ON THE PHONE. So the app is fully CAPABLE of rendering correctly while
+// hosted; what is missing is the TRIGGER. -[UIWindow _setRotatableViewOrientation:duration:force:]
+// is the call UIKit makes to rotate a window, and we HOOK it to force landscape -- but UIKit
+// only fires an orientation pass when the app is frontmost, so while hosted the hook is never
+// INVOKED. v64 calls it directly exactly ONCE at host time, so any window born LATER
+// (fullscreen player, search, loading splash) is never rotated -> sideways every time.
+// Re-assert on a 1s tick while hosted. STRICTLY NON-DESTRUCTIVE: we only ask UIKit to re-apply
+// landscape + re-query our orientation hooks. NO bounds/frame mutation, NO transform reset, NO
+// recursive view walking -- that trio is what broke v3.20.84 and was reverted in v3.20.85,
+// taking setNeedsUpdateOfSupportedInterfaceOrientations down with it. Never tried on its own.
 static void cbrScheduleReassert(void);
 static void cbrReassertLandscape(void) {
     if (gCBROrientOverride <= 0) return;   // hosted-only; no-op on the phone
@@ -3200,7 +3196,9 @@ static void cbrReassertLandscape(void) {
             for (NSUInteger w = 0; w < wc; w++) {
                 id win = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins, sel_registerName("objectAtIndex:"), w);
                 if (!win) continue;
+                // (a) exactly what UIKit calls when you foreground the app on the phone
                 if ([win respondsToSelector:_sro]) { ((void(*)(id,SEL,int,float,int))objc_msgSend)(win, _sro, 3, 0.0f, 1); forced++; }
+                // (b) force UIKit to RE-QUERY supportedInterfaceOrientations (our hooks answer landscape)
                 id vc = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("rootViewController"));
                 for (int d = 0; vc && d < 6; d++) {
                     if ([vc respondsToSelector:_snu]) { ((void(*)(id,SEL))objc_msgSend)(vc, _snu); poked++; }
@@ -3242,14 +3240,16 @@ static void cbrScheduleReassert(void) {
     }
     return %orig;
 }
-// v3.20.99 (v3.20.78): YouTube's concrete home-feed / watch / fullscreen VCs override the
-// PRIVATE orientation method, not the public one.
+// v3.20.98 (v3.20.78): YouTube's concrete home-feed / watch / fullscreen VCs override the
+// PRIVATE orientation method, not the public one. Hooking only the public one left them
+// reporting portrait -> UIKit counter-rotated them 90 deg into the landscape canvas.
 - (NSUInteger)__supportedInterfaceOrientations {
     if (gCBROrientOverride > 0) return (NSUInteger)((1UL<<3) | (1UL<<4));
     return %orig;
 }
 %end
 %hook UIDevice
+// v3.20.98 (v3.20.66/78): report landscape to apps that size off UIDevice.
 - (NSInteger)orientation {
     if (gCBROrientOverride > 0) return 3;
     return %orig;
@@ -3287,13 +3287,13 @@ static void cbrScheduleReassert(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.99 init - v98 orient machinery + host +90 removed (native landscape host)";
+        const char msg[] = "[CBR] v3.21.0 init - v64 fill/host-rotate + landscape hooks, window-pin removed";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
-        cbrScheduleReassert();   // v3.20.98/99: synthesize the phone-foreground orientation trigger
+        cbrScheduleReassert();   // v3.20.98: synthesize the phone-foreground orientation trigger
         for (int _r=1;_r<=30;_r++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(_r*2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrViewProbe(); }); }
         for (int _q=1;_q<=30;_q++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(_q*2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrYTGeomProbe("tick"); }); }
         [[NSNotificationCenter defaultCenter] addObserverForName:@"UIKeyboardDidShowNotification" object:nil queue:nil usingBlock:^(id note){ cbrYTGeomProbe("kbd"); }];
@@ -3310,7 +3310,7 @@ static void cbrScheduleReassert(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.99 init - v98 orient machinery + host +90 removed (native landscape host)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.21.0 init - v64 fill/host-rotate + landscape hooks, window-pin removed";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
