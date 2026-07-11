@@ -3076,17 +3076,13 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
                 id win=((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins,sel_registerName("objectAtIndex:"),w);
                 SEL _sro=sel_registerName("_setRotatableViewOrientation:duration:force:");
                 if ([win respondsToSelector:_sro]) ((void(*)(id,SEL,int,float,int))objc_msgSend)(win,_sro,3,0.0f,1);
-                // v3.23.0: landscape window-pin REMOVED. It forced YTMainWindow to 472x281 at +0ms,
-                // which the host +90 then rotated sideways. YouTube's own 281x472 portrait is what
-                // the +90 turns upright. TO RESTORE: change if(0) back to if(carScene).
-                if (0) {
+                if (carScene) {
                     ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setBounds:"),CGRectMake(0,0,lw,lh));
                     ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setFrame:"),CGRectMake(0,0,lw,lh));
                 }
                 id rvc=((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("rootViewController"));
                 if (rvc){
-                    // v3.23.0: root-view landscape frame-force REMOVED (same reason as the window pin).
-                    if (0) { id v=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view"));
+                    if (carScene) { id v=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view"));
                         if (v) ((void(*)(id,SEL,CGRect))objc_msgSend)(v,sel_registerName("setFrame:"),CGRectMake(0,0,lw,lh)); }
                     SEL _upd=sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
                     if ([rvc respondsToSelector:_upd]) ((void(*)(id,SEL))objc_msgSend)(rvc,_upd);
@@ -3178,6 +3174,7 @@ static int gCBRSroCalls = 0;
 static int gCBRSroLastVal = -99;
 static long gCBRLastVcIfo = -99;
 static long gCBRLastAct = -99;
+static int gCBRRepostsLeft = 6;
 static double gCBRT0 = 0;
 static double cbrNowMs(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec*1000.0 + ts.tv_nsec/1000000.0; }
 static void cbrEvent(const char *fmt, ...) {
@@ -3235,7 +3232,7 @@ static void cbrProbeTick(void) {
         static int _tick = 0; _tick++;
         cbrEvent("tick %d (heartbeat)", _tick);
         NSMutableString *out = [NSMutableString string];
-        [out appendFormat:@"=== CBR PROBE v3.22.4 tick=%d override=%d hosted=%s car=%.0fx%.0f sroCalls=%d lastAsk=%d ===\n",
+        [out appendFormat:@"=== CBR PROBE v3.23.1 tick=%d override=%d hosted=%s car=%.0fx%.0f sroCalls=%d lastAsk=%d ===\n",
             _tick, gCBROrientOverride, (gCBROrientOverride > 0 ? "YES" : "no"), gCBRCarW, gCBRCarH, gCBRSroCalls, gCBRSroLastVal];
 
         id ms = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
@@ -3271,6 +3268,15 @@ static void cbrProbeTick(void) {
                 if (rvc && strcmp(object_getClassName(win), "YTMainWindow") == 0 && vio != gCBRLastVcIfo) {
                     cbrEvent("YTMainWindow vcIfo %ld -> %ld (bounds=%.0fx%.0f sroCalls=%d lastAsk=%d)", gCBRLastVcIfo, vio, wb.size.width, wb.size.height, gCBRSroCalls, gCBRSroLastVal);
                     gCBRLastVcIfo = vio;
+                }
+                // v3.23.1 EXPERIMENT: the VC now EXISTS (rvc != nil). Our 0ms forcing fired before
+                // it did (sroCalls froze at 2). Re-post landscape so cbrAppOrientCallback re-runs
+                // WITH the VC present, a few times, logging each - do we see vcIfo flip to 3 + a
+                // 3rd/4th _setRotatableViewOrientation land? This tests the timing fix directly.
+                if (rvc && strcmp(object_getClassName(win), "YTMainWindow") == 0 && gCBRRepostsLeft > 0) {
+                    gCBRRepostsLeft--;
+                    cbrEvent("REPOST landscape #%d (vc present, vcIfo=%ld, sroCalls before=%d)", 6 - gCBRRepostsLeft, vio, gCBRSroCalls);
+                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.landscape"), NULL, NULL, YES);
                 }
                 if (rvc) {
                     id v = ((id(*)(id,SEL))objc_msgSend)(rvc, sel_registerName("view"));
@@ -3365,7 +3371,7 @@ static void cbrProbeSchedule(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.23.0 init - v77 baseline, callback landscape-pin removed (let YT portrait + host +90)";
+        const char msg[] = "[CBR] v3.23.1 init - v77 baseline + late-repost timing experiment";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3387,7 +3393,7 @@ static void cbrProbeSchedule(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.23.0 init - v77 baseline, callback landscape-pin removed (let YT portrait + host +90)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.23.1 init - v77 baseline + late-repost timing experiment";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
