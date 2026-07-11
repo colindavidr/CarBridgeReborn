@@ -3222,6 +3222,26 @@ static void cbrProbeDiscover(id app) {
 }
 
 static void cbrProbeSchedule(void);
+// v3.24.4: iOS16 PUBLIC orientation command. requestGeometryUpdateWithPreferences: actively rotates
+// the scene (the same thing a phone-tap triggers) - unlike _setRotatableViewOrientation, which we
+// proved is a dead lever. Command LandscapeRight (vcIfo=3, the good-boot value) until it sticks.
+static void cbrForceLandscapeGeometry(id win) {
+    @try {
+        id ws = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("windowScene"));
+        if (!ws) return;
+        Class prefCls = objc_getClass("UIWindowSceneGeometryPreferencesIOS");
+        if (!prefCls) return;
+        id prefs = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)((id)prefCls, sel_registerName("alloc")), sel_registerName("init"));
+        ((void(*)(id,SEL,NSUInteger))objc_msgSend)(prefs, sel_registerName("setInterfaceOrientations:"), (NSUInteger)(1UL<<3)); // LandscapeRight
+        SEL req = sel_registerName("requestGeometryUpdateWithPreferences:errorHandler:");
+        if ([ws respondsToSelector:req]) {
+            static int _gq=0; if(_gq++ < 8) cbrEvent("geomReq LandscapeRight -> %s", object_getClassName(ws));
+            ((void(*)(id,SEL,id,void(^)(NSError*)))objc_msgSend)(ws, req, prefs, ^(NSError *e){
+                static int _ge=0; if (e && _ge++ < 8) cbrEvent("geomReq REJECTED: %s", [[e localizedDescription] UTF8String] ?: "?");
+            });
+        }
+    } @catch(...) {}
+}
 static void cbrProbeTick(void) {
     // v3.22.2: NO early bail. v3.22.1 returned here whenever the gate was shut, so "no file"
     // was ambiguous between "probe never ran" and "never hosted". Always write; the dump
@@ -3278,6 +3298,9 @@ static void cbrProbeTick(void) {
                         object_getClassName(rvc), (unsigned long)rSupp, (unsigned long)rPriv, rPref,
                         wb.size.width, wb.size.height, gCBRSroCalls, gCBRSroLastVal);
                     gCBRLastVcIfo = vio;
+                }
+                if (rvc && strcmp(object_getClassName(win), "YTMainWindow") == 0 && vio != 3) {
+                    cbrForceLandscapeGeometry(win);   // v3.24.4: command landscape until vcIfo=3
                 }
                 // v3.24.0: PERSISTENT PORTRAIT RE-PIN. YouTube reverts the window bounds, so the
                 // one-shot pin in cbrAppOrientCallback is not enough. Portrait (281x472) is the
@@ -3409,7 +3432,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.24.3 init - v77 baseline + PORTRAIT window pin (upright dash)";
+        const char msg[] = "[CBR] v3.24.4 init - v77 baseline + PORTRAIT window pin (upright dash)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3431,7 +3454,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.24.3 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.24.4 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
