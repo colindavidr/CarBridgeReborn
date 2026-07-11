@@ -3076,13 +3076,17 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
                 id win=((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins,sel_registerName("objectAtIndex:"),w);
                 SEL _sro=sel_registerName("_setRotatableViewOrientation:duration:force:");
                 if ([win respondsToSelector:_sro]) ((void(*)(id,SEL,int,float,int))objc_msgSend)(win,_sro,3,0.0f,1);
-                if (carScene) {
+                // v3.23.0: landscape window-pin REMOVED. It forced YTMainWindow to 472x281 at +0ms,
+                // which the host +90 then rotated sideways. YouTube's own 281x472 portrait is what
+                // the +90 turns upright. TO RESTORE: change if(0) back to if(carScene).
+                if (0) {
                     ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setBounds:"),CGRectMake(0,0,lw,lh));
                     ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setFrame:"),CGRectMake(0,0,lw,lh));
                 }
                 id rvc=((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("rootViewController"));
                 if (rvc){
-                    if (carScene) { id v=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view"));
+                    // v3.23.0: root-view landscape frame-force REMOVED (same reason as the window pin).
+                    if (0) { id v=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view"));
                         if (v) ((void(*)(id,SEL,CGRect))objc_msgSend)(v,sel_registerName("setFrame:"),CGRectMake(0,0,lw,lh)); }
                     SEL _upd=sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
                     if ([rvc respondsToSelector:_upd]) ((void(*)(id,SEL))objc_msgSend)(rvc,_upd);
@@ -3361,7 +3365,7 @@ static void cbrProbeSchedule(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.22.4 init - v77 baseline + race probe + scene activation/heartbeat";
+        const char msg[] = "[CBR] v3.23.0 init - v77 baseline, callback landscape-pin removed (let YT portrait + host +90)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3383,7 +3387,7 @@ static void cbrProbeSchedule(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.22.4 init - v77 baseline + race probe + scene activation/heartbeat";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.23.0 init - v77 baseline, callback landscape-pin removed (let YT portrait + host +90)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
