@@ -3057,8 +3057,10 @@ static void cbrYTGeomProbe(const char *tag) {
 static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringRef name, const void *o, CFDictionaryRef ui) {
     @try {
         char nm[128]; nm[0]=0; if(name) CFStringGetCString(name,nm,sizeof(nm),kCFStringEncodingUTF8);
-        if (strstr(nm,"unlock")) { gCBROrientOverride = -1; return; }
-        gCBROrientOverride = 3;
+        // v3.21.1 LOCK-PORTRAIT: never open the landscape override. The app-side forcing (all gated
+        // on gCBROrientOverride>0) made orientation flicker per-VC. Keep it shut so the app renders its
+        // NATURAL, consistent orientation; the host window rotation displays it landscape.
+        gCBROrientOverride = -1; return;
         id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
         id arr = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("connectedScenes")), sel_registerName("allObjects"));
         NSUInteger sc = ((NSUInteger(*)(id,SEL))objc_msgSend)(arr, sel_registerName("count"));
@@ -3287,13 +3289,12 @@ static void cbrScheduleReassert(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.21.0 init - v64 fill/host-rotate + landscape hooks, window-pin removed";
+        const char msg[] = "[CBR] v3.21.1 init - lock-portrait (app forcing off, host rotate kept)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
-        cbrScheduleReassert();   // v3.20.98: synthesize the phone-foreground orientation trigger
         for (int _r=1;_r<=30;_r++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(_r*2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrViewProbe(); }); }
         for (int _q=1;_q<=30;_q++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(_q*2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrYTGeomProbe("tick"); }); }
         [[NSNotificationCenter defaultCenter] addObserverForName:@"UIKeyboardDidShowNotification" object:nil queue:nil usingBlock:^(id note){ cbrYTGeomProbe("kbd"); }];
@@ -3310,7 +3311,7 @@ static void cbrScheduleReassert(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.21.0 init - v64 fill/host-rotate + landscape hooks, window-pin removed";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.21.1 init - lock-portrait (app forcing off, host rotate kept)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
