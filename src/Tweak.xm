@@ -2871,6 +2871,13 @@ static void cbrCPProbeChromeGeom(void) {
                 CBCarLogFmt("[CBR-CP] tap(launchInfo) -> %s", bid ?: "?");
                 CBPostLaunch(bid);   // writes pending bid file (cbrCPRenderTest reads it)
                 CBLogFmt("[CBR] Tapped bridged app: %s", bid ?: "?");
+                // v3.24.8: AUTO-TAP. Foregrounding the app on the phone is the ONE action that makes the
+                // dash render upright AND full-screen (confirmed for YouTube + YouTube TV, any start state).
+                if (bid && bid[0]) {
+                    NSString *_bc = [NSString stringWithUTF8String:bid];
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ if(_bc) CBOpenApp([_bc UTF8String]); });
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(4.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ if(_bc) CBOpenApp([_bc UTF8String]); });
+                }
                 // cbrCPRenderTest(); // v3.20.2 disabled for stability isolation - in-process car-scene window test
                 handled = YES;
             }
@@ -3468,7 +3475,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.24.6 init - v77 baseline + PORTRAIT window pin (upright dash)";
+        const char msg[] = "[CBR] v3.24.8 init - v77 baseline + PORTRAIT window pin (upright dash)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3490,7 +3497,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.24.6 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.24.8 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
