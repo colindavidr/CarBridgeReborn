@@ -2394,8 +2394,13 @@ static void cbrSBSilentActivate(void) {
             s=sel_registerName("setBackgrounded:");        if([ms respondsToSelector:s]) ((void(*)(id,SEL,BOOL))objc_msgSend)(ms,s,NO);
             s=sel_registerName("setDeactivated:");         if([ms respondsToSelector:s]) ((void(*)(id,SEL,BOOL))objc_msgSend)(ms,s,NO);
             s=sel_registerName("setOccluded:");            if([ms respondsToSelector:s]) ((void(*)(id,SEL,BOOL))objc_msgSend)(ms,s,NO);
-            s=sel_registerName("setDeactivationReasons:"); if([ms respondsToSelector:s]) ((void(*)(id,SEL,NSUInteger))objc_msgSend)(ms,s,(NSUInteger)0);
+            // v3.26.0: do NOT clear deactivationReasons - GOOD boot holds dr=1024, BAD boot has dr=0.
+            // The BLOCK-deact hook only fires when dr != 0, so dr=1024 is what shields the good frame.
             s=sel_registerName("setInterfaceOrientation:");if([ms respondsToSelector:s]) ((void(*)(id,SEL,NSInteger))objc_msgSend)(ms,s,(NSInteger)3);
+            // v3.26.0: THE FIX. GOOD (upright+stretched) frame=430x932 (phone portrait);
+            // BAD (sideways) frame=472x281 (car landscape). All else identical. Drive the phone frame.
+            s=sel_registerName("setFrame:");
+            if([ms respondsToSelector:s]) ((void(*)(id,SEL,CGRect))objc_msgSend)(ms,s,CGRectMake(0,0,430,932));
         };
         ((void(*)(id,SEL,id))objc_msgSend)(scn, upd, b);
         int fd=open("/var/mobile/CBR_silent.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
@@ -3029,6 +3034,20 @@ static void cbrKLLog(const char *fmt, ...) {
                          [bid UTF8String], object_getClassName(arg1), (int)isFg, (int)isDeact, (unsigned long)dr, _act);
                 if (respFg && !isFg) { return; }         // block background
                 if (isDeact || dr != 0) { return; }      // block deactivation -> keep foreground-ACTIVE
+                // v3.26.0: FRAME GUARD. The dr=0 "pass" updates rewrite the scene frame from the
+                // phone-portrait 430x932 (upright+stretched) to car-landscape 472x281 (sideways).
+                // Don't block them - just re-assert the phone frame so the good geometry survives.
+                @try {
+                    SEL _gf = sel_registerName("frame");
+                    SEL _sf = sel_registerName("setFrame:");
+                    if ([arg1 respondsToSelector:_gf] && [arg1 respondsToSelector:_sf]) {
+                        CGRect _cf = ((CGRect(*)(id,SEL))objc_msgSend)(arg1, _gf);
+                        if (fabs(_cf.size.width - 430.0) > 1.0 || fabs(_cf.size.height - 932.0) > 1.0) {
+                            cbrKLLog("[frame] rewriting %.0fx%.0f -> 430x932\n", _cf.size.width, _cf.size.height);
+                            ((void(*)(id,SEL,CGRect))objc_msgSend)(arg1, _sf, CGRectMake(0,0,430,932));
+                        }
+                    }
+                } @catch(...) {}
                 // v3.25.6: PERSISTENCE. Re-drive the LIVE scene (fresh block via cbrSBSilentActivate,
                 // the call that works at startup) after each pass, so the correct render is held for
                 // the whole session instead of only the first 6s. Async (no re-entry) + debounced.
