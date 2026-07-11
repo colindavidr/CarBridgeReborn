@@ -2978,9 +2978,17 @@ static void cbrKLLog(const char *fmt, ...) {
             if (bid && [gCBRKeepAlive containsObject:bid]) {
                 BOOL respFg = [arg1 respondsToSelector:sel_registerName("isForeground")];
                 BOOL isFg = respFg ? ((BOOL(*)(id,SEL))objc_msgSend)(arg1, sel_registerName("isForeground")) : YES;
-                cbrKLLog("[fbscene] bid=%s procVia=%s argClass=%s respFg=%d isFg=%d => %s\n",
-                         [bid UTF8String], proc?"ok":"nil", object_getClassName(arg1), (int)respFg, (int)isFg, (respFg && !isFg) ? "BLOCK" : "pass");
-                if (respFg && !isFg) { return; }   // block the background transition -> keep it live on CarPlay
+                // v3.25.0: hold the scene ACTIVE, not just foreground. The phone-tap's real effect is
+                // foreground-ACTIVE; CBR's scene stays foreground but gets DEACTIVATED (wrong render).
+                SEL gDeact = sel_registerName("isDeactivated");
+                BOOL isDeact = [arg1 respondsToSelector:gDeact] ? ((BOOL(*)(id,SEL))objc_msgSend)(arg1, gDeact) : NO;
+                SEL gDR = sel_registerName("deactivationReasons");
+                NSUInteger dr = [arg1 respondsToSelector:gDR] ? ((NSUInteger(*)(id,SEL))objc_msgSend)(arg1, gDR) : 0;
+                const char *_act = (respFg && !isFg) ? "BLOCK-bg" : ((isDeact || dr) ? "BLOCK-deact" : "pass");
+                cbrKLLog("[fbscene] bid=%s argClass=%s isFg=%d deact=%d dr=%lu => %s\n",
+                         [bid UTF8String], object_getClassName(arg1), (int)isFg, (int)isDeact, (unsigned long)dr, _act);
+                if (respFg && !isFg) { return; }         // block background
+                if (isDeact || dr != 0) { return; }      // block deactivation -> keep foreground-ACTIVE
             }
         }
     } @catch(...) {}
@@ -3491,7 +3499,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.24.9 init - v77 baseline + PORTRAIT window pin (upright dash)";
+        const char msg[] = "[CBR] v3.25.0 init - v77 baseline + PORTRAIT window pin (upright dash)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3513,7 +3521,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.24.9 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.25.0 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
