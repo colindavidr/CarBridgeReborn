@@ -3268,20 +3268,21 @@ static void cbrProbeTick(void) {
                     (unsigned long)w, object_getClassName(win), wb.size.width, wb.size.height,
                     rvc ? object_getClassName(rvc) : "nil", vio];
                 if (rvc && strcmp(object_getClassName(win), "YTMainWindow") == 0 && vio != gCBRLastVcIfo) {
-                    cbrEvent("YTMainWindow vcIfo %ld -> %ld (bounds=%.0fx%.0f sroCalls=%d lastAsk=%d)", gCBRLastVcIfo, vio, wb.size.width, wb.size.height, gCBRSroCalls, gCBRSroLastVal);
+                    NSUInteger rSupp = ((NSUInteger(*)(id,SEL))objc_msgSend)(rvc, sel_registerName("supportedInterfaceOrientations"));
+                    SEL _priv = sel_registerName("__supportedInterfaceOrientations");
+                    NSUInteger rPriv = [rvc respondsToSelector:_priv] ? ((NSUInteger(*)(id,SEL))objc_msgSend)(rvc, _priv) : 0;
+                    SEL _pref = sel_registerName("_preferredInterfaceOrientationForPresentation");
+                    long rPref = [rvc respondsToSelector:_pref] ? ((long(*)(id,SEL))objc_msgSend)(rvc, _pref) : -1;
+                    cbrEvent("YTMainWindow vcIfo %ld -> %ld | sceneIfo=%ld car=%d scene=%s | rvc=%s supp=0x%lx __supp=0x%lx pref=%ld | bounds=%.0fx%.0f sroCalls=%d lastAsk=%d",
+                        gCBRLastVcIfo, vio, io, isCar, object_getClassName(scene),
+                        object_getClassName(rvc), (unsigned long)rSupp, (unsigned long)rPriv, rPref,
+                        wb.size.width, wb.size.height, gCBRSroCalls, gCBRSroLastVal);
                     gCBRLastVcIfo = vio;
                 }
                 // v3.24.0: PERSISTENT PORTRAIT RE-PIN. YouTube reverts the window bounds, so the
                 // one-shot pin in cbrAppOrientCallback is not enough. Portrait (281x472) is the
                 // shape that yields an upright dash; landscape (472x281) yields sideways.
-                if (strcmp(object_getClassName(win), "YTMainWindow") == 0 && gCBRCarW > 0) {
-                    CGFloat pw = gCBRCarH, ph = gCBRCarW;   // portrait = 281 x 472
-                    if (fabs(wb.size.width - pw) > 1.0 || fabs(wb.size.height - ph) > 1.0) {
-                        cbrEvent("REPIN portrait: %.0fx%.0f -> %.0fx%.0f (vcIfo=%ld)", wb.size.width, wb.size.height, pw, ph, vio);
-                        ((void(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("setBounds:"), CGRectMake(0,0,pw,ph));
-                        ((void(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("setFrame:"),  CGRectMake(0,0,pw,ph));
-                    }
-                }
+                if (0 && strcmp(object_getClassName(win), "YTMainWindow") == 0 && gCBRCarW > 0) { }
                 if (rvc) {
                     id v = ((id(*)(id,SEL))objc_msgSend)(rvc, sel_registerName("view"));
                     if (v) {
@@ -3375,7 +3376,7 @@ static void cbrProbeSchedule(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.24.0 init - v77 baseline + PORTRAIT window pin (upright dash)";
+        const char msg[] = "[CBR] v3.24.1 init - v77 baseline + PORTRAIT window pin (upright dash)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3397,7 +3398,7 @@ static void cbrProbeSchedule(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.24.0 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.24.1 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
