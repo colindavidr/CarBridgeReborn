@@ -1292,66 +1292,40 @@ static void cbrReferenceProbe(void) {
 }
 
 
-static void cbrSetLayerScale(id layer, CGFloat sc, int depth) {
-    if(!layer || depth>9) return;
+// v3.20.67: TRANSFORM-SCALE (carplay-cast model). Scene renders at PHONE-LANDSCAPE
+// (which YouTube fully supports); we scale its _sceneContentContainerView to the car screen.
+static void cbrScaleAppToCarScreen(void) {
     @try {
-        ((void(*)(id,SEL,CGFloat))objc_msgSend)(layer,sel_registerName("setContentsScale:"),sc);
-        id subs=((id(*)(id,SEL))objc_msgSend)(layer,sel_registerName("sublayers"));
-        NSUInteger n=subs?((NSUInteger(*)(id,SEL))objc_msgSend)(subs,sel_registerName("count")):0;
-        for(NSUInteger i=0;i<n && i<24;i++) cbrSetLayerScale(((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),i),sc,depth+1);
-    } @catch(...) {}
-}
-static void cbrHostGeomLog(void) {
-    @try {
-        if(!gCBRAppVC || !gCBRRootWindow) return;
-        int fd=open("/var/mobile/CBR_hostgeom.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(fd<0) return;
-        #define HG(...) do{char _b[320];int _n=snprintf(_b,sizeof(_b),__VA_ARGS__);if(_n>0)write(fd,_b,(size_t)_n);}while(0)
-        id screens=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("screens"));
-        NSUInteger nsc=screens?((NSUInteger(*)(id,SEL))objc_msgSend)(screens,sel_registerName("count")):0;
-        for(NSUInteger i=0;i<nsc;i++){ id sc=((id(*)(id,SEL,NSUInteger))objc_msgSend)(screens,sel_registerName("objectAtIndex:"),i);
-            int car=[sc respondsToSelector:sel_registerName("_isCarScreen")]?((BOOL(*)(id,SEL))objc_msgSend)(sc,sel_registerName("_isCarScreen")):0;
-            CGRect b=((CGRect(*)(id,SEL))objc_msgSend)(sc,sel_registerName("bounds"));
-            CGRect nb=((CGRect(*)(id,SEL))objc_msgSend)(sc,sel_registerName("nativeBounds"));
-            CGFloat scl=((CGFloat(*)(id,SEL))objc_msgSend)(sc,sel_registerName("scale"));
-            HG("SCREEN car=%d bounds=%.0fx%.0f native=%.0fx%.0f scale=%.1f\n",car,b.size.width,b.size.height,nb.size.width,nb.size.height,scl);
+        if (!gCBRAppVC || !gCBRRootWindow) return;
+        id dvc = getIvar(gCBRAppVC, "_deviceAppViewController");
+        id sv  = dvc ? getIvar(dvc, "_sceneView") : nil;
+        if (!sv && [gCBRAppVC respondsToSelector:sel_registerName("appView")])
+            sv = ((id(*)(id,SEL))objc_msgSend)(gCBRAppVC, sel_registerName("appView"));
+        if (!sv) return;
+        id hostView = getIvar(sv, "_sceneContentContainerView");
+        if (!hostView) hostView = getIvar(sv, "_contentContainerView");
+        if (!hostView) hostView = sv;
+        CGRect wb = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds"));
+        UIEdgeInsets ins = UIEdgeInsetsZero;
+        SEL sai = sel_registerName("safeAreaInsets");
+        if ([gCBRRootWindow respondsToSelector:sai]) ins = ((UIEdgeInsets(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sai);
+        CGRect car = CGRectMake(ins.left, ins.top, wb.size.width-ins.left-ins.right, wb.size.height-ins.top-ins.bottom);
+        if (car.size.width < 1 || car.size.height < 1) car = CGRectMake(0,0,wb.size.width,wb.size.height);
+        id mainScreen = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
+        CGSize ph = CGSizeZero;
+        SEL bfo = sel_registerName("boundsForOrientation:");
+        if ([mainScreen respondsToSelector:bfo]) ph = ((CGRect(*)(id,SEL,NSInteger))objc_msgSend)(mainScreen, bfo, (NSInteger)3).size;
+        if (ph.width < 1 || ph.height < 1) {
+            CGRect mb = ((CGRect(*)(id,SEL))objc_msgSend)(mainScreen, sel_registerName("bounds"));
+            ph = CGSizeMake(mb.size.width>mb.size.height?mb.size.width:mb.size.height, mb.size.width>mb.size.height?mb.size.height:mb.size.width);
         }
-        CGRect wf=((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow,sel_registerName("frame"));
-        CGAffineTransform wt=((CGAffineTransform(*)(id,SEL))objc_msgSend)(gCBRRootWindow,sel_registerName("transform"));
-        HG("rootWindow frame=%.0f,%.0f %.0fx%.0f xf=[%.2f %.2f %.2f %.2f]\n",wf.origin.x,wf.origin.y,wf.size.width,wf.size.height,wt.a,wt.b,wt.c,wt.d);
-        id vcv=((id(*)(id,SEL))objc_msgSend)(gCBRAppVC,sel_registerName("view"));
-        if(vcv){ CGRect vf=((CGRect(*)(id,SEL))objc_msgSend)(vcv,sel_registerName("frame")); CGAffineTransform vt=((CGAffineTransform(*)(id,SEL))objc_msgSend)(vcv,sel_registerName("transform"));
-            HG("appVC.view frame=%.0f,%.0f %.0fx%.0f xf=[%.2f %.2f %.2f %.2f]\n",vf.origin.x,vf.origin.y,vf.size.width,vf.size.height,vt.a,vt.b,vt.c,vt.d); }
-        id dvc=getIvar(gCBRAppVC,"_deviceAppViewController");
-        id sv=dvc?getIvar(dvc,"_sceneView"):nil;
-        if(sv){ CGRect sf=((CGRect(*)(id,SEL))objc_msgSend)(sv,sel_registerName("frame")); CGAffineTransform st=((CGAffineTransform(*)(id,SEL))objc_msgSend)(sv,sel_registerName("transform"));
-            HG("sceneView %s frame=%.0f,%.0f %.0fx%.0f xf=[%.2f %.2f %.2f %.2f]\n",object_getClassName(sv),sf.origin.x,sf.origin.y,sf.size.width,sf.size.height,st.a,st.b,st.c,st.d);
-            id ccv=getIvar(sv,"_sceneContentContainerView"); if(!ccv) ccv=getIvar(sv,"_contentContainerView");
-            if(ccv){ CGRect cf=((CGRect(*)(id,SEL))objc_msgSend)(ccv,sel_registerName("frame")); CGAffineTransform ct=((CGAffineTransform(*)(id,SEL))objc_msgSend)(ccv,sel_registerName("transform"));
-                HG("  contentContainer %s frame=%.0f,%.0f %.0fx%.0f xf=[%.2f %.2f %.2f %.2f]\n",object_getClassName(ccv),cf.origin.x,cf.origin.y,cf.size.width,cf.size.height,ct.a,ct.b,ct.c,ct.d);
-                id subs=((id(*)(id,SEL))objc_msgSend)(ccv,sel_registerName("subviews"));
-                NSUInteger sn=subs?((NSUInteger(*)(id,SEL))objc_msgSend)(subs,sel_registerName("count")):0;
-                for(NSUInteger j=0;j<sn && j<6;j++){ id sub=((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),j);
-                    CGRect subf=((CGRect(*)(id,SEL))objc_msgSend)(sub,sel_registerName("frame"));
-                    HG("    sub %s %.0f,%.0f %.0fx%.0f\n",object_getClassName(sub),subf.origin.x,subf.origin.y,subf.size.width,subf.size.height); }
-            }
-        }
-        @try {
-            id ms=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("mainScreen"));
-            CGFloat msc=((CGFloat(*)(id,SEL))objc_msgSend)(ms,sel_registerName("scale"));
-            if(sv && msc>1.5){
-                id lyr=((id(*)(id,SEL))objc_msgSend)(sv,sel_registerName("layer"));
-                if(lyr) cbrSetLayerScale(lyr, msc, 0);
-                ((void(*)(id,SEL,CGFloat))objc_msgSend)(sv,sel_registerName("setContentScaleFactor:"),msc);
-                HG("SCALE contentsScale=%.1f applied to sceneView layer tree\n",msc);
-            }
-        } @catch(...) {}
-        close(fd);
-        #undef HG
+        CGFloat sx = car.size.width/ph.width, sy = car.size.height/ph.height;
+        ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(hostView, sel_registerName("setTransform:"), CGAffineTransformMakeScale(sx, sy));
+        id vcView = ((id(*)(id,SEL))objc_msgSend)(gCBRAppVC, sel_registerName("view"));
+        if (vcView) ((void(*)(id,SEL,CGRect))objc_msgSend)(vcView, sel_registerName("setFrame:"), car);
+        int gf = open("/var/mobile/CBR_scale.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        if (gf>=0){ char b[300]; int n=snprintf(b,sizeof(b),"car=%.0fx%.0f@%.0f,%.0f phone=%.0fx%.0f scale=%.3f,%.3f host=%s\n", car.size.width,car.size.height,car.origin.x,car.origin.y, ph.width,ph.height, sx,sy, object_getClassName(hostView)); if(n>0)write(gf,b,(size_t)n); close(gf);}
     } @catch(...) {}
-}
-static void cbrHostGeomSchedule(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrHostGeomLog(); cbrHostGeomSchedule(); });
 }
 static void cbrSBHostScene(const char *bid_cstr, id handle) {
     int fd = open("/var/mobile/CBR_sb_host.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
@@ -1388,27 +1362,14 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         HHF("rootWindow: %s\n", rootWindow ? class_getName(object_getClass(rootWindow)) : "nil");
         if (!rootWindow) { HH("no rootWindow -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
         gCBRRootWindow = rootWindow;
-        @try {
-            id _scr=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("screens"));
-            NSUInteger _sn=_scr?((NSUInteger(*)(id,SEL))objc_msgSend)(_scr,sel_registerName("count")):0;
-            for(NSUInteger _i=0;_i<_sn;_i++){ id _s=((id(*)(id,SEL,NSUInteger))objc_msgSend)(_scr,sel_registerName("objectAtIndex:"),_i);
-                int _c=[_s respondsToSelector:sel_registerName("_isCarScreen")]?((BOOL(*)(id,SEL))objc_msgSend)(_s,sel_registerName("_isCarScreen")):0;
-                if(_c){ CGRect _cb=((CGRect(*)(id,SEL))objc_msgSend)(_s,sel_registerName("bounds"));
-                    CGFloat _lw=_cb.size.width>_cb.size.height?_cb.size.width:_cb.size.height;
-                    CGFloat _lh=_cb.size.width>_cb.size.height?_cb.size.height:_cb.size.width;
-                    if(_lw>0){ ((void(*)(id,SEL,CGRect))objc_msgSend)(rootWindow,sel_registerName("setBounds:"),CGRectMake(0,0,_lw,_lh));
-                        ((void(*)(id,SEL,CGRect))objc_msgSend)(rootWindow,sel_registerName("setFrame:"),CGRectMake(0,0,_lw,_lh));
-                        HHF("[GAMBLE] forced window to car landscape %.0fx%.0f\n",_lw,_lh); }
-                    break; } }
-        } @catch(...) { HH("[GAMBLE] window resize threw\n"); }
         @try { id layer = cb(rootWindow, "layer"); ((void(*)(id,SEL,CGFloat))objc_msgSend)(layer, sel_registerName("setCornerRadius:"), (CGFloat)13.0); ((void(*)(id,SEL,BOOL))objc_msgSend)(layer, sel_registerName("setMasksToBounds:"), YES); } @catch(...) {}
         // v3.20.26: force the WINDOW itself to landscape (orientation 3); scene orientation
         // alone leaves it portrait on auto-launch. Guarded + logged for iOS 17.
         @try {
             SEL _rot = sel_registerName("_rotateWindowToOrientation:updateStatusBar:duration:skipCallbacks:");
             if ([rootWindow respondsToSelector:_rot]) {
-                (void)_rot;
-                HH("[GAMBLE] window rotation SKIPPED (native landscape host)\n");
+                ((void(*)(id,SEL,int,int,int,int))objc_msgSend)(rootWindow, _rot, 3, 1, 0, 0);
+                HH("window rotated to landscape via _rotateWindowToOrientation:3\n");
             } else {
                 HH("_rotateWindowToOrientation: NOT on iOS 17 - need fallback\n");
             }
@@ -1494,8 +1455,9 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                                     // space (e.g. 240x400) but the physical car screen is landscape, so the
                                                     // app must render at the SWAPPED size (400x240) to fill it instead of a
                                                     // portrait strip (screenshot showed correct content but portrait-shaped).
-                                                    CGFloat _lw = _wb.size.width, _lh = _wb.size.height;
-                                                    if (_lh > _lw) { CGFloat _t=_lw; _lw=_lh; _lh=_t; }  // ensure landscape (w>h)
+                                                    CGRect _pmb = ((CGRect(*)(id,SEL))objc_msgSend)(((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("mainScreen")), sel_registerName("bounds"));
+                                                    CGFloat _lw = _pmb.size.width>_pmb.size.height?_pmb.size.width:_pmb.size.height;
+                                                    CGFloat _lh = _pmb.size.width>_pmb.size.height?_pmb.size.height:_pmb.size.width;  // v3.20.67 PHONE-LANDSCAPE
                                                     SEL _sf = sel_registerName("setFrame:");
                                                     if ([mutableSettings respondsToSelector:_sf]) {
                                                         ((void(*)(id,SEL,CGRect))objc_msgSend)(mutableSettings, _sf, CGRectMake(0,0,_lw,_lh));
@@ -1503,53 +1465,8 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                                     }
                                                 }
                                             } @catch(...) { CH("[FIX-GEOM] frame sync threw\n"); }
-                                            // [FIX-CRS] v3.20.28: content reference size = the CAR's size (dynamic per vehicle),
-                                            // so the app re-lays-out for the real display instead of stretching a phone-sized render.
-                                            @try {
-                                                CGRect _cwb = gCBRRootWindow ? ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds")) : CGRectZero;
-                                                if (_cwb.size.width > 0 && _cwb.size.height > 0) {
-                                                    // v3.20.32: setFrame/orientation-lock REMOVED - the car bounds came back
-                                                    // portrait (281x472) so setFrame made the app render phone-portrait (stretch bug).
-                                                    // Window rotation alone handled orientation correctly in earlier builds.
-
-                                                    // v3.20.60: RE-ENABLED two-arg canvas+orientation (CarBridge's linchpin).
-                                                    // Prior disable (v3.20.32) passed RAW portrait size (281x472) -> stretch bug.
-                                                    // Fix: pass LANDSCAPE-swapped size + orientation 3, like the [FIX-GEOM] block above.
-                                                    CGFloat _clw = _cwb.size.width, _clh = _cwb.size.height;
-                                                    if (_clh > _clw) { CGFloat _t=_clw; _clw=_clh; _clh=_t; }  // ensure landscape (w>h)
-                                                    // v3.20.61: iOS17 has NO setContentReferenceSize; use ANGLE-based API (from settings dump).
-                                                    SEL _angM = sel_registerName("setHostReferenceAngleMode:");
-                                                    SEL _sbi  = sel_registerName("setScreenBoundsIgnoresSceneOrientation:");
-                                                    SEL _ang  = sel_registerName("setAngleFromHostReferenceUprightDirection:");
-                                                    static int _cal = 0;
-                                                    double _cands[4] = { 0.0, 1.5707963267948966, -1.5707963267948966, 3.141592653589793 };
-                                                    double _use = _cands[_cal % 4];
-                                                    if ([mutableSettings respondsToSelector:_sbi]) ((void(*)(id,SEL,BOOL))objc_msgSend)(mutableSettings, _sbi, YES);
-                                                    if ([mutableSettings respondsToSelector:_angM]) ((void(*)(id,SEL,NSInteger))objc_msgSend)(mutableSettings, _angM, (NSInteger)1);
-                                                    SEL _crs = _ang;
-                                                    if ([mutableSettings respondsToSelector:_crs]) {
-                                                        ((void(*)(id,SEL,double))objc_msgSend)(mutableSettings, _ang, _use);
-                                                        CHF("[FIX-CRS] iOS17 angle CAL idx=%d angle=%.4f ignoreBounds=1 APPLIED\n", _cal%4, _use);
-                                                        _cal++;
-                                                    } else {
-                                                        SEL _crs2 = sel_registerName("setContentReferenceSize:");
-                                                        if ([mutableSettings respondsToSelector:_crs2]) { ((void(*)(id,SEL,CGSize))objc_msgSend)(mutableSettings, _crs2, CGSizeMake(_clw,_clh)); CH("[FIX-CRS] fallback 1-arg setContentReferenceSize applied\n"); }
-                                                        else {
-                                                            CH("[FIX-CRS] NO setContentReferenceSize - dumping settings methods\n");
-                                                            // v3.20.29: dump the settings object's ACTUAL methods to find the iOS17 selector.
-                                                            static int _sd=0;
-                                                            if(!_sd){ _sd=1; int df2=open("/var/mobile/CBR_settings.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-                                                                if(df2>=0){ const char *cn=class_getName(object_getClass(mutableSettings)); char hb[128]; int hl=snprintf(hb,sizeof(hb),"SETTINGS CLASS: %s\n",cn); write(df2,hb,hl); }
-                                                                Class _sc=object_getClass(mutableSettings); int _d=0;
-                                                                while(_sc && strcmp(class_getName(_sc),"NSObject")!=0 && _d<4){ unsigned int _n=0; Method *_m=class_copyMethodList(_sc,&_n);
-                                                                    for(unsigned int _i=0;_i<_n;_i++){ const char*_sn=sel_getName(method_getName(_m[_i]));
-                                                                        if(strncmp(_sn,"set",3)==0 && (strcasestr(_sn,"size")||strcasestr(_sn,"reference")||strcasestr(_sn,"content")||strcasestr(_sn,"bound")||strcasestr(_sn,"frame")||strcasestr(_sn,"canvas")||strcasestr(_sn,"scale"))){ char lb[200]; int ln=snprintf(lb,sizeof(lb),"-%s\n",_sn); if(df2>=0)write(df2,lb,ln);} }
-                                                                    if(_m)free(_m); _sc=class_getSuperclass(_sc); _d++; }
-                                                                if(df2>=0)close(df2); }
-                                                        }
-                                                    }
-                                                } else { CH("[FIX-CRS] car window bounds zero - skipped\n"); }
-                                            } @catch(...) { CH("[FIX-CRS] threw\n"); }
+                                            // v3.20.67: FIX-CRS angle calibration REMOVED (fights transform-scale).
+                                            @try {} @catch(...) {}
                                         };
                                         ((void(*)(id,SEL,id))objc_msgSend)(scn, updBlk, diff);
                                         CH("scene updateSettingsWithBlock: applied (fg+landscape)\n");
@@ -1584,9 +1501,9 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                     id rdDvc = getIvar(bAppVC, "_deviceAppViewController");
                                     id rdSv = rdDvc ? getIvar(rdDvc, "_sceneView") : nil;
                                     if (rdSv && gCBRRootWindow) {
-                                        CGRect wf = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds"));
-                                        ((void(*)(id,SEL,CGRect))objc_msgSend)(rdSv, sel_registerName("setFrame:"), CGRectMake(0,0,wf.size.width,wf.size.height));
-                                        CH("REDRIVE(comp) sized live sceneView to car window\n");
+                                        cbrScaleAppToCarScreen();
+                                        for(int _s=1;_s<=6;_s++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((double)_s*1.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrScaleAppToCarScreen(); }); }
+                                        CH("REDRIVE(comp) transform-scale (+6 re-scales)\n");
                                         // v3.20.34: GEOMETRY PROBE - capture actual coordinate spaces so we fix
                                         // the zoom/touch-offset correctly (last setFrame guess used portrait bounds).
                                         @try {
@@ -3224,61 +3141,6 @@ static void cbrNoteLandscape(void) {
             ((void(*)(id,SEL,long,double,BOOL,BOOL,id))objc_msgSend)(app, note, (long)3, (double)0.0, (BOOL)YES, (BOOL)YES, @"CBR");
     } @catch(...) {}
 }
-static void cbrWidthProbe(id view, int depth, int fd) {
-    if(!view || depth>16 || fd<0) return;
-    @try {
-        CGRect f=((CGRect(*)(id,SEL))objc_msgSend)(view,sel_registerName("frame"));
-        if(f.size.width>=100){ char b[220]; int n=snprintf(b,sizeof(b),"%*s%s x=%.0f w=%.0f h=%.0f\n",depth,"",object_getClassName(view),f.origin.x,f.size.width,f.size.height); if(n>0) write(fd,b,(size_t)n); }
-        id subs=((id(*)(id,SEL))objc_msgSend)(view,sel_registerName("subviews"));
-        NSUInteger sc=subs?((NSUInteger(*)(id,SEL))objc_msgSend)(subs,sel_registerName("count")):0;
-        for(NSUInteger i=0;i<sc && i<40;i++) cbrWidthProbe(((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),i),depth+1,fd);
-    } @catch(...) {}
-}
-static void cbrForceYT(void) {
-    @try {
-        id app=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"),sel_registerName("sharedApplication"));
-        id arr=((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("connectedScenes")),sel_registerName("allObjects"));
-        NSUInteger nc=arr?((NSUInteger(*)(id,SEL))objc_msgSend)(arr,sel_registerName("count")):0;
-        int hosted=0;
-        for(NSUInteger i=0;i<nc;i++){
-            id scene=((id(*)(id,SEL,NSUInteger))objc_msgSend)(arr,sel_registerName("objectAtIndex:"),i);
-            if(!strstr(object_getClassName(scene),"WindowScene")) continue;
-            id wins=((id(*)(id,SEL))objc_msgSend)(scene,sel_registerName("windows"));
-            NSUInteger wc=wins?((NSUInteger(*)(id,SEL))objc_msgSend)(wins,sel_registerName("count")):0;
-            for(NSUInteger w=0;w<wc;w++){
-                id win=((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins,sel_registerName("objectAtIndex:"),w);
-                CGRect wb=((CGRect(*)(id,SEL))objc_msgSend)(win,sel_registerName("bounds"));
-                CGFloat mxd=wb.size.width>wb.size.height?wb.size.width:wb.size.height;
-                if(mxd>0 && mxd<=520) hosted=1;
-            }
-        }
-        if(!hosted){ gCBROrientOverride=-1; return; }
-        gCBROrientOverride=3;
-        for(NSUInteger i=0;i<nc;i++){
-            id scene=((id(*)(id,SEL,NSUInteger))objc_msgSend)(arr,sel_registerName("objectAtIndex:"),i);
-            if(!strstr(object_getClassName(scene),"WindowScene")) continue;
-            id wins=((id(*)(id,SEL))objc_msgSend)(scene,sel_registerName("windows"));
-            NSUInteger wc=wins?((NSUInteger(*)(id,SEL))objc_msgSend)(wins,sel_registerName("count")):0;
-            for(NSUInteger w=0;w<wc;w++){
-                id win=((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins,sel_registerName("objectAtIndex:"),w);
-                const char* wcn=object_getClassName(win);
-                if(!(wcn && strstr(wcn,"YTMainWindow"))) continue;
-                CGRect wb=((CGRect(*)(id,SEL))objc_msgSend)(win,sel_registerName("bounds"));
-                if(wb.size.width<=0) continue;
-                if(wb.size.height>wb.size.width){ CGFloat mx=wb.size.height,mn=wb.size.width;
-                    ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setBounds:"),CGRectMake(0,0,mx,mn));
-                    ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setFrame:"),CGRectMake(0,0,mx,mn)); }
-                id rvc=((id(*)(id,SEL))objc_msgSend)(win,sel_registerName("rootViewController"));
-                id rv=rvc?((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")):nil;
-                if(rv){ CGAffineTransform rt=((CGAffineTransform(*)(id,SEL))objc_msgSend)(rv,sel_registerName("transform"));
-                    if(fabs(rt.b)>0.5 || fabs(rt.c)>0.5) ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(rv,sel_registerName("setTransform:"),CGAffineTransformIdentity);
-                    int _wf=open([[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_width.txt"] fileSystemRepresentation],O_WRONLY|O_CREAT|O_TRUNC,0644);
-                    if(_wf>=0){ CGRect _rb=((CGRect(*)(id,SEL))objc_msgSend)(rv,sel_registerName("bounds")); char _h[80]; int _hn=snprintf(_h,sizeof(_h),"rootView w=%.0f h=%.0f\n",_rb.size.width,_rb.size.height); if(_hn>0) write(_wf,_h,(size_t)_hn); cbrWidthProbe(rv,0,_wf); close(_wf); } }
-            }
-        }
-    } @catch(...) {}
-}
-
 %group APPS
 
 
@@ -3296,38 +3158,15 @@ static void cbrForceYT(void) {
     }
     return %orig;
 }
+// v3.20.96: ported from v3.20.78 - YouTube home-feed/watch VCs use the PRIVATE method.
 - (NSUInteger)__supportedInterfaceOrientations {
     if (gCBROrientOverride > 0) return (NSUInteger)((1UL<<3) | (1UL<<4));
-    return %orig;
-}
-%end
-%hook UITraitCollection
-- (long)horizontalSizeClass {
-    if (gCBROrientOverride > 0) return 2;
     return %orig;
 }
 %end
 %hook UIDevice
 - (NSInteger)orientation {
     if (gCBROrientOverride > 0) return 3;
-    return %orig;
-}
-%end
-%hook UIScreen
-- (CGRect)bounds {
-    CGRect r = %orig;
-    if (gCBROrientOverride > 0 && r.size.height > r.size.width) return CGRectMake(0, 0, r.size.height, r.size.width);
-    return r;
-}
-- (CGRect)nativeBounds {
-    CGRect r = %orig;
-    if (gCBROrientOverride > 0 && r.size.height > r.size.width) return CGRectMake(0, 0, r.size.height, r.size.width);
-    return r;
-}
-%end
-%hook UIView
-- (UIEdgeInsets)safeAreaInsets {
-    if (gCBROrientOverride > 0) return UIEdgeInsetsZero;
     return %orig;
 }
 %end
@@ -3363,15 +3202,14 @@ static void cbrForceYT(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.94 init - contentsScale fit (non-destructive)";
+        const char msg[] = "[CBR] v3.20.96 init - v67 scale-fit + v78 private-orient (merged)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
-        // v3.20.87: self-detect hosting; conditional YTMainWindow fix + Regular size class.
+        // v3.20.67: GATED - no load-time force (that leaked landscape to the phone). Stay -1 until hosted.
         gCBROrientOverride = -1;
-        for (int _r=1;_r<=400;_r++){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((double)_r*0.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrForceYT(); }); }
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.unlock"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.appside.loaded"), NULL, NULL, YES);
@@ -3379,13 +3217,12 @@ static void cbrForceYT(void) {
     else if (strcmp(__progname, "SpringBoard") == 0) {
         %init(SPRINGBOARD);
         cbrSBRegisterListener();
-        cbrHostGeomSchedule();
         unlink("/var/mobile/CBR_appside_sb.txt");
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.loaded"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.94 init - contentsScale fit (non-destructive)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.96 init - v67 scale-fit + v78 private-orient (merged)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
