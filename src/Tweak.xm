@@ -3235,7 +3235,18 @@ static void cbrCanvasTick(void) {
             }
         }
         static int _t = 0;
-        if ((_t++ % 5) == 0) {
+        _t++;
+        // (c) v3.22.0: UIApplication's WHOLE-APP orientation kick --
+        //     noteInterfaceOrientationChanged:duration:updateMirroredDisplays:YES force:YES
+        //     This is the closest API there is to "tap the app on the phone", and
+        //     updateMirroredDisplays:YES is CarPlay-specific. v3.20.77 already defines it as
+        //     cbrNoteLandscape() -- and NEVER CALLS IT. It has been dead code the whole time.
+        //     Fire it when the canvas actually changed (the app reverted and we re-pinned), and
+        //     on the first few ticks while the cold-boot screens are still loading in. NOT every
+        //     tick: constant re-firing is what caused the "oscillating reinforcement" removed in
+        //     v3.20.82.
+        if (pinned > 0 || _t <= 6) cbrNoteLandscape();
+        if ((_t % 5) == 1) {
             @try {
                 NSString *pp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_canvas.txt"];
                 FILE *f = fopen([pp fileSystemRepresentation], "w");
