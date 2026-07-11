@@ -3203,15 +3203,18 @@ static void cbrProbeDiscover(id app) {
 
 static void cbrProbeSchedule(void);
 static void cbrProbeTick(void) {
-    if (gCBROrientOverride <= 0) return;   // hosted-only
+    // v3.22.2: NO early bail. v3.22.1 returned here whenever the gate was shut, so "no file"
+    // was ambiguous between "probe never ran" and "never hosted". Always write; the dump
+    // reports override so we can tell which.
     @try {
         id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
         if (!app) return;
         cbrProbeDiscover(app);
 
+        static int _tick = 0; _tick++;
         NSMutableString *out = [NSMutableString string];
-        [out appendFormat:@"=== CBR PROBE t=%.1f override=%d car=%.0fx%.0f ===\n",
-            (double)(((uint64_t)time(NULL)) % 100000), gCBROrientOverride, gCBRCarW, gCBRCarH];
+        [out appendFormat:@"=== CBR PROBE v3.22.2 tick=%d override=%d hosted=%s car=%.0fx%.0f ===\n",
+            _tick, gCBROrientOverride, (gCBROrientOverride > 0 ? "YES" : "no"), gCBRCarW, gCBRCarH];
 
         id ms = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
         CGRect mb = ((CGRect(*)(id,SEL))objc_msgSend)(ms, sel_registerName("bounds"));
@@ -3254,8 +3257,12 @@ static void cbrProbeTick(void) {
             }
         }
 
-        NSString *pp = @"/var/mobile/CBR_probe.txt";
-        [out writeToFile:pp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        // v3.22.2 FIX: YouTube is SANDBOXED and cannot write to /var/mobile -- that is why the
+        // v3.22.1 probe produced no file. v78's own app-side probes use NSTemporaryDirectory();
+        // do the same. Also try /var/mobile as a bonus (harmless if the sandbox denies it).
+        NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_probe.txt"];
+        [out writeToFile:tmp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [out writeToFile:@"/var/mobile/CBR_probe.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
     } @catch(...) {}
 }
 static void cbrProbeSchedule(void) {
@@ -3325,13 +3332,13 @@ static void cbrProbeSchedule(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.22.1 init - v77 baseline + read-only orientation probe (no invasive hooks)";
+        const char msg[] = "[CBR] v3.22.2 init - v77 baseline + read-only probe (app-tmp path, always-on)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
     else if (_isYT) {
         %init(APPS);
-        cbrProbeSchedule();   // v3.22.1: read-only state probe -> /var/mobile/CBR_probe.txt
+        cbrProbeSchedule();   // v3.22.2: read-only state probe -> app tmp CBR_probe.txt
         // v3.20.78: GATED - stay -1 until hosted (keeps the phone keyboard fix).
         gCBROrientOverride = -1;
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -3346,7 +3353,7 @@ static void cbrProbeSchedule(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.22.1 init - v77 baseline + read-only orientation probe (no invasive hooks)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.22.2 init - v77 baseline + read-only probe (app-tmp path, always-on)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
