@@ -1301,41 +1301,6 @@ static void cbrSetLayerScale(id layer, CGFloat sc, int depth) {
         for(NSUInteger i=0;i<n && i<24;i++) cbrSetLayerScale(((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs,sel_registerName("objectAtIndex:"),i),sc,depth+1);
     } @catch(...) {}
 }
-// v3.20.95: carplay-cast scale-fit. Scene renders at PHONE-LANDSCAPE; scale its
-// _sceneContentContainerView to the car screen by a POINT-size ratio (port of
-// EthanArbuckle/carplay-cast resizeAppViewForOrientation:). No 3x/2x pixel clip.
-static void cbrScaleAppToCarScreen(void) {
-    @try {
-        if (!gCBRAppVC || !gCBRRootWindow) return;
-        id dvc = getIvar(gCBRAppVC, "_deviceAppViewController");
-        id sv  = dvc ? getIvar(dvc, "_sceneView") : nil;
-        if (!sv && [gCBRAppVC respondsToSelector:sel_registerName("appView")])
-            sv = ((id(*)(id,SEL))objc_msgSend)(gCBRAppVC, sel_registerName("appView"));
-        if (!sv) return;
-        id hostView = getIvar(sv, "_sceneContentContainerView");
-        if (!hostView) hostView = getIvar(sv, "_contentContainerView");
-        if (!hostView) return;
-        CGRect wb = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds"));
-        CGFloat carW = wb.size.width>wb.size.height?wb.size.width:wb.size.height;
-        CGFloat carH = wb.size.width>wb.size.height?wb.size.height:wb.size.width;
-        if (carW < 1 || carH < 1) return;
-        id mainScreen = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
-        CGSize ph = CGSizeZero;
-        SEL bfo = sel_registerName("boundsForOrientation:");
-        if ([mainScreen respondsToSelector:bfo]) ph = ((CGRect(*)(id,SEL,NSInteger))objc_msgSend)(mainScreen, bfo, (NSInteger)3).size;
-        if (ph.width < 1 || ph.height < 1) {
-            CGRect mb = ((CGRect(*)(id,SEL))objc_msgSend)(mainScreen, sel_registerName("bounds"));
-            ph = CGSizeMake(mb.size.width>mb.size.height?mb.size.width:mb.size.height, mb.size.width>mb.size.height?mb.size.height:mb.size.width);
-        }
-        if (ph.width < 1 || ph.height < 1) return;
-        CGFloat sx = carW/ph.width, sy = carH/ph.height;
-        ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(hostView, sel_registerName("setTransform:"), CGAffineTransformMakeScale(sx, sy));
-        id vcView = ((id(*)(id,SEL))objc_msgSend)(gCBRAppVC, sel_registerName("view"));
-        if (vcView) ((void(*)(id,SEL,CGRect))objc_msgSend)(vcView, sel_registerName("setFrame:"), CGRectMake(0,0,carW,carH));
-        int gf = open("/var/mobile/CBR_scale.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
-        if (gf>=0){ char b[240]; int n=snprintf(b,sizeof(b),"car=%.0fx%.0f phone=%.0fx%.0f scale=%.3f,%.3f host=%s\n", carW,carH, ph.width,ph.height, sx,sy, object_getClassName(hostView)); if(n>0)write(gf,b,(size_t)n); close(gf);}
-    } @catch(...) {}
-}
 static void cbrHostGeomLog(void) {
     @try {
         if(!gCBRAppVC || !gCBRRootWindow) return;
@@ -1371,8 +1336,16 @@ static void cbrHostGeomLog(void) {
                     HG("    sub %s %.0f,%.0f %.0fx%.0f\n",object_getClassName(sub),subf.origin.x,subf.origin.y,subf.size.width,subf.size.height); }
             }
         }
-        // v3.20.95: carplay-cast scale-fit (replaces the v3.20.94 contentsScale hack).
-        cbrScaleAppToCarScreen();
+        @try {
+            id ms=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("mainScreen"));
+            CGFloat msc=((CGFloat(*)(id,SEL))objc_msgSend)(ms,sel_registerName("scale"));
+            if(sv && msc>1.5){
+                id lyr=((id(*)(id,SEL))objc_msgSend)(sv,sel_registerName("layer"));
+                if(lyr) cbrSetLayerScale(lyr, msc, 0);
+                ((void(*)(id,SEL,CGFloat))objc_msgSend)(sv,sel_registerName("setContentScaleFactor:"),msc);
+                HG("SCALE contentsScale=%.1f applied to sceneView layer tree\n",msc);
+            }
+        } @catch(...) {}
         close(fd);
         #undef HG
     } @catch(...) {}
@@ -1521,16 +1494,12 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                                     // space (e.g. 240x400) but the physical car screen is landscape, so the
                                                     // app must render at the SWAPPED size (400x240) to fill it instead of a
                                                     // portrait strip (screenshot showed correct content but portrait-shaped).
-                                                    // v3.20.95: PHONE-LANDSCAPE canvas (carplay-cast model). App renders its real
-                                                    // landscape layout at phone size; cbrScaleAppToCarScreen() scales the content
-                                                    // container to the car screen. Car-native size caused narrow layout + 3x/2x clip.
-                                                    CGRect _pmb = ((CGRect(*)(id,SEL))objc_msgSend)(((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("mainScreen")), sel_registerName("bounds"));
-                                                    CGFloat _lw = _pmb.size.width>_pmb.size.height?_pmb.size.width:_pmb.size.height;
-                                                    CGFloat _lh = _pmb.size.width>_pmb.size.height?_pmb.size.height:_pmb.size.width;
+                                                    CGFloat _lw = _wb.size.width, _lh = _wb.size.height;
+                                                    if (_lh > _lw) { CGFloat _t=_lw; _lw=_lh; _lh=_t; }  // ensure landscape (w>h)
                                                     SEL _sf = sel_registerName("setFrame:");
                                                     if ([mutableSettings respondsToSelector:_sf]) {
                                                         ((void(*)(id,SEL,CGRect))objc_msgSend)(mutableSettings, _sf, CGRectMake(0,0,_lw,_lh));
-                                                        CHF("[FIX-GEOM] settings.frame PHONE-LANDSCAPE %.0fx%.0f (car %.0fx%.0f)\n", _lw, _lh, _wb.size.width, _wb.size.height);
+                                                        CHF("[FIX-GEOM] settings.frame set LANDSCAPE %.0fx%.0f (from car %.0fx%.0f)\n", _lw, _lh, _wb.size.width, _wb.size.height);
                                                     }
                                                 }
                                             } @catch(...) { CH("[FIX-GEOM] frame sync threw\n"); }
@@ -1555,9 +1524,10 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                                     static int _cal = 0;
                                                     double _cands[4] = { 0.0, 1.5707963267948966, -1.5707963267948966, 3.141592653589793 };
                                                     double _use = _cands[_cal % 4];
-                                                    // v3.20.95: angle cycling DISABLED (never converged, destabilised the scene).
-                                                    (void)_use; (void)_sbi; (void)_angM; (void)_ang; (void)_cal;
-                                                    if (0) {
+                                                    if ([mutableSettings respondsToSelector:_sbi]) ((void(*)(id,SEL,BOOL))objc_msgSend)(mutableSettings, _sbi, YES);
+                                                    if ([mutableSettings respondsToSelector:_angM]) ((void(*)(id,SEL,NSInteger))objc_msgSend)(mutableSettings, _angM, (NSInteger)1);
+                                                    SEL _crs = _ang;
+                                                    if ([mutableSettings respondsToSelector:_crs]) {
                                                         ((void(*)(id,SEL,double))objc_msgSend)(mutableSettings, _ang, _use);
                                                         CHF("[FIX-CRS] iOS17 angle CAL idx=%d angle=%.4f ignoreBounds=1 APPLIED\n", _cal%4, _use);
                                                         _cal++;
@@ -3393,7 +3363,7 @@ static void cbrForceYT(void) {
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.20.95 init - carplay-cast scale-fit (phone-landscape + content scale)";
+        const char msg[] = "[CBR] v3.20.94 init - contentsScale fit (non-destructive)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3415,7 +3385,7 @@ static void cbrForceYT(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.20.95 init - carplay-cast scale-fit (phone-landscape + content scale)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.20.94 init - contentsScale fit (non-destructive)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
