@@ -2350,6 +2350,44 @@ static void cbrSBSilentActivate(void) {
         if (!scn) return;
         SEL upd = sel_registerName("updateSettingsWithBlock:");
         if (![scn respondsToSelector:upd]) return;
+        // v3.25.7 PROBE: capture scene + window state BEFORE each drive, so a good-open log can be
+        // diffed against a bad-open log. The re-drive holds whatever state exists at open, so the
+        // START state at the first drives is what decides upright vs sideways. Fully additive.
+        static int _drv = 0; _drv++;
+        @try {
+            struct timespec _ts; clock_gettime(CLOCK_MONOTONIC, &_ts);
+            double _t = _ts.tv_sec + _ts.tv_nsec/1e9;
+            id st = [scn respondsToSelector:sel_registerName("settings")] ? ((id(*)(id,SEL))objc_msgSend)(scn, sel_registerName("settings")) : nil;
+            long sIfo = (st && [st respondsToSelector:sel_registerName("interfaceOrientation")]) ? ((long(*)(id,SEL))objc_msgSend)(st, sel_registerName("interfaceOrientation")) : -99;
+            int sFg  = (st && [st respondsToSelector:sel_registerName("isForeground")]) ? ((BOOL(*)(id,SEL))objc_msgSend)(st, sel_registerName("isForeground")) : -1;
+            int sDe  = (st && [st respondsToSelector:sel_registerName("isDeactivated")]) ? ((BOOL(*)(id,SEL))objc_msgSend)(st, sel_registerName("isDeactivated")) : -1;
+            int sOc  = (st && [st respondsToSelector:sel_registerName("isOccluded")]) ? ((BOOL(*)(id,SEL))objc_msgSend)(st, sel_registerName("isOccluded")) : -1;
+            unsigned long sDr = (st && [st respondsToSelector:sel_registerName("deactivationReasons")]) ? ((unsigned long(*)(id,SEL))objc_msgSend)(st, sel_registerName("deactivationReasons")) : 0;
+            CGRect sFrame = (st && [st respondsToSelector:sel_registerName("frame")]) ? ((CGRect(*)(id,SEL))objc_msgSend)(st, sel_registerName("frame")) : CGRectZero;
+            CGRect rwB = CGRectZero;
+            if (gCBRRootWindow) rwB = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds"));
+            char ytLine[220]; ytLine[0]=0;
+            @try {
+                id dvc = gCBRAppVC ? getIvar(gCBRAppVC, "_deviceAppViewController") : nil;
+                id sv  = dvc ? getIvar(dvc, "_sceneView") : nil;
+                if (sv) {
+                    CGRect svb = ((CGRect(*)(id,SEL))objc_msgSend)(sv, sel_registerName("bounds"));
+                    snprintf(ytLine, sizeof(ytLine), "sceneView=%s %.0fx%.0f", object_getClassName(sv), svb.size.width, svb.size.height);
+                } else {
+                    snprintf(ytLine, sizeof(ytLine), "sceneView=nil (appVC=%d dvc=%d)", gCBRAppVC?1:0, dvc?1:0);
+                }
+            } @catch(...) { snprintf(ytLine, sizeof(ytLine), "yt-probe-threw"); }
+            int pfd = open("/var/mobile/CBR_drive.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+            if (pfd >= 0) {
+                char _pb[640];
+                int n = snprintf(_pb, sizeof(_pb),
+                    "DRV#%d t=%.2f | SCENE ifo=%ld fg=%d deact=%d occ=%d dr=%lu frame=%.0fx%.0f | carWin=%.0fx%.0f | %s\n",
+                    _drv, _t, sIfo, sFg, sDe, sOc, sDr, sFrame.size.width, sFrame.size.height,
+                    rwB.size.width, rwB.size.height, ytLine);
+                if (n > 0) write(pfd, _pb, (size_t)n);
+                close(pfd);
+            }
+        } @catch(...) {}
         void (^b)(id) = ^(id ms){
             SEL s;
             s=sel_registerName("setForeground:");          if([ms respondsToSelector:s]) ((void(*)(id,SEL,BOOL))objc_msgSend)(ms,s,YES);
@@ -2385,6 +2423,8 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     // cbrSBProbeSceneHandle(bid);      // diagnostic only - off hot path
     id _cbrHandle = cbrSBCreateSceneHandle(bid);
     cbrSBHostScene(bid, _cbrHandle);
+    // v3.25.7: wipe the drive log at host time so EACH open is a clean, self-contained capture.
+    unlink("/var/mobile/CBR_drive.txt");
     for (int _i=0; _i<4; _i++) { double _d = 1.5 + _i*1.5;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(_d*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrSBSilentActivate(); }); }
     // cbrSBReassignToCarPlay(bid);     // PATH-A - caused the load runaway - REMOVED
