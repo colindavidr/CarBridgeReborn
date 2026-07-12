@@ -3048,6 +3048,21 @@ static void cbrKLLog(const char *fmt, ...) {
                         }
                     }
                 } @catch(...) {}
+                // v3.26.2: ORIENTATION correction - ASYNC ONLY. Modifying the orientation setting
+                // INLINE here traps in FBSSettings _setValue:forSetting: during the launch commit
+                // (safe mode). Detect ifo!=3 drift and correct it async on the LIVE scene (off this
+                // transaction) via the drive that already works, debounced to avoid a flood.
+                @try {
+                    SEL _gio = sel_registerName("interfaceOrientation");
+                    if ([arg1 respondsToSelector:_gio]) {
+                        NSInteger _io = ((NSInteger(*)(id,SEL))objc_msgSend)(arg1, _gio);
+                        if (_io != 3) {
+                            cbrKLLog("[orient] ifo=%ld drift -> async re-drive\n", (long)_io);
+                            static CFAbsoluteTime _lastOr = 0; CFAbsoluteTime _now = CFAbsoluteTimeGetCurrent();
+                            if (_now - _lastOr > 0.25) { _lastOr = _now; dispatch_async(dispatch_get_main_queue(), ^{ cbrSBSilentActivate(); }); }
+                        }
+                    }
+                } @catch(...) {}
                 // v3.26.1: ORIENTATION GUARD. The frame guard holds 430x932 on every pass, but the
                 // interfaceOrientation is only set by the ~1/sec drive - a pass update that flips it to
                 // LandscapeLeft between drives isn't corrected in time = the occasional 90-left. Re-assert
@@ -3585,7 +3600,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.26.1 init - v77 baseline + PORTRAIT window pin (upright dash)";
+        const char msg[] = "[CBR] v3.26.2 init - v77 baseline + PORTRAIT window pin (upright dash)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3607,7 +3622,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.26.1 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.26.2 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
