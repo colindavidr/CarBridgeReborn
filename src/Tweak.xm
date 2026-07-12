@@ -1434,12 +1434,17 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                                     // space (e.g. 240x400) but the physical car screen is landscape, so the
                                                     // app must render at the SWAPPED size (400x240) to fill it instead of a
                                                     // portrait strip (screenshot showed correct content but portrait-shaped).
-                                                    CGFloat _lw = _wb.size.width, _lh = _wb.size.height;
-                                                    if (_lh > _lw) { CGFloat _t=_lw; _lw=_lh; _lh=_t; }  // ensure landscape (w>h)
                                                     SEL _sf = sel_registerName("setFrame:");
-                                                    if ([mutableSettings respondsToSelector:_sf]) {
-                                                        ((void(*)(id,SEL,CGRect))objc_msgSend)(mutableSettings, _sf, CGRectMake(0,0,_lw,_lh));
-                                                        CHF("[FIX-GEOM] settings.frame set LANDSCAPE %.0fx%.0f (from car %.0fx%.0f)\n", _lw, _lh, _wb.size.width, _wb.size.height);
+                                                    // v3.26.5: BORN-CORRECT. Set the PHONE-PORTRAIT canvas at CREATION (derived from the
+                                                    // live screen, no fallback), not car-landscape, so the app is never born sideways.
+                                                    CGFloat _ppw=0,_pph=0;
+                                                    @try { id _ms=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("mainScreen"));
+                                                        if(_ms){ CGRect _mb=((CGRect(*)(id,SEL))objc_msgSend)(_ms,sel_registerName("bounds"));
+                                                            _ppw=_mb.size.width<_mb.size.height?_mb.size.width:_mb.size.height;
+                                                            _pph=_mb.size.width<_mb.size.height?_mb.size.height:_mb.size.width; } } @catch(...) {}
+                                                    if ([mutableSettings respondsToSelector:_sf] && _ppw>0) {
+                                                        ((void(*)(id,SEL,CGRect))objc_msgSend)(mutableSettings, _sf, CGRectMake(0,0,_ppw,_pph));
+                                                        CHF("[FIX-GEOM] settings.frame set PHONE-PORTRAIT %.0fx%.0f (car %.0fx%.0f)\n", _ppw, _pph, _wb.size.width, _wb.size.height);
                                                     }
                                                 }
                                             } @catch(...) { CH("[FIX-GEOM] frame sync threw\n"); }
@@ -3615,7 +3620,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.26.4 init - v77 baseline + PORTRAIT window pin (upright dash)";
+        const char msg[] = "[CBR] v3.26.5 init - v77 baseline + PORTRAIT window pin (upright dash)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3637,7 +3642,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.26.4 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.26.5 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
