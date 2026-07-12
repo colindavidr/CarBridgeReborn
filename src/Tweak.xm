@@ -2343,8 +2343,22 @@ static void cbrSBProbeTxnCtx(const char *bid_cstr) {
     if(fd>=0) close(fd);
 }
 
+static CGFloat gCBRPhoneW = 0, gCBRPhoneH = 0;   // phone PORTRAIT canvas - derived from the live screen
+static void cbrEnsurePhoneSize(void) {
+    if (gCBRPhoneW > 0) return;
+    @try {
+        id ms = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
+        if (!ms) return;
+        CGRect b = ((CGRect(*)(id,SEL))objc_msgSend)(ms, sel_registerName("bounds"));
+        CGFloat w = b.size.width, h = b.size.height;
+        if (w <= 0 || h <= 0) return;
+        gCBRPhoneW = (w < h) ? w : h;
+        gCBRPhoneH = (w < h) ? h : w;
+    } @catch(...) {}
+}
 static void cbrSBSilentActivate(void) {
     @try {
+        cbrEnsurePhoneSize();
         if (!gCBRSceneHandle) return;
         id scn = ((id(*)(id,SEL))objc_msgSend)(gCBRSceneHandle, sel_registerName("sceneIfExists"));
         if (!scn) return;
@@ -2381,9 +2395,9 @@ static void cbrSBSilentActivate(void) {
             if (pfd >= 0) {
                 char _pb[640];
                 int n = snprintf(_pb, sizeof(_pb),
-                    "DRV#%d t=%.2f | SCENE ifo=%ld fg=%d deact=%d occ=%d dr=%lu frame=%.0fx%.0f | carWin=%.0fx%.0f | %s\n",
+                    "DRV#%d t=%.2f | SCENE ifo=%ld fg=%d deact=%d occ=%d dr=%lu frame=%.0fx%.0f | carWin=%.0fx%.0f phone=%.0fx%.0f | %s\n",
                     _drv, _t, sIfo, sFg, sDe, sOc, sDr, sFrame.size.width, sFrame.size.height,
-                    rwB.size.width, rwB.size.height, ytLine);
+                    rwB.size.width, rwB.size.height, gCBRPhoneW, gCBRPhoneH, ytLine);
                 if (n > 0) write(pfd, _pb, (size_t)n);
                 close(pfd);
             }
@@ -2400,7 +2414,7 @@ static void cbrSBSilentActivate(void) {
             // v3.26.0: THE FIX. GOOD (upright+stretched) frame=430x932 (phone portrait);
             // BAD (sideways) frame=472x281 (car landscape). All else identical. Drive the phone frame.
             s=sel_registerName("setFrame:");
-            if([ms respondsToSelector:s]) ((void(*)(id,SEL,CGRect))objc_msgSend)(ms,s,CGRectMake(0,0,430,932));
+            if([ms respondsToSelector:s] && gCBRPhoneW>0) ((void(*)(id,SEL,CGRect))objc_msgSend)(ms,s,CGRectMake(0,0,gCBRPhoneW,gCBRPhoneH));
         };
         ((void(*)(id,SEL,id))objc_msgSend)(scn, upd, b);
         int fd=open("/var/mobile/CBR_silent.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
@@ -3042,9 +3056,10 @@ static void cbrKLLog(const char *fmt, ...) {
                     SEL _sf = sel_registerName("setFrame:");
                     if ([arg1 respondsToSelector:_gf] && [arg1 respondsToSelector:_sf]) {
                         CGRect _cf = ((CGRect(*)(id,SEL))objc_msgSend)(arg1, _gf);
-                        if (fabs(_cf.size.width - 430.0) > 1.0 || fabs(_cf.size.height - 932.0) > 1.0) {
-                            cbrKLLog("[frame] rewriting %.0fx%.0f -> 430x932\n", _cf.size.width, _cf.size.height);
-                            ((void(*)(id,SEL,CGRect))objc_msgSend)(arg1, _sf, CGRectMake(0,0,430,932));
+                        cbrEnsurePhoneSize();
+                        if (gCBRPhoneW>0 && (fabs(_cf.size.width - gCBRPhoneW) > 1.0 || fabs(_cf.size.height - gCBRPhoneH) > 1.0)) {
+                            cbrKLLog("[frame] rewriting %.0fx%.0f -> %.0fx%.0f\n", _cf.size.width, _cf.size.height, gCBRPhoneW, gCBRPhoneH);
+                            ((void(*)(id,SEL,CGRect))objc_msgSend)(arg1, _sf, CGRectMake(0,0,gCBRPhoneW,gCBRPhoneH));
                         }
                     }
                 } @catch(...) {}
@@ -3600,7 +3615,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
           cbrLogHook(hf, "DBApplicationLaunchInfo", '+', "launchInfoForApplication:withActivationSettings:");
           cbrLogHook(hf, "DBIconView", '-', "didMoveToWindow");
           if (hf >= 0) close(hf); }
-        const char msg[] = "[CBR] v3.26.2 init - v77 baseline + PORTRAIT window pin (upright dash)";
+        const char msg[] = "[CBR] v3.26.4 init - v77 baseline + PORTRAIT window pin (upright dash)";
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
@@ -3622,7 +3637,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
-        if(_sf>=0){const char*m="[CBR-SB] v3.26.2 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
+        if(_sf>=0){const char*m="[CBR-SB] v3.26.4 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
