@@ -898,15 +898,27 @@ static void cbrSBRenderWindow(void) {
             id all = conns ? ((id(*)(id,SEL))objc_msgSend)(conns, sel_registerName("allObjects")) : nil;
             NSUInteger cnt = all ? [all count] : 0;
             char cb0[96]; snprintf(cb0,sizeof(cb0),"[CBR-SB] connectedScenes: %lu",(unsigned long)cnt); cbrSBLog(cb0);
+            // v3.30.0: TWO car UIWindowScenes exist (ifo=0 landscape, ifo=1 portrait) - proven by the
+            // CarPlay-side probe. Old code took the FIRST car scene, but array order is unstable, so
+            // the host window sometimes attached to the PORTRAIT scene -> app rendered sideways (the
+            // coin flip). Now prefer a car scene whose ifo != 1 (portrait); fall back to first.
+            id carSceneLandscape = nil, carSceneFirst = nil;
             for (NSUInteger i = 0; i < cnt; i++) {
                 id s = [all objectAtIndex:i];
                 if (![s isKindOfClass:objc_getClass("UIWindowScene")]) continue;
                 id scr = cb(s, "screen");
                 BOOL isCar = scr ? ((BOOL(*)(id,SEL))objc_msgSend)(scr, sel_registerName("_isCarScreen")) : NO;
-                char sl[160]; snprintf(sl,sizeof(sl),"[CBR-SB]   scene[%lu] %s car=%d",
-                    (unsigned long)i, class_getName(object_getClass(s)), isCar); cbrSBLog(sl);
-                if (isCar) { carScene = s; break; }
+                long sio = ((long(*)(id,SEL))objc_msgSend)(s, sel_registerName("interfaceOrientation"));
+                char sl[180]; snprintf(sl,sizeof(sl),"[CBR-SB]   scene[%lu] %s car=%d ifo=%ld",
+                    (unsigned long)i, class_getName(object_getClass(s)), isCar, sio); cbrSBLog(sl);
+                if (isCar) {
+                    if (!carSceneFirst) carSceneFirst = s;
+                    if (!carSceneLandscape && sio != 1) carSceneLandscape = s;
+                }
             }
+            carScene = carSceneLandscape ? carSceneLandscape : carSceneFirst;
+            { char pk[120]; snprintf(pk,sizeof(pk),"[CBR-SB] PICKED car scene: %s",
+                carScene ? (carSceneLandscape ? "LANDSCAPE (ifo!=1)" : "first-fallback") : "none"); cbrSBLog(pk); }
         } @catch (NSException *e) {
             char eb[200]; snprintf(eb,sizeof(eb),"[CBR-SB] scene search EXC: %s",[[e reason] UTF8String]?:"?"); cbrSBLog(eb);
         }
