@@ -3468,9 +3468,20 @@ static void cbrProbeTick(void) {
                 CGRect wb = ((CGRect(*)(id,SEL))objc_msgSend)(win, sel_registerName("bounds"));
                 id rvc = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("rootViewController"));
                 long vio = rvc ? ((long(*)(id,SEL))objc_msgSend)(rvc, sel_registerName("interfaceOrientation")) : -1;
-                [out appendFormat:@"  win[%lu] %s bounds=%.0fx%.0f rootVC=%s vcIfo=%ld\n",
+                // v3.27.2: log WINDOW + rootVC-view TRANSFORM for EVERY window (not just YTMainWindow).
+                // Amazon renders upright, all others sideways, but we've only ever logged YTMainWindow -
+                // so we've never seen what Amazon does differently. supportedInterfaceOrientations is
+                // proven dead (swizzle set supp=0x18, vcIfo stayed 1). The discriminator must be the
+                // transform/geometry: a compositor rotation of a portrait canvas shows as 90deg here.
+                CGAffineTransform _wtf = CGAffineTransformIdentity, _vtf = CGAffineTransformIdentity;
+                @try { id _wl = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("layer"));
+                    if (_wl) _wtf = ((CGAffineTransform(*)(id,SEL))objc_msgSend)(_wl, sel_registerName("affineTransform")); } @catch(...) {}
+                @try { if (rvc) { id _v = ((id(*)(id,SEL))objc_msgSend)(rvc, sel_registerName("view"));
+                    if (_v) _vtf = ((CGAffineTransform(*)(id,SEL))objc_msgSend)(_v, sel_registerName("transform")); } } @catch(...) {}
+                [out appendFormat:@"  win[%lu] %s bounds=%.0fx%.0f rootVC=%s vcIfo=%ld wxf=[%.2f %.2f %.2f %.2f] vxf=[%.2f %.2f %.2f %.2f]\n",
                     (unsigned long)w, object_getClassName(win), wb.size.width, wb.size.height,
-                    rvc ? object_getClassName(rvc) : "nil", vio];
+                    rvc ? object_getClassName(rvc) : "nil", vio,
+                    _wtf.a,_wtf.b,_wtf.c,_wtf.d, _vtf.a,_vtf.b,_vtf.c,_vtf.d];
                 if (rvc && strcmp(object_getClassName(win), "YTMainWindow") == 0 && vio != gCBRLastVcIfo) {
                     NSUInteger rSupp = ((NSUInteger(*)(id,SEL))objc_msgSend)(rvc, sel_registerName("supportedInterfaceOrientations"));
                     SEL _priv = sel_registerName("__supportedInterfaceOrientations");
