@@ -3538,7 +3538,15 @@ static void cbrProbeTick(void) {
             long act = ((long(*)(id,SEL))objc_msgSend)(scene, sel_registerName("activationState"));
             const char *actn = (act==0?"FG-ACTIVE":(act==1?"FG-INACTIVE":(act==2?"BACKGROUND":"UNATTACHED")));
             [out appendFormat:@"scene[%lu] %s car=%d ifo=%ld act=%ld(%s)\n", (unsigned long)i, object_getClassName(scene), isCar, io, act, actn];
-            if (act != gCBRLastAct) { cbrEvent("scene activationState %ld -> %ld (%s)", gCBRLastAct, act, actn); gCBRLastAct = act; }
+            if (act != gCBRLastAct) {
+                cbrEvent("scene activationState %ld -> %ld (%s)", gCBRLastAct, act, actn);
+                // v3.31.0 TAP CAPTURE: the manual phone-tap fixes sideways->upright 100%, and the tap
+                // IS the scene going foreground-ACTIVE. We've only ever compared steady states (found
+                // identical); dump the full window/layer tree the instant activation changes so a
+                // sideways->active dump can be diffed against pre-active to see what the tap mutates.
+                @try { char _tag[64]; snprintf(_tag,sizeof(_tag),"ACT-TRANSITION-%ld-to-%ld",gCBRLastAct,act); cbrYTGeomProbe(_tag); } @catch(...) {}
+                gCBRLastAct = act;
+            }
             id wins = ((id(*)(id,SEL))objc_msgSend)(scene, sel_registerName("windows"));
             NSUInteger wc = wins ? ((NSUInteger(*)(id,SEL))objc_msgSend)(wins, sel_registerName("count")) : 0;
             for (NSUInteger w = 0; w < wc; w++) {
