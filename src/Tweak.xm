@@ -1443,8 +1443,12 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                                             _ppw=_mb.size.width<_mb.size.height?_mb.size.width:_mb.size.height;
                                                             _pph=_mb.size.width<_mb.size.height?_mb.size.height:_mb.size.width; } } @catch(...) {}
                                                     if ([mutableSettings respondsToSelector:_sf] && _ppw>0) {
-                                                        ((void(*)(id,SEL,CGRect))objc_msgSend)(mutableSettings, _sf, CGRectMake(0,0,_ppw,_pph));
-                                                        CHF("[FIX-GEOM] settings.frame set PHONE-PORTRAIT %.0fx%.0f (car %.0fx%.0f)\n", _ppw, _pph, _wb.size.width, _wb.size.height);
+                                                        // v3.28.0: LANDSCAPE canvas. A portrait canvas must be rotated 90deg to fit the
+                                                        // landscape car window -> sideways, unless the app rotates itself (Amazon does;
+                                                        // YouTube/YT-TV are portrait-locked and don't). Landscape matches the car aspect.
+                                                        // Capture proof: window 932x430 = UPRIGHT, 430x932 = SIDEWAYS (identity xforms).
+                                                        ((void(*)(id,SEL,CGRect))objc_msgSend)(mutableSettings, _sf, CGRectMake(0,0,_pph,_ppw));
+                                                        CHF("[FIX-GEOM] settings.frame set PHONE-LANDSCAPE %.0fx%.0f (car %.0fx%.0f)\n", _pph, _ppw, _wb.size.width, _wb.size.height);
                                                     }
                                                 }
                                             } @catch(...) { CH("[FIX-GEOM] frame sync threw\n"); }
@@ -3232,9 +3236,9 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
                 id win=((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins,sel_registerName("objectAtIndex:"),w);
                 SEL _sro=sel_registerName("_setRotatableViewOrientation:duration:force:");
                 if ([win respondsToSelector:_sro]) ((void(*)(id,SEL,int,float,int))objc_msgSend)(win,_sro,3,0.0f,1);
-                if (carScene) {
-                    // v3.24.0: PORTRAIT (lh x lw = 281x472), NOT landscape. Portrait is what makes
-                    // the dash come out upright - proven by the event log correlation.
+                // v3.28.0: app-side PORTRAIT window pin REMOVED - it forced the sideways shape and
+                // would directly undo the new landscape canvas.
+                if (0) {
                     ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setBounds:"),CGRectMake(0,0,lh,lw));
                     ((void(*)(id,SEL,CGRect))objc_msgSend)(win,sel_registerName("setFrame:"),CGRectMake(0,0,lh,lw));
                 }
@@ -3560,20 +3564,13 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
     %orig;
 }
 - (void)setBounds:(CGRect)bounds {
-    if (bounds.size.width > bounds.size.height && strstr(object_getClassName(self), "YTMainWindow")) {
-        CGFloat mn=0, mx=0;
-        if (cbrCarSizeForWindow(self, &mn, &mx)) {
-            static int _lk=0; if(_lk++ < 12) cbrEvent("LOCK setBounds portrait: %.0fx%.0f -> %.0fx%.0f", bounds.size.width, bounds.size.height, mn, mx);
-            bounds.size.width = mn; bounds.size.height = mx;
-        }
-    }
+    // v3.28.0: PORTRAIT LOCK REMOVED - it forced YTMainWindow to portrait (the sideways shape)
+    // whenever the app went landscape. Keyed on YTMainWindow, used by BOTH YouTube and YouTube TV,
+    // while Amazon/Reddit have other window classes - exactly the observed per-app pattern.
     %orig(bounds);
 }
 - (void)setFrame:(CGRect)frame {
-    if (frame.size.width > frame.size.height && strstr(object_getClassName(self), "YTMainWindow")) {
-        CGFloat mn=0, mx=0;
-        if (cbrCarSizeForWindow(self, &mn, &mx)) { frame.size.width = mn; frame.size.height = mx; }
-    }
+    // v3.28.0: portrait lock removed (see setBounds:).
     %orig(frame);
 }
 %end
