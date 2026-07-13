@@ -3385,7 +3385,14 @@ static void cbrSwizzleLandscape(Class cls) {
     @try {
         if (!cls) return;
         const char *cn = class_getName(cls);
-        if (strcmp(cn, "YTAppViewControllerImpl") == 0) return;
+        // v3.27.1: the YTAppViewControllerImpl EXCLUSION IS THE BUG. It overrides
+        // supportedInterfaceOrientations and hard-returns 0x2 (portrait). Probe caught it:
+        //     rvc=YTAppViewControllerImpl supp=0x2 __supp=0x18
+        // __supp=0x18 = our %hook UIViewController works; supp=0x2 = the SUBCLASS override
+        // bypasses it (a %hook on UIViewController never sees a subclass's own impl).
+        // Portrait layout on the phone canvas -> compositor lands it SIDEWAYS; landscape -> UPRIGHT.
+        // This is why YouTube + YouTube TV (both Google, same VC class) are sideways while Amazon
+        // (no override -> our hook applies) is always upright. Swizzle it like every other class.
         static NSMutableSet *done = nil;
         if (!done) done = [[NSMutableSet alloc] init];
         NSString *key = [NSString stringWithUTF8String:cn];
