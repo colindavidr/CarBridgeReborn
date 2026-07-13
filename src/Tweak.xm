@@ -1466,16 +1466,20 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                                     SEL _angM = sel_registerName("setHostReferenceAngleMode:");
                                                     SEL _sbi  = sel_registerName("setScreenBoundsIgnoresSceneOrientation:");
                                                     SEL _ang  = sel_registerName("setAngleFromHostReferenceUprightDirection:");
-                                                    static int _cal = 0;
-                                                    double _cands[4] = { 0.0, 1.5707963267948966, -1.5707963267948966, 3.141592653589793 };
-                                                    double _use = _cands[_cal % 4];
+                                                    // v3.27.0 THE ROTATION BUG. Leftover CALIBRATION loop from v3.20.61: it cycled
+                                                    // setAngleFromHostReferenceUprightDirection: through idx0=0deg idx1=+90deg
+                                                    // idx2=-90deg idx3=180deg, advancing ONE STEP PER APP OPEN via a static counter,
+                                                    // and was never finalized. That IS the "random" rotation - idx1 (+pi/2) is the
+                                                    // 90-degrees-left render. It also explains why a RESPRING always fixed it: respring
+                                                    // restarts SpringBoard, the static resets to 0, first open gets angle 0 (upright).
+                                                    // FIX: pin the angle to 0 (upright) and stop cycling.
+                                                    double _use = 0.0;
                                                     if ([mutableSettings respondsToSelector:_sbi]) ((void(*)(id,SEL,BOOL))objc_msgSend)(mutableSettings, _sbi, YES);
                                                     if ([mutableSettings respondsToSelector:_angM]) ((void(*)(id,SEL,NSInteger))objc_msgSend)(mutableSettings, _angM, (NSInteger)1);
                                                     SEL _crs = _ang;
                                                     if ([mutableSettings respondsToSelector:_crs]) {
                                                         ((void(*)(id,SEL,double))objc_msgSend)(mutableSettings, _ang, _use);
-                                                        CHF("[FIX-CRS] iOS17 angle CAL idx=%d angle=%.4f ignoreBounds=1 APPLIED\n", _cal%4, _use);
-                                                        _cal++;
+                                                        CHF("[FIX-CRS] iOS17 angle PINNED %.4f (upright, no calibration cycle)\n", _use);
                                                     } else {
                                                         SEL _crs2 = sel_registerName("setContentReferenceSize:");
                                                         if ([mutableSettings respondsToSelector:_crs2]) { ((void(*)(id,SEL,CGSize))objc_msgSend)(mutableSettings, _crs2, CGSizeMake(_clw,_clh)); CH("[FIX-CRS] fallback 1-arg setContentReferenceSize applied\n"); }
