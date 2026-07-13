@@ -2381,6 +2381,78 @@ static void cbrEnsurePhoneSize(void) {
         gCBRPhoneH = (w < h) ? h : w;
     } @catch(...) {}
 }
+// v3.35.0 THE CARPLAY-CAST MECHANISM. CBR tried to make the CarPlay COMPOSITOR produce the right
+// rotation via scene geometry (frame/bounds/orientation/angle/activation) - seven levers, all dead.
+// carplay-cast renders upright 100% of the time and never asks the compositor to rotate anything:
+//   1. the APP rotates itself to landscape (_setRotatableViewOrientation on the key window, force=1)
+//   2. SpringBoard SCALES the content view onto the car display with a plain affine scale:
+//        content = _sceneContentContainerView of the app's _sceneView
+//        mainSz  = [UIScreen.main boundsForOrientation:3]     (932x430)
+//        scale   = carSize / mainSz                            (400/932, 240/430)
+//        [content setTransform:CGAffineTransformMakeScale(w,h)]
+// No compositor rotation is requested at all - which is why it cannot come out sideways.
+static void cbrApplyCarplayCastScale(void) {
+    @try {
+        if (!gCBRAppVC || !gCBRRootWindow) return;
+        id dvc = getIvar(gCBRAppVC, "_deviceAppViewController");
+        id sv  = dvc ? getIvar(dvc, "_sceneView") : nil;
+        if (!sv) return;
+        // v3.35.1: the ivar is NOT always _sceneContentContainerView - CBR's own render path already
+        // falls back to _contentContainerView. v3.35.0 had no fallback, so getIvar returned nil and
+        // the scale bailed silently (zero CPC-SCALE lines). Our scene view is
+        // SBDeviceApplicationSceneView (carplay-cast asserts SBSceneView) so names differ.
+        id content = getIvar(sv, "_sceneContentContainerView");
+        if (!content) content = getIvar(sv, "_contentContainerView");
+        if (!content) content = getIvar(sv, "_contentView");
+        if (!content) {
+            int _f = open("/var/mobile/CBR_sb_host.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+            if (_f >= 0) { char _b[200]; int _n = snprintf(_b,sizeof(_b),
+                "[CPC-SCALE] NO content ivar on %s - dumping ivars\n", object_getClassName(sv));
+                if(_n>0) write(_f,_b,(size_t)_n);
+                unsigned int _c=0; Ivar *_iv = class_copyIvarList(object_getClass(sv), &_c);
+                for (unsigned int _i=0;_i<_c;_i++){ int _m=snprintf(_b,sizeof(_b),"    ivar: %s\n", ivar_getName(_iv[_i])); if(_m>0) write(_f,_b,(size_t)_m); }
+                if(_iv) free(_iv);
+                close(_f); }
+            return;
+        }
+        CGRect carB = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds"));
+        if (carB.size.width <= 0 || carB.size.height <= 0) return;
+        id mainScr = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
+        if (!mainScr) return;
+        CGSize msz;
+        SEL bfo = sel_registerName("boundsForOrientation:");
+        if ([mainScr respondsToSelector:bfo]) {
+            msz = ((CGRect(*)(id,SEL,int))objc_msgSend)(mainScr, bfo, 3).size;
+        } else {
+            CGRect mb = ((CGRect(*)(id,SEL))objc_msgSend)(mainScr, sel_registerName("bounds"));
+            msz.width  = mb.size.width > mb.size.height ? mb.size.width  : mb.size.height;
+            msz.height = mb.size.width > mb.size.height ? mb.size.height : mb.size.width;
+        }
+        if (msz.width <= 0 || msz.height <= 0) return;
+        CGFloat wScale = carB.size.width  / msz.width;
+        CGFloat hScale = carB.size.height / msz.height;
+        CGAffineTransform cur = ((CGAffineTransform(*)(id,SEL))objc_msgSend)(content, sel_registerName("transform"));
+        if (fabs(cur.a - wScale) > 0.001 || fabs(cur.d - hScale) > 0.001) {
+            ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(content, sel_registerName("setTransform:"),
+                CGAffineTransformMakeScale(wScale, hScale));
+            static int _sc=0;
+            if (_sc++ < 12) {
+                // CHF() needs a local cfd that only exists in the host block - write directly.
+                int _f = open("/var/mobile/CBR_sb_host.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+                if (_f >= 0) {
+                    char _b[300];
+                    int _n = snprintf(_b, sizeof(_b),
+                        "[CPC-SCALE] content %s scaled %.3f x %.3f (car %.0fx%.0f / main-landscape %.0fx%.0f)\n",
+                        object_getClassName(content), wScale, hScale,
+                        carB.size.width, carB.size.height, msz.width, msz.height);
+                    if (_n > 0) write(_f, _b, (size_t)_n);
+                    close(_f);
+                }
+            }
+        }
+    } @catch(...) {}
+}
+
 static void cbrSBSilentActivate(void) {
     @try {
         cbrEnsurePhoneSize();
@@ -2447,6 +2519,7 @@ static void cbrSBSilentActivate(void) {
             if([ms respondsToSelector:s] && gCBRPhoneW>0) ((void(*)(id,SEL,CGRect))objc_msgSend)(ms,s,CGRectMake(0,0,gCBRPhoneW,gCBRPhoneH));
         };
         ((void(*)(id,SEL,id))objc_msgSend)(scn, upd, b);
+        cbrApplyCarplayCastScale();   // v3.35.0
         int fd=open("/var/mobile/CBR_silent.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
         if(fd>=0){const char*m="[silent] foreground-activate delivered\n";write(fd,m,strlen(m));close(fd);}
     } @catch(...) {}
@@ -3582,6 +3655,35 @@ static void cbrProbeTick(void) {
                 if (rvc && gCBROrientOverride > 0 && vio != 3) {
                     cbrSwizzleLandscape(object_getClass(rvc));
                     cbrForceLandscapeGeometry(win);
+                    // v3.35.0: ACTIVELY drive rotation like carplay-cast (it CALLS this on the key
+                    // window, force=1). CBR only HOOKED the selector - clamping IF the app called it.
+                    // On a reused/inactive scene the app never calls it, so the hook had nothing to
+                    // clamp (same failure as the setBounds: lock). Call it ourselves.
+                    @try {
+                        id keyWin = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+                        keyWin = keyWin ? ((id(*)(id,SEL))objc_msgSend)(keyWin, sel_registerName("keyWindow")) : nil;
+                        if (!keyWin) keyWin = win;
+                        SEL _sro = sel_registerName("_setRotatableViewOrientation:duration:force:");
+                        if ([keyWin respondsToSelector:_sro]) {
+                            static int _dr=0; if(_dr++ < 12) cbrEvent("ACTIVE-SRO _setRotatableViewOrientation:3 force:1 on %s", object_getClassName(keyWin));
+                            ((void(*)(id,SEL,int,float,int))objc_msgSend)(keyWin, _sro, 3, 0.0f, 1);
+                        }
+                    } @catch(...) {}
+                }
+                // v3.35.1: ACTIVE-SRO, UNGATED. v3.35.0 nested the active _setRotatableViewOrientation
+                // call inside "if (vio != 3)", but the probe reports vcIfo=3 on these boots so it never
+                // ran (zero ACTIVE-SRO lines). carplay-cast calls it unconditionally at host time.
+                if (gCBROrientOverride > 0 && strcmp(object_getClassName(win), "YTMainWindow") == 0) {
+                    @try {
+                        id _app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+                        id _kw = _app ? ((id(*)(id,SEL))objc_msgSend)(_app, sel_registerName("keyWindow")) : nil;
+                        if (!_kw) _kw = win;
+                        SEL _sro2 = sel_registerName("_setRotatableViewOrientation:duration:force:");
+                        if ([_kw respondsToSelector:_sro2]) {
+                            static int _as=0; if(_as++ < 12) cbrEvent("ACTIVE-SRO force:1 orient:3 on %s (vcIfo was %ld)", object_getClassName(_kw), vio);
+                            ((void(*)(id,SEL,int,float,int))objc_msgSend)(_kw, _sro2, 3, 0.0f, 1);
+                        }
+                    } @catch(...) {}
                 }
                 // v3.33.0 DIRECT ASSERT: reactive setBounds: lock never fired on sideways boots
                 // (reused/inactive scene never calls setBounds: with a portrait value). Assert the
