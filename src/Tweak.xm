@@ -3641,20 +3641,42 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
     // 430x932 (portrait, sideways) to 932x430 (landscape, upright) on a 932x430 io=3 screen. The
     // lever is YTMainWindow's SHAPE. v3.28.0 removed the old PORTRAIT lock; we actually need a
     // LANDSCAPE lock - force YTMainWindow landscape when it tries to go portrait, like the tap does.
-    if (bounds.size.height > bounds.size.width && strstr(object_getClassName(self), "YTMainWindow")) {
-        CGFloat mn=0, mx=0;
-        if (cbrCarSizeForWindow(self, &mn, &mx)) {
-            static int _ll=0; if(_ll++ < 12) cbrEvent("LANDSCAPE-LOCK setBounds: %.0fx%.0f -> %.0fx%.0f", bounds.size.width, bounds.size.height, mx, mn);
-            bounds.size.width = mx; bounds.size.height = mn;
-        }
+    // v3.32.1 GATE FIX: v3.32.0's lock used cbrCarSizeForWindow(), which bails unless the screen is
+    // <=520pt - but the hosted app's screen is 932x430 (max 932), so the gate ALWAYS failed and the
+    // lock never ran (same reason the old portrait lock never fired). Gate on gCBROrientOverride>0
+    // (set only while hosted) and derive the landscape size from the window's own scene screen.
+    if (gCBROrientOverride > 0 && bounds.size.height > bounds.size.width
+        && strstr(object_getClassName(self), "YTMainWindow")) {
+        @try {
+            id _ws = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("windowScene"));
+            id _sc = _ws ? ((id(*)(id,SEL))objc_msgSend)(_ws, sel_registerName("screen")) : nil;
+            if (_sc) {
+                CGRect _sb = ((CGRect(*)(id,SEL))objc_msgSend)(_sc, sel_registerName("bounds"));
+                CGFloat _mx = _sb.size.width > _sb.size.height ? _sb.size.width : _sb.size.height;
+                CGFloat _mn = _sb.size.width > _sb.size.height ? _sb.size.height : _sb.size.width;
+                if (_mx > 0) {
+                    static int _ll=0; if(_ll++ < 12) cbrEvent("LANDSCAPE-LOCK setBounds: %.0fx%.0f -> %.0fx%.0f (screen %.0fx%.0f)", bounds.size.width, bounds.size.height, _mx, _mn, _sb.size.width, _sb.size.height);
+                    bounds.size.width = _mx; bounds.size.height = _mn;
+                }
+            }
+        } @catch(...) {}
     }
     %orig(bounds);
 }
 - (void)setFrame:(CGRect)frame {
     // v3.32.0: landscape lock (see setBounds:).
-    if (frame.size.height > frame.size.width && strstr(object_getClassName(self), "YTMainWindow")) {
-        CGFloat mn=0, mx=0;
-        if (cbrCarSizeForWindow(self, &mn, &mx)) { frame.size.width = mx; frame.size.height = mn; }
+    if (gCBROrientOverride > 0 && frame.size.height > frame.size.width
+        && strstr(object_getClassName(self), "YTMainWindow")) {
+        @try {
+            id _ws = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("windowScene"));
+            id _sc = _ws ? ((id(*)(id,SEL))objc_msgSend)(_ws, sel_registerName("screen")) : nil;
+            if (_sc) {
+                CGRect _sb = ((CGRect(*)(id,SEL))objc_msgSend)(_sc, sel_registerName("bounds"));
+                CGFloat _mx = _sb.size.width > _sb.size.height ? _sb.size.width : _sb.size.height;
+                CGFloat _mn = _sb.size.width > _sb.size.height ? _sb.size.height : _sb.size.width;
+                if (_mx > 0) { frame.size.width = _mx; frame.size.height = _mn; }
+            }
+        } @catch(...) {}
     }
     %orig(frame);
 }
