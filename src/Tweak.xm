@@ -3575,6 +3575,25 @@ static void cbrProbeTick(void) {
                     cbrSwizzleLandscape(object_getClass(rvc));
                     cbrForceLandscapeGeometry(win);
                 }
+                // v3.33.0 DIRECT ASSERT: reactive setBounds: lock never fired on sideways boots
+                // (reused/inactive scene never calls setBounds: with a portrait value). Assert the
+                // landscape shape directly every tick - tap capture proved 932x430 = upright.
+                if (strcmp(object_getClassName(win), "YTMainWindow") == 0 && gCBROrientOverride > 0) {
+                    @try {
+                        id _ws = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("windowScene"));
+                        id _sc = _ws ? ((id(*)(id,SEL))objc_msgSend)(_ws, sel_registerName("screen")) : nil;
+                        if (_sc) {
+                            CGRect _sb = ((CGRect(*)(id,SEL))objc_msgSend)(_sc, sel_registerName("bounds"));
+                            CGFloat _mx = _sb.size.width > _sb.size.height ? _sb.size.width : _sb.size.height;
+                            CGFloat _mn = _sb.size.width > _sb.size.height ? _sb.size.height : _sb.size.width;
+                            if (_mx > 0 && (wb.size.height > wb.size.width || fabs(wb.size.width - _mx) > 1.0)) {
+                                static int _da=0; if(_da++ < 20) cbrEvent("DIRECT-ASSERT YTMainWindow %.0fx%.0f -> %.0fx%.0f (screen %.0fx%.0f)", wb.size.width, wb.size.height, _mx, _mn, _sb.size.width, _sb.size.height);
+                                ((void(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("setBounds:"), CGRectMake(0,0,_mx,_mn));
+                                ((void(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("setFrame:"),  CGRectMake(0,0,_mx,_mn));
+                            }
+                        }
+                    } @catch(...) {}
+                }
                 // v3.24.0: PERSISTENT PORTRAIT RE-PIN. YouTube reverts the window bounds, so the
                 // one-shot pin in cbrAppOrientCallback is not enough. Portrait (281x472) is the
                 // shape that yields an upright dash; landscape (472x281) yields sideways.
