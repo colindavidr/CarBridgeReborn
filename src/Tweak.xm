@@ -3166,21 +3166,11 @@ static void cbrKLLog(const char *fmt, ...) {
                         }
                     }
                 } @catch(...) {}
-                // v3.26.1: ORIENTATION GUARD. The frame guard holds 430x932 on every pass, but the
-                // interfaceOrientation is only set by the ~1/sec drive - a pass update that flips it to
-                // LandscapeLeft between drives isn't corrected in time = the occasional 90-left. Re-assert
-                // ifo=3 (LandscapeRight) on every pass too, so orientation is held like the frame.
-                @try {
-                    SEL _gio = sel_registerName("interfaceOrientation");
-                    SEL _sio = sel_registerName("setInterfaceOrientation:");
-                    if ([arg1 respondsToSelector:_gio] && [arg1 respondsToSelector:_sio]) {
-                        NSInteger _io = ((NSInteger(*)(id,SEL))objc_msgSend)(arg1, _gio);
-                        if (_io != 3) {
-                            cbrKLLog("[orient] rewriting ifo=%ld -> 3\n", (long)_io);
-                            ((void(*)(id,SEL,NSInteger))objc_msgSend)(arg1, _sio, (NSInteger)3);
-                        }
-                    }
-                } @catch(...) {}
+                // v3.32.0 CRASH FIX: this set interfaceOrientation INLINE on arg1 - the exact thing
+                // the v3.26.2 comment above warns against ("_setValue:forSetting: traps during the
+                // launch commit = safe mode"). Crash log confirms SpringBoard died there during
+                // YouTube TV launch. The async re-drive above already fixes orientation safely.
+                // Removed (redundant + the crash).
                 // v3.25.6: PERSISTENCE. Re-drive the LIVE scene (fresh block via cbrSBSilentActivate,
                 // the call that works at startup) after each pass, so the correct render is held for
                 // the whole session instead of only the first 6s. Async (no re-entry) + debounced.
@@ -3647,13 +3637,25 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
     %orig;
 }
 - (void)setBounds:(CGRect)bounds {
-    // v3.28.0: PORTRAIT LOCK REMOVED - it forced YTMainWindow to portrait (the sideways shape)
-    // whenever the app went landscape. Keyed on YTMainWindow, used by BOTH YouTube and YouTube TV,
-    // while Amazon/Reddit have other window classes - exactly the observed per-app pattern.
+    // v3.32.0 THE ROTATION FIX (proven by the tap capture): the manual tap flips YTMainWindow from
+    // 430x932 (portrait, sideways) to 932x430 (landscape, upright) on a 932x430 io=3 screen. The
+    // lever is YTMainWindow's SHAPE. v3.28.0 removed the old PORTRAIT lock; we actually need a
+    // LANDSCAPE lock - force YTMainWindow landscape when it tries to go portrait, like the tap does.
+    if (bounds.size.height > bounds.size.width && strstr(object_getClassName(self), "YTMainWindow")) {
+        CGFloat mn=0, mx=0;
+        if (cbrCarSizeForWindow(self, &mn, &mx)) {
+            static int _ll=0; if(_ll++ < 12) cbrEvent("LANDSCAPE-LOCK setBounds: %.0fx%.0f -> %.0fx%.0f", bounds.size.width, bounds.size.height, mx, mn);
+            bounds.size.width = mx; bounds.size.height = mn;
+        }
+    }
     %orig(bounds);
 }
 - (void)setFrame:(CGRect)frame {
-    // v3.28.0: portrait lock removed (see setBounds:).
+    // v3.32.0: landscape lock (see setBounds:).
+    if (frame.size.height > frame.size.width && strstr(object_getClassName(self), "YTMainWindow")) {
+        CGFloat mn=0, mx=0;
+        if (cbrCarSizeForWindow(self, &mn, &mx)) { frame.size.width = mx; frame.size.height = mn; }
+    }
     %orig(frame);
 }
 %end
