@@ -2665,6 +2665,69 @@ static void cbrCPProbeCarSceneGuts(void) {
     close(fd);
     CBLog("[CBR] car scene guts written to CBR_cp_scene_guts.txt");
 }
+// v3.29.0 CARPLAY-SIDE ROTATION PROBE. SpringBoard and the app show BYTE-IDENTICAL state on
+// upright vs sideways (canvas 932x430, window 932x430, vcIfo=3, identity xforms, angle 0.0), so
+// the rotation is decided in THIS process - never instrumented. Dump what the car scene ACTUALLY
+// has applied (effective angle/mode), not what we asked for. Repeats, so boots can be diffed.
+static void cbrCPRotationSchedule(void);
+static void cbrCPRotationTick(void) {
+    @try {
+        int fd = open("/var/mobile/CBR_cp_rotation.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+        if (fd < 0) return;
+        #define CPR(...) do{ char _b[420]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(_n>0) write(fd,_b,(size_t)_n);}while(0)
+        static int _t = 0; _t++;
+        id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+        id conns = app ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("connectedScenes")) : nil;
+        id all = conns ? ((id(*)(id,SEL))objc_msgSend)(conns, sel_registerName("allObjects")) : nil;
+        NSUInteger cnt = all ? ((NSUInteger(*)(id,SEL))objc_msgSend)(all, sel_registerName("count")) : 0;
+        for (NSUInteger i = 0; i < cnt; i++) {
+            id sc = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(all, sel_registerName("objectAtIndex:"), i);
+            if (!sc) continue;
+            id scr = ((id(*)(id,SEL))objc_msgSend)(sc, sel_registerName("screen"));
+            SEL _ic = sel_registerName("_isCarScreen");
+            BOOL isCar = (scr && [scr respondsToSelector:_ic]) ? ((BOOL(*)(id,SEL))objc_msgSend)(scr, _ic) : NO;
+            if (!isCar) continue;
+            CGRect sb = ((CGRect(*)(id,SEL))objc_msgSend)(scr, sel_registerName("bounds"));
+            long io = ((long(*)(id,SEL))objc_msgSend)(sc, sel_registerName("interfaceOrientation"));
+            double ang = -999; long angMode = -999; int sbi = -1;
+            @try {
+                id st = [sc respondsToSelector:sel_registerName("settings")] ? ((id(*)(id,SEL))objc_msgSend)(sc, sel_registerName("settings")) : nil;
+                if (st) {
+                    SEL _a = sel_registerName("angleFromHostReferenceUprightDirection");
+                    SEL _m = sel_registerName("hostReferenceAngleMode");
+                    SEL _b = sel_registerName("screenBoundsIgnoresSceneOrientation");
+                    if ([st respondsToSelector:_a]) ang = ((double(*)(id,SEL))objc_msgSend)(st, _a);
+                    if ([st respondsToSelector:_m]) angMode = ((long(*)(id,SEL))objc_msgSend)(st, _m);
+                    if ([st respondsToSelector:_b]) sbi = ((BOOL(*)(id,SEL))objc_msgSend)(st, _b);
+                }
+            } @catch(...) {}
+            CPR("T%d car scene=%s screen=%.0fx%.0f ifo=%ld | EFFECTIVE angle=%.4f mode=%ld ignoreBounds=%d\n",
+                _t, object_getClassName(sc), sb.size.width, sb.size.height, io, ang, angMode, sbi);
+            @try {
+                id wins = ((id(*)(id,SEL))objc_msgSend)(sc, sel_registerName("windows"));
+                NSUInteger wc = wins ? ((NSUInteger(*)(id,SEL))objc_msgSend)(wins, sel_registerName("count")) : 0;
+                for (NSUInteger w = 0; w < wc; w++) {
+                    id win = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins, sel_registerName("objectAtIndex:"), w);
+                    if (!win) continue;
+                    CGRect wb = ((CGRect(*)(id,SEL))objc_msgSend)(win, sel_registerName("bounds"));
+                    id ly = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("layer"));
+                    CGAffineTransform tf = ly ? ((CGAffineTransform(*)(id,SEL))objc_msgSend)(ly, sel_registerName("affineTransform")) : CGAffineTransformIdentity;
+                    CPR("   win[%lu] %s bounds=%.0fx%.0f xf=[%.2f %.2f %.2f %.2f]\n",
+                        (unsigned long)w, object_getClassName(win), wb.size.width, wb.size.height, tf.a, tf.b, tf.c, tf.d);
+                }
+            } @catch(...) {}
+        }
+        #undef CPR
+        close(fd);
+    } @catch(...) {}
+}
+static void cbrCPRotationSchedule(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        cbrCPRotationTick();
+        cbrCPRotationSchedule();
+    });
+}
+
 static void cbrCPProbeScenes(void) {
     static int done = 0; if (done) return; done = 1;
     int fd = open("/var/mobile/CBR_cp_scenes.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
@@ -3630,6 +3693,9 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
+        // v3.29.0: start the CarPlay-side rotation probe (the one process never instrumented).
+        unlink("/var/mobile/CBR_cp_rotation.txt");
+        cbrCPRotationSchedule();
         { int hf = open("/var/mobile/CBR_cp_hooks.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
           cbrLogHook(hf, "DashBoard", '+', "_newApplicationLibrary");
           cbrLogHook(hf, "DBEnvironmentConfiguration", '-', "policyForApplicationInfo:");
