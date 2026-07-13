@@ -2433,8 +2433,13 @@ static void cbrSBSilentActivate(void) {
             s=sel_registerName("setBackgrounded:");        if([ms respondsToSelector:s]) ((void(*)(id,SEL,BOOL))objc_msgSend)(ms,s,NO);
             s=sel_registerName("setDeactivated:");         if([ms respondsToSelector:s]) ((void(*)(id,SEL,BOOL))objc_msgSend)(ms,s,NO);
             s=sel_registerName("setOccluded:");            if([ms respondsToSelector:s]) ((void(*)(id,SEL,BOOL))objc_msgSend)(ms,s,NO);
-            // v3.26.0: do NOT clear deactivationReasons - GOOD boot holds dr=1024, BAD boot has dr=0.
-            // The BLOCK-deact hook only fires when dr != 0, so dr=1024 is what shields the good frame.
+            // v3.34.0 THE ACTIVATION FIX. Every SIDEWAYS boot sits at act=1 (FG-INACTIVE); the phone-tap
+            // - the only thing that has EVER reliably fixed the render - drives the scene FG-ACTIVE
+            // (act=0). A scene with deactivationReasons != 0 CANNOT be FG-ACTIVE. Nothing in this
+            // codebase ever cleared them, and the keep-alive hook BLOCKED any update that would
+            // (if dr != 0 -> return, never calling %orig), freezing the scene inactive forever.
+            // Clear the reasons so the scene can actually reach FG-ACTIVE, like the tap does.
+            s=sel_registerName("setDeactivationReasons:"); if([ms respondsToSelector:s]) ((void(*)(id,SEL,NSUInteger))objc_msgSend)(ms,s,(NSUInteger)0);
             s=sel_registerName("setInterfaceOrientation:");if([ms respondsToSelector:s]) ((void(*)(id,SEL,NSInteger))objc_msgSend)(ms,s,(NSInteger)3);
             // v3.26.0: THE FIX. GOOD (upright+stretched) frame=430x932 (phone portrait);
             // BAD (sideways) frame=472x281 (car landscape). All else identical. Drive the phone frame.
@@ -3135,7 +3140,10 @@ static void cbrKLLog(const char *fmt, ...) {
                 cbrKLLog("[fbscene] bid=%s argClass=%s isFg=%d deact=%d dr=%lu => %s\n",
                          [bid UTF8String], object_getClassName(arg1), (int)isFg, (int)isDeact, (unsigned long)dr, _act);
                 if (respFg && !isFg) { return; }         // block background
-                if (isDeact || dr != 0) { return; }      // block deactivation -> keep foreground-ACTIVE
+                // v3.34.0: do NOT block dr!=0 updates - blocking them froze deactivationReasons in place,
+                // pinning the scene FG-INACTIVE (act=1) forever = the sideways state. Block explicit
+                // deactivation only; the async re-drive clears the reasons and drives FG-ACTIVE.
+                if (isDeact) { return; }                 // block explicit deactivation only
                 // v3.26.0: FRAME GUARD. The dr=0 "pass" updates rewrite the scene frame from the
                 // phone-portrait 430x932 (upright+stretched) to car-landscape 472x281 (sideways).
                 // Don't block them - just re-assert the phone frame so the good geometry survives.
