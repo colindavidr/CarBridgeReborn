@@ -1,6 +1,6 @@
 Package: com.carbridgereborn
 Name: CarBridgeReborn
-Version: 3.38.0
+Version: 3.39.0
 Architecture: iphoneos-arm64
 Description: CarPlay bridge + Settings panel. v3.11.1: settings panel loads specifiers from a uicache-generated Root.plist (Preferences builds the PSSpecifiers, avoiding the arm64e PAC fault in our code). Fat arm64+arm64e. Logs to /var/mobile/CBR_prefs_live.txt.
 Maintainer: CarBridgeReborn

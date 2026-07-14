@@ -3969,9 +3969,21 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
         write(gLogFD, msg, sizeof(msg)-1);
         write(2, msg, sizeof(msg)-1);
     }
-    else if (_isYT) {
+    // v3.39.0 THE ROOT CAUSE: the app-side branch was gated on _isYT (executable path contains
+    // "youtube"), so %init(APPS) ran ONLY in YouTube. YouTube TV (executable is Unplugged, not
+    // "youtube"), Reddit, Netflix, Amazon all got _isYT=0 and NEVER initialized ANY app-side hooks -
+    // no probe, no orientation swizzle, no makeKeyAndVisible fix; gCBROrientOverride stayed -1. The
+    // injected-process log proves it: only YouTube's container has any CBR app log. Every orientation
+    // fix executed in exactly one app. Gate instead on "is a normal app" (not a known system process).
+    // Safe for non-hosted apps: the override stays -1 until the host posts com.cbr.orient.landscape.
+    else if (strcmp(__progname, "SpringBoard") != 0 && strcmp(__progname, "CarPlay") != 0
+             && strcmp(__progname, "Spotlight") != 0 && strcmp(__progname, "Preferences") != 0
+             && strncmp(__progname, "Widget", 6) != 0 && strncmp(__progname, "assistantd", 10) != 0
+             && strncmp(__progname, "backboardd", 10) != 0 && strncmp(__progname, "iCleaner", 8) != 0) {
         %init(APPS);
         cbrProbeSchedule();
+        { int _bf = open("/var/mobile/CBR_injected_procs.txt", O_WRONLY|O_CREAT|O_APPEND, 0666);
+          if (_bf >= 0) { char _b[256]; int _n = snprintf(_b,sizeof(_b),"  APPS-INIT progname=[%s]\n", __progname); if(_n>0) write(_bf,_b,(size_t)_n); close(_bf); } }
         @try { NSString *ep=[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_events.txt"]; [[NSFileManager defaultManager] removeItemAtPath:ep error:nil]; } @catch(...) {}
         // v3.20.78: GATED - stay -1 until hosted (keeps the phone keyboard fix).
         gCBROrientOverride = -1;
