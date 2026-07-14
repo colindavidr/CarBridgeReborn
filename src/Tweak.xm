@@ -33,6 +33,7 @@
 #import <unistd.h>
 #import <fcntl.h>
 #import <stdio.h>
+#import <notify.h>
 
 extern char *__progname;
 
@@ -1134,8 +1135,16 @@ static id gCBRAppVC = nil;
 static id gCBRActiveTxns = nil;
 static id gCBRTxn = nil;         // v3.19.5: strong-hold txn for safe completion
 static NSMutableSet *gCBRKeepAlive = nil;  // v3.20.18: bundle IDs whose scenes must NOT be backgrounded while hosted on CarPlay
+// v3.42.0 globals.
+static NSString *gCBRPendingHostBid = nil;  // bid being hosted - matched by the BORN-LANDSCAPE create hook
+static int gCBRHostStateToken = 0;          // notify token: state 3 = hosting (apps read it SYNCHRONOUSLY at ctor)
+static int gCBRBounceCount = 0;             // tap-replay attempts this host session
+static int gCBRBounceBypass = 0;            // lets our own deactivate edge through the keep-alive hook
+static id gCBRContainerView = nil;          // inset app container (right of the dock strip)
 static void cbrSBHostDismiss(void) {
     @try { CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.unlock"), NULL, NULL, YES); } @catch(...) {}
+    // v3.42.0: stop advertising "hosting" to launching apps + drop the pending create-match + container.
+    @try { if (gCBRHostStateToken) notify_set_state(gCBRHostStateToken, 0); gCBRPendingHostBid = nil; gCBRBounceCount = 0; gCBRBounceBypass = 0; gCBRContainerView = nil; } @catch(...) {}
     @try {
         int fd=open("/var/mobile/CBR_sb_host.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
         #define DD(m) do{ if(fd>=0){const char*_m=(m);write(fd,_m,strlen(_m));} }while(0)
@@ -1379,15 +1388,24 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         @try { id actSettings = getIvar(appVC, "_activationSettings"); if (actSettings) ((void(*)(id,SEL))objc_msgSend)(actSettings, sel_registerName("clearActivationSettings")); } @catch(...) {}
         @try {
             CGRect wf = ((CGRect(*)(id,SEL))objc_msgSend)(rootWindow, sel_registerName("frame"));
+            // v3.42.0 CHROME: reserve a left dock strip (carplay-cast model). The app container is
+            // INSET by the dock width and CLIPPED, so the app never covers the full car screen and
+            // dock taps can never be swallowed by the scene view - the reason the old EXIT button
+            // needed its own level-100 overlay window. Native CarPlay chrome is unreachable from
+            // SpringBoard (v3.20.29 finding: it lives in the CarPlayApp process; the level change
+            // could not reveal it), so we draw the strip ourselves, exactly like carplay-cast.
+            CGFloat dockW = 40.0;
             Class UIViewCls = objc_getClass("UIView");
-            id container = ((id(*)(id,SEL,CGRect))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(UIViewCls, sel_registerName("alloc")), sel_registerName("initWithFrame:"), wf);
+            id container = ((id(*)(id,SEL,CGRect))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(UIViewCls, sel_registerName("alloc")), sel_registerName("initWithFrame:"), CGRectMake(dockW, 0, wf.size.width - dockW, wf.size.height));
             id clear = ((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIColor"), sel_registerName("clearColor"));
             ((void(*)(id,SEL,id))objc_msgSend)(container, sel_registerName("setBackgroundColor:"), clear);
+            ((void(*)(id,SEL,BOOL))objc_msgSend)(container, sel_registerName("setClipsToBounds:"), YES);
             ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("addSubview:"), container);
+            gCBRContainerView = container;
             id vcView = cb(appVC, "view");
-            ((void(*)(id,SEL,CGRect))objc_msgSend)(vcView, sel_registerName("setFrame:"), wf);
+            ((void(*)(id,SEL,CGRect))objc_msgSend)(vcView, sel_registerName("setFrame:"), CGRectMake(0, 0, wf.size.width - dockW, wf.size.height));
             ((void(*)(id,SEL,id))objc_msgSend)(container, sel_registerName("addSubview:"), vcView);
-            HH("mounted appVC.view\n");
+            HH("mounted appVC.view inset by 40pt dock\n");
         } @catch (NSException *e) { HHF("mount EXC: %s\n", [[e reason] UTF8String]?:"?"); }
         // --- v3.18.3: drive the transaction EXACTLY like the source ---
         @try {
@@ -1459,8 +1477,17 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                                         // landscape car window -> sideways, unless the app rotates itself (Amazon does;
                                                         // YouTube/YT-TV are portrait-locked and don't). Landscape matches the car aspect.
                                                         // Capture proof: window 932x430 = UPRIGHT, 430x932 = SIDEWAYS (identity xforms).
-                                                        ((void(*)(id,SEL,CGRect))objc_msgSend)(mutableSettings, _sf, CGRectMake(0,0,_pph,_ppw));
-                                                        CHF("[FIX-GEOM] settings.frame set PHONE-LANDSCAPE %.0fx%.0f (car %.0fx%.0f)\n", _pph, _ppw, _wb.size.width, _wb.size.height);
+                                                        // v3.42.0 CANVAS UNIFICATION. Three writers touched settings.frame: this
+                                                        // block (932x430 since v3.28.0), the keep-alive frame guard (430x932) and
+                                                        // the 1s re-drive (430x932). The last two run continuously, so the scene
+                                                        // lived at 430x932 FIXED-space + ifo=3 anyway - which IS the good steady
+                                                        // state (DRV probes: GOOD = frame 430x932 + window 932x430; the window
+                                                        // derives landscape from ifo=3, the frame stays in fixed portrait space).
+                                                        // This block writing 932x430 only injected a competing shape for the first
+                                                        // second - a re-layout trigger at the worst possible moment - before being
+                                                        // stomped. Write the SAME fixed canvas as every other writer.
+                                                        ((void(*)(id,SEL,CGRect))objc_msgSend)(mutableSettings, _sf, CGRectMake(0,0,_ppw,_pph));
+                                                        CHF("[FIX-GEOM] settings.frame set PHONE-FIXED %.0fx%.0f ifo=3 (car %.0fx%.0f)\n", _ppw, _pph, _wb.size.width, _wb.size.height);
                                                     }
                                                 }
                                             } @catch(...) { CH("[FIX-GEOM] frame sync threw\n"); }
@@ -1549,9 +1576,11 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                                     id rdDvc = getIvar(bAppVC, "_deviceAppViewController");
                                     id rdSv = rdDvc ? getIvar(rdDvc, "_sceneView") : nil;
                                     if (rdSv && gCBRRootWindow) {
-                                        CGRect wf = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds"));
+                                        // v3.42.0: size to the inset container so the render sits right of the dock.
+                                        id szHost = gCBRContainerView ?: gCBRRootWindow;
+                                        CGRect wf = ((CGRect(*)(id,SEL))objc_msgSend)(szHost, sel_registerName("bounds"));
                                         ((void(*)(id,SEL,CGRect))objc_msgSend)(rdSv, sel_registerName("setFrame:"), CGRectMake(0,0,wf.size.width,wf.size.height));
-                                        CH("REDRIVE(comp) sized live sceneView to car window\n");
+                                        CH("REDRIVE(comp) sized live sceneView to app container\n");
                                         // v3.20.34: GEOMETRY PROBE - capture actual coordinate spaces so we fix
                                         // the zoom/touch-offset correctly (last setFrame guess used portrait bounds).
                                         @try {
@@ -1741,48 +1770,44 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
             #undef CF
         } @catch(...) {}
 
-        // v3.20.23: exit/home button so the user can return to the CarPlay dashboard.
-        // NOTE: kept for now as a fallback. If stock chrome shows after the level change, we remove it next build.
+        // v3.42.0 DOCK CHROME (replaces the v3.20.23 full-screen EXIT overlay + its level-100
+        // window). Left strip like carplay-cast: dark blur + CarPlay home glyph that dismisses to
+        // the dashboard. Sits NEXT TO the inset app container, never under the scene view.
         @try {
+            CGRect wb2 = ((CGRect(*)(id,SEL))objc_msgSend)(rootWindow, sel_registerName("bounds"));
+            CGFloat dockW2 = 40.0;
+            id dock = ((id(*)(id,SEL,CGRect))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIView"), sel_registerName("alloc")), sel_registerName("initWithFrame:"), CGRectMake(0, 0, dockW2, wb2.size.height));
+            id dbg = ((id(*)(id,SEL,CGFloat,CGFloat))objc_msgSend)(objc_getClass("UIColor"), sel_registerName("colorWithWhite:alpha:"), (CGFloat)0.08, (CGFloat)0.85);
+            ((void(*)(id,SEL,id))objc_msgSend)(dock, sel_registerName("setBackgroundColor:"), dbg);
+            @try {
+                id be = ((id(*)(Class,SEL,long))objc_msgSend)(objc_getClass("UIBlurEffect"), sel_registerName("effectWithStyle:"), (long)2);
+                id ev = be ? ((id(*)(id,SEL,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIVisualEffectView"), sel_registerName("alloc")), sel_registerName("initWithEffect:"), be) : nil;
+                if (ev) { ((void(*)(id,SEL,CGRect))objc_msgSend)(ev, sel_registerName("setFrame:"), CGRectMake(0,0,dockW2,wb2.size.height)); ((void(*)(id,SEL,id))objc_msgSend)(dock, sel_registerName("addSubview:"), ev); }
+            } @catch(...) {}
             if (!gCBRExitTarget) gCBRExitTarget = [[CBRExitTarget alloc] init];
-            Class _btnCls = objc_getClass("UIButton");
-            id _exit = ((id(*)(id,SEL,long))objc_msgSend)(_btnCls, sel_registerName("buttonWithType:"), (long)1);
-            if (_exit) {
-                ((void(*)(id,SEL,CGRect))objc_msgSend)(_exit, sel_registerName("setFrame:"), CGRectMake(18, 18, 92, 44));
-                ((void(*)(id,SEL,id,long))objc_msgSend)(_exit, sel_registerName("setTitle:forState:"), @"Exit", (long)0);
-                Class _uic = objc_getClass("UIColor");
-                id _wht = ((id(*)(id,SEL))objc_msgSend)(_uic, sel_registerName("whiteColor"));
-                ((void(*)(id,SEL,id,long))objc_msgSend)(_exit, sel_registerName("setTitleColor:forState:"), _wht, (long)0);
-                id _bg = ((id(*)(id,SEL,CGFloat,CGFloat))objc_msgSend)(_uic, sel_registerName("colorWithWhite:alpha:"), (CGFloat)0.0, (CGFloat)0.55);
-                ((void(*)(id,SEL,id))objc_msgSend)(_exit, sel_registerName("setBackgroundColor:"), _bg);
-                id _blayer = ((id(*)(id,SEL))objc_msgSend)(_exit, sel_registerName("layer"));
-                if (_blayer) ((void(*)(id,SEL,CGFloat))objc_msgSend)(_blayer, sel_registerName("setCornerRadius:"), (CGFloat)10.0);
-                ((void(*)(id,SEL,id,SEL,unsigned long))objc_msgSend)(_exit, sel_registerName("addTarget:action:forControlEvents:"), gCBRExitTarget, sel_registerName("cbrExitTapped"), (unsigned long)(1UL<<6));
-                // v3.20.31: add the exit button to a SEPARATE overlay window at a HIGHER level than
-                // the scene view, so the app's full-screen scene view can't swallow its taps (the reason
-                // Exit didn't work - it was under the scene view in the same window).
-                @try {
-                    Class _winCls = objc_getClass("UIRootSceneWindow");
-                    id _ovl = ((id(*)(id,SEL,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(_winCls, sel_registerName("alloc")), sel_registerName("initWithDisplayConfiguration:"), dispCfg);
-                    if (_ovl) {
-                        gCBROverlayWindow = _ovl;
-                        ((void(*)(id,SEL,double))objc_msgSend)(_ovl, sel_registerName("setWindowLevel:"), (double)100.0);
-                        id _clear = ((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIColor"), sel_registerName("clearColor"));
-                        ((void(*)(id,SEL,id))objc_msgSend)(_ovl, sel_registerName("setBackgroundColor:"), _clear);
-                        // host the button in a passthrough container so only the button area is touchable
-                        ((void(*)(id,SEL,id))objc_msgSend)(_ovl, sel_registerName("addSubview:"), _exit);
-                        ((void(*)(id,SEL,BOOL))objc_msgSend)(_ovl, sel_registerName("setHidden:"), NO);
-                        ((void(*)(id,SEL))objc_msgSend)(_ovl, sel_registerName("makeKeyAndVisible"));
-                        HH("exit button in separate overlay window (level 100)\n");
-                    } else {
-                        ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("addSubview:"), _exit);
-                        HH("overlay window failed - exit button on root window (may be covered)\n");
-                    }
-                } @catch(...) { ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("addSubview:"), _exit); }
-                ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("bringSubviewToFront:"), _exit);
-                HH("exit button added\n");
+            id home = ((id(*)(Class,SEL,long))objc_msgSend)(objc_getClass("UIButton"), sel_registerName("buttonWithType:"), (long)0);
+            id icon = nil;
+            @try {
+                id cpBundle = ((id(*)(Class,SEL,id))objc_msgSend)(objc_getClass("NSBundle"), sel_registerName("bundleWithPath:"), @"/System/Library/CoreServices/CarPlay.app");
+                if (cpBundle) icon = ((id(*)(Class,SEL,id,id,id))objc_msgSend)(objc_getClass("UIImage"), sel_registerName("imageNamed:inBundle:compatibleWithTraitCollection:"), @"CarStatusBarIconsHomeButton", cpBundle, nil);
+            } @catch(...) {}
+            if (!icon) { @try { icon = ((id(*)(Class,SEL,id))objc_msgSend)(objc_getClass("UIImage"), sel_registerName("systemImageNamed:"), @"house.fill"); } @catch(...) {} }
+            if (icon) {
+                @try { icon = ((id(*)(id,SEL,long))objc_msgSend)(icon, sel_registerName("imageWithRenderingMode:"), (long)2); } @catch(...) {}
+                ((void(*)(id,SEL,id,long))objc_msgSend)(home, sel_registerName("setImage:forState:"), icon, (long)0);
+            } else {
+                ((void(*)(id,SEL,id,long))objc_msgSend)(home, sel_registerName("setTitle:forState:"), @"X", (long)0);
             }
-        } @catch(...) { HH("exit button failed\n"); }
+            id wht2 = ((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIColor"), sel_registerName("whiteColor"));
+            ((void(*)(id,SEL,id))objc_msgSend)(home, sel_registerName("setTintColor:"), wht2);
+            CGFloat bs = 34.0;
+            ((void(*)(id,SEL,CGRect))objc_msgSend)(home, sel_registerName("setFrame:"), CGRectMake((dockW2-bs)/2.0, wb2.size.height - bs - 10.0, bs, bs));
+            ((void(*)(id,SEL,id,SEL,unsigned long))objc_msgSend)(home, sel_registerName("addTarget:action:forControlEvents:"), gCBRExitTarget, sel_registerName("cbrExitTapped"), (unsigned long)(1UL<<6));
+            ((void(*)(id,SEL,id))objc_msgSend)(dock, sel_registerName("addSubview:"), home);
+            ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("addSubview:"), dock);
+            ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("bringSubviewToFront:"), dock);
+            HH("dock chrome added (40pt strip, home->dismiss)\n");
+        } @catch(...) { HH("dock chrome failed\n"); }
         // --- v3.18.2: the scene is created ASYNC after launch. Re-run foreground +
         //     sceneView grab on a delay so the scene actually exists. ---
         // v3.20.7: delayed diagnostic pass REMOVED - it walked live scene client/subtree
@@ -2415,7 +2440,9 @@ static void cbrApplyCarplayCastScale(void) {
                 close(_f); }
             return;
         }
-        CGRect carB = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("bounds"));
+        // v3.42.0: scale to the INSET container (car width minus the dock), not the full window.
+        id scaleHost = gCBRContainerView ?: gCBRRootWindow;
+        CGRect carB = ((CGRect(*)(id,SEL))objc_msgSend)(scaleHost, sel_registerName("bounds"));
         if (carB.size.width <= 0 || carB.size.height <= 0) return;
         id mainScr = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
         if (!mainScr) return;
@@ -2453,6 +2480,51 @@ static void cbrApplyCarplayCastScale(void) {
     } @catch(...) {}
 }
 
+static void cbrSBSilentActivate(void);
+// v3.42.0 BOUNCE - the programmatic phone-tap. The scene's CLIENT settings are the one feedback
+// channel that reports how the app's UIKit ACTUALLY laid out (server settings are what we ASKED
+// for; client settings are what the app DID). If, after launch settles, the app still reports
+// portrait, replay the tap's activation edge: a real deactivate->reactivate VALUE CHANGE. The 1s
+// re-drive never fixed a sideways boot because it wrote identical values every time - FBScene
+// diffs settings and a no-change update never reaches the app. An EDGE does.
+static void cbrSBBounceCheck(void) {
+    @try {
+        int fd = open("/var/mobile/CBR_bounce.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+        #define BB(...) do{ char _b[300]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,(size_t)_n);}while(0)
+        id scn = gCBRSceneHandle ? ((id(*)(id,SEL))objc_msgSend)(gCBRSceneHandle, sel_registerName("sceneIfExists")) : nil;
+        if (!scn || !gCBRRootWindow) { BB("BOUNCE-CHECK no scene/host - stop\n"); if(fd>=0)close(fd); return; }
+        long cifo = -99;
+        @try {
+            id cs = [scn respondsToSelector:sel_registerName("clientSettings")] ? ((id(*)(id,SEL))objc_msgSend)(scn, sel_registerName("clientSettings")) : nil;
+            if (cs && [cs respondsToSelector:sel_registerName("interfaceOrientation")])
+                cifo = ((long(*)(id,SEL))objc_msgSend)(cs, sel_registerName("interfaceOrientation"));
+        } @catch(...) {}
+        BB("BOUNCE-CHECK clientIfo=%ld bounces=%d\n", cifo, gCBRBounceCount);
+        if (cifo == 3 || cifo == 4) { BB("client reports LANDSCAPE - upright, no bounce\n"); if(fd>=0)close(fd); return; }
+        if (cifo == -99) { BB("clientSettings unreadable - refusing to bounce blind\n"); if(fd>=0)close(fd); return; }
+        if (gCBRBounceCount >= 3) { BB("max bounces reached - stopping (pull this log)\n"); if(fd>=0)close(fd); return; }
+        gCBRBounceCount++;
+        BB("BOUNCE#%d: driving deactivate edge\n", gCBRBounceCount);
+        if (fd>=0) close(fd);
+        #undef BB
+        gCBRBounceBypass = 1;
+        SEL upd = sel_registerName("updateSettingsWithBlock:");
+        if ([scn respondsToSelector:upd]) {
+            void (^down)(id) = ^(id ms){
+                SEL s2 = sel_registerName("setDeactivated:");
+                if ([ms respondsToSelector:s2]) ((void(*)(id,SEL,BOOL))objc_msgSend)(ms, s2, YES);
+                s2 = sel_registerName("setDeactivationReasons:");
+                if ([ms respondsToSelector:s2]) ((void(*)(id,SEL,NSUInteger))objc_msgSend)(ms, s2, (NSUInteger)0x2);
+            };
+            ((void(*)(id,SEL,id))objc_msgSend)(scn, upd, down);
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.35*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            gCBRBounceBypass = 0;
+            cbrSBSilentActivate();   // the reactivate half: fg-ACTIVE + dr=0 + ifo=3 + phone frame
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.5*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBBounceCheck(); });
+        });
+    } @catch(...) { gCBRBounceBypass = 0; }
+}
 static void cbrSBSilentActivate(void) {
     @try {
         cbrEnsurePhoneSize();
@@ -2538,6 +2610,15 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     snprintf(line, sizeof(line), "[CBR-SB] received launch signal -> %s",
              bid[0] ? bid : "(no pending file)");
     cbrSBLog(line);
+    // v3.42.0: publish "hosting" as notify STATE (apps read it synchronously at ctor - kills the
+    // loaded-ping round-trip race) and remember the bid for the BORN-LANDSCAPE create hook.
+    @try {
+        if (bid[0]) gCBRPendingHostBid = [NSString stringWithUTF8String:bid];
+        gCBRBounceCount = 0;
+        if (!gCBRHostStateToken) notify_register_check("com.cbr.orient.landscape", &gCBRHostStateToken);
+        if (gCBRHostStateToken) notify_set_state(gCBRHostStateToken, 3);
+        cbrSBLog("[CBR-SB] v3.42.0 host state=3 published, pending bid armed");
+    } @catch(...) {}
     // v3.20.11: PATH-A + probes REMOVED from the hot path. cbrSBReassignToCarPlay
     // poked the LIVE main-display scene's display config on every tap; the composite
     // never moved, leaving the scene spinning the render server -> load avg 143 runaway.
@@ -2549,6 +2630,8 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     unlink("/var/mobile/CBR_drive.txt");
     for (int _i=0; _i<4; _i++) { double _d = 1.5 + _i*1.5;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(_d*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrSBSilentActivate(); }); }
+    // v3.42.0: after launch settles, ask the client settings how the app REALLY laid out; bounce if portrait.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(8.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrSBBounceCheck(); });
     // cbrSBReassignToCarPlay(bid);     // PATH-A - caused the load runaway - REMOVED
     // cbrSBProbeTransition(bid);       // diagnostic only - off hot path
     // cbrSBProbeTxnCtx(bid);           // diagnostic only - off hot path
@@ -3186,8 +3269,61 @@ static void cbrKLLog(const char *fmt, ...) {
 // While an app is hosted on CarPlay, SpringBoard's normal lifecycle would suspend it the
 // moment it is no longer the main-screen foreground app, killing the render. These hooks
 // refuse to background any scene whose app is in gCBRKeepAlive.
+// v3.42.0 BORN-LANDSCAPE. Every sideways boot shares one shape: the app's FIRST surface commit
+// happens while its scene still carries the portrait defaults SpringBoard mints for main-display
+// scenes; every later correction (updateSettings writes, 1s re-drives, app-side hooks) arrives
+// after the surface shape has latched. The app cannot rotate itself - requestGeometryUpdate is
+// DENIED for hosted scenes (BSActionErrorDomain 1) - so the SERVER (this process) must mint the
+// scene landscape AT CREATION. Rewrite the INITIAL parameters when the scene being created
+// belongs to the app we are hosting: interfaceOrientation=3 (+ best-effort client echo). The
+// frame is deliberately left alone: fixed portrait space is correct, ifo drives orientation.
+%hook FBSceneManager
+- (id)createSceneWithDefinition:(id)definition initialParameters:(id)parameters {
+    @try {
+        if (gCBRPendingHostBid && definition && parameters) {
+            NSString *ident = nil;
+            @try {
+                id idy = [definition respondsToSelector:sel_registerName("identity")] ? ((id(*)(id,SEL))objc_msgSend)(definition, sel_registerName("identity")) : nil;
+                ident = idy ? ((id(*)(id,SEL))objc_msgSend)(idy, sel_registerName("description")) : nil;
+            } @catch(...) {}
+            int match = (ident && [ident rangeOfString:gCBRPendingHostBid].location != NSNotFound) ? 1 : 0;
+            int bfd = open("/var/mobile/CBR_create_scene.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+            if (bfd>=0){ char _b[520]; int _n=snprintf(_b,sizeof(_b),"CREATE-SCENE ident=[%s] pending=[%s] match=%d\n", ident?[ident UTF8String]:"nil", [gCBRPendingHostBid UTF8String], match); if(_n>0)write(bfd,_b,(size_t)_n); close(bfd); }
+            if (match) {
+                id mp = ((id(*)(id,SEL))objc_msgSend)(parameters, sel_registerName("mutableCopy"));
+                id st = (mp && [mp respondsToSelector:sel_registerName("settings")]) ? ((id(*)(id,SEL))objc_msgSend)(mp, sel_registerName("settings")) : nil;
+                id ms = st ? ((id(*)(id,SEL))objc_msgSend)(st, sel_registerName("mutableCopy")) : nil;
+                long before = (ms && [ms respondsToSelector:sel_registerName("interfaceOrientation")]) ? ((long(*)(id,SEL))objc_msgSend)(ms, sel_registerName("interfaceOrientation")) : -99;
+                if (ms && [ms respondsToSelector:sel_registerName("setInterfaceOrientation:")] && [mp respondsToSelector:sel_registerName("setSettings:")]) {
+                    ((void(*)(id,SEL,NSInteger))objc_msgSend)(ms, sel_registerName("setInterfaceOrientation:"), (NSInteger)3);
+                    if ([ms respondsToSelector:sel_registerName("setDeviceOrientation:")])
+                        ((void(*)(id,SEL,NSInteger))objc_msgSend)(ms, sel_registerName("setDeviceOrientation:"), (NSInteger)3);
+                    ((void(*)(id,SEL,id))objc_msgSend)(mp, sel_registerName("setSettings:"), ms);
+                    @try {
+                        id ct = [mp respondsToSelector:sel_registerName("clientSettings")] ? ((id(*)(id,SEL))objc_msgSend)(mp, sel_registerName("clientSettings")) : nil;
+                        id mc = ct ? ((id(*)(id,SEL))objc_msgSend)(ct, sel_registerName("mutableCopy")) : nil;
+                        if (mc && [mc respondsToSelector:sel_registerName("setInterfaceOrientation:")] && [mp respondsToSelector:sel_registerName("setClientSettings:")]) {
+                            ((void(*)(id,SEL,NSInteger))objc_msgSend)(mc, sel_registerName("setInterfaceOrientation:"), (NSInteger)3);
+                            ((void(*)(id,SEL,id))objc_msgSend)(mp, sel_registerName("setClientSettings:"), mc);
+                        }
+                    } @catch(...) {}
+                    int bfd2 = open("/var/mobile/CBR_create_scene.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+                    if (bfd2>=0){ char _b2[240]; int _n2=snprintf(_b2,sizeof(_b2),"BORN-LANDSCAPE applied: ifo %ld -> 3\n", before); if(_n2>0)write(bfd2,_b2,(size_t)_n2); close(bfd2); }
+                    return %orig(definition, mp);
+                }
+            }
+        }
+    } @catch(...) {}
+    return %orig;
+}
+%end
 %hook FBScene
 - (void)updateSettings:(id)arg1 withTransitionContext:(id)arg2 completion:(void *)arg3 {
+    if (gCBRBounceBypass) {
+        cbrKLLog("[fbscene] BOUNCE bypass -> orig\n");
+        %orig;
+        return;
+    }
     @try {
         if (gCBRKeepAlive && [gCBRKeepAlive count]) {
             // iOS 17: FBScene -client returns nil; -clientProcess returns the FBApplicationProcess.
@@ -3994,6 +4130,22 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
         @try { NSString *ep=[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_events.txt"]; [[NSFileManager defaultManager] removeItemAtPath:ep error:nil]; } @catch(...) {}
         // v3.20.78: GATED - stay -1 until hosted (keeps the phone keyboard fix).
         gCBROrientOverride = -1;
+        // v3.42.0 SYNC GATE. The old flow - app posts 'loaded', SB replies with the landscape note,
+        // override becomes 3 - is a round trip that RACES app launch: UIKit resolves the first
+        // orientation (and the first surface commit) before the reply lands, override is still -1,
+        // the swizzle returns the app's REAL portrait mask, and the surface is born portrait =
+        // sideways. The manual tap always fixed it because by tap-time the override was long since 3
+        // and the foreground transition re-ran orientation resolution against the landscape-only
+        // mask. Read the host state SYNCHRONOUSLY here instead - no round trip, set before
+        // UIApplicationMain, so the very FIRST resolution sees landscape-only.
+        @try {
+            int _nt = 0; uint64_t _st = 0;
+            if (notify_register_check("com.cbr.orient.landscape", &_nt) == 0 && _nt) {
+                if (notify_get_state(_nt, &_st) == 0 && _st == 3) gCBROrientOverride = 3;
+                notify_cancel(_nt);
+            }
+            cbrEvent("SYNC-GATE state=%llu override=%d", (unsigned long long)_st, gCBROrientOverride);
+        } @catch(...) {}
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.unlock"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.appside.loaded"), NULL, NULL, YES);
@@ -4001,6 +4153,12 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
     else if (strcmp(__progname, "SpringBoard") == 0) {
         %init(SPRINGBOARD);
         cbrSBRegisterListener();
+        // v3.42.0: clear stale host state after a respring (otherwise every app launched on the
+        // phone would read state=3 and go landscape-only).
+        @try {
+            if (!gCBRHostStateToken) notify_register_check("com.cbr.orient.landscape", &gCBRHostStateToken);
+            if (gCBRHostStateToken) notify_set_state(gCBRHostStateToken, 0);
+        } @catch(...) {}
         unlink("/var/mobile/CBR_appside_sb.txt");
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.loaded"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -4008,6 +4166,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
         if(_sf>=0){const char*m="[CBR-SB] v3.26.5 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
             cbrLogHook(_sf, "FBScene", '-', "updateSettings:withTransitionContext:completion:");
+            cbrLogHook(_sf, "FBSceneManager", '-', "createSceneWithDefinition:initialParameters:");
             cbrLogHook(_sf, "SBSuspendedUnderLockManager", '-', "_shouldBeBackgroundUnderLockForScene:withSettings:");
             close(_sf);}
     }
