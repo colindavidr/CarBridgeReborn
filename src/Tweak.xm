@@ -3325,6 +3325,31 @@ static void cbrSBAppsideCallback(CFNotificationCenterRef c, void *obs, CFStringR
         if (strstr(nm,"loaded") && gCBRRootWindow) { CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.landscape"), NULL, NULL, YES); }
     } @catch(...) {}
 }
+// v3.37.0 DEEP TRANSFORM SCAN. Every probe stopped at the WINDOW / root view - all identity, all
+// landscape - yet the dash renders sideways. vcIfo=1 while scene/window/root-view are all landscape
+// (ifo=3) means YTAppViewControllerImpl OVERRIDES interfaceOrientation with its own state: YouTube
+// runs its own orientation manager, believes it is portrait, and lays out accordingly inside a
+// landscape window. If it rotates a CHILD view 90deg, we never saw it. Walk the whole tree.
+static void cbrScanTransforms(id view, int depth, FILE *f, int *found) {
+    if (!view || depth > 12) return;
+    @try {
+        CGAffineTransform t = ((CGAffineTransform(*)(id,SEL))objc_msgSend)(view, sel_registerName("transform"));
+        CGRect b = ((CGRect(*)(id,SEL))objc_msgSend)(view, sel_registerName("bounds"));
+        BOOL ident = (fabs(t.a-1.0)<0.001 && fabs(t.b)<0.001 && fabs(t.c)<0.001 && fabs(t.d-1.0)<0.001);
+        if (!ident) {
+            (*found)++;
+            fprintf(f, "    %*sROT? %s bounds=%.0fx%.0f xf=[%.3f %.3f %.3f %.3f]\n",
+                    depth*2, "", object_getClassName(view), b.size.width, b.size.height, t.a, t.b, t.c, t.d);
+        }
+        id subs = ((id(*)(id,SEL))objc_msgSend)(view, sel_registerName("subviews"));
+        NSUInteger n = subs ? ((NSUInteger(*)(id,SEL))objc_msgSend)(subs, sel_registerName("count")) : 0;
+        for (NSUInteger i = 0; i < n && i < 40; i++) {
+            id sv = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(subs, sel_registerName("objectAtIndex:"), i);
+            cbrScanTransforms(sv, depth+1, f, found);
+        }
+    } @catch(...) {}
+}
+
 static void cbrYTGeomProbe(const char *tag) {
     @try {
         NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_yt_geom.txt"];
@@ -3354,6 +3379,9 @@ static void cbrYTGeomProbe(const char *tag) {
                 fprintf(f,"    win[%lu]%s%s %s lvl=%ld bounds=%.0fx%.0f xform=[%.2f %.2f %.2f %.2f] rootVC=%s\n",
                         (unsigned long)w, key?"*KEY*":"", hid?"(hidden)":"", object_getClassName(win), wl,
                         wb.size.width,wb.size.height, t.a,t.b,t.c,t.d, rc);
+                { int _found = 0;
+                  cbrScanTransforms(win, 0, f, &_found);
+                  fprintf(f, "    [deep-scan] non-identity transforms in tree: %d\n", _found); }
             }
         }
         fprintf(f, "==== END ====\n"); fclose(f);
