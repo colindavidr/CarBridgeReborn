@@ -3824,21 +3824,28 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
 // setBounds: - all too late. makeKeyAndVisible is when the window first becomes visible and its
 // surface is created; force landscape HERE, before the surface exists.
 - (void)makeKeyAndVisible {
+    // v3.40.0 CHICKEN-AND-EGG FIX. v3.38.0 required gCBROrientOverride > 0, but that is only set when
+    // the HOST posts com.cbr.orient.landscape - which happens AFTER launch. makeKeyAndVisible fires
+    // DURING launch, so the override was still -1 and the guard ALWAYS failed: PRE-SURFACE never
+    // logged once, in any container. Detect hosting from the WINDOW instead: its scene screen is
+    // landscape. Phone-safe: on the phone the window's screen is portrait, so we skip.
     @try {
-        if (gCBROrientOverride > 0 && strstr(object_getClassName(self), "YTMainWindow")) {
-            CGRect b = ((CGRect(*)(id,SEL))objc_msgSend)(self, sel_registerName("bounds"));
-            if (b.size.height > b.size.width) {
-                id ws = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("windowScene"));
-                id sc = ws ? ((id(*)(id,SEL))objc_msgSend)(ws, sel_registerName("screen")) : nil;
-                CGRect sb = sc ? ((CGRect(*)(id,SEL))objc_msgSend)(sc, sel_registerName("bounds")) : CGRectZero;
-                CGFloat mx = sb.size.width > sb.size.height ? sb.size.width : sb.size.height;
-                CGFloat mn = sb.size.width > sb.size.height ? sb.size.height : sb.size.width;
-                if (mx > 0) {
-                    cbrEvent("PRE-SURFACE landscape at makeKeyAndVisible: %.0fx%.0f -> %.0fx%.0f",
-                             b.size.width, b.size.height, mx, mn);
-                    ((void(*)(id,SEL,CGRect))objc_msgSend)(self, sel_registerName("setBounds:"), CGRectMake(0,0,mx,mn));
-                    ((void(*)(id,SEL,CGRect))objc_msgSend)(self, sel_registerName("setFrame:"),  CGRectMake(0,0,mx,mn));
-                }
+        id ws = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("windowScene"));
+        id sc = ws ? ((id(*)(id,SEL))objc_msgSend)(ws, sel_registerName("screen")) : nil;
+        if (sc) {
+            CGRect sb = ((CGRect(*)(id,SEL))objc_msgSend)(sc, sel_registerName("bounds"));
+            CGRect b  = ((CGRect(*)(id,SEL))objc_msgSend)(self, sel_registerName("bounds"));
+            BOOL screenLandscape = (sb.size.width > sb.size.height && sb.size.width > 0);
+            BOOL winPortrait     = (b.size.height > b.size.width);
+            static int _mk=0;
+            if (_mk++ < 20) cbrEvent("MKV %s win=%.0fx%.0f screen=%.0fx%.0f override=%d",
+                object_getClassName(self), b.size.width, b.size.height, sb.size.width, sb.size.height, gCBROrientOverride);
+            if (screenLandscape && winPortrait) {
+                CGFloat mx = sb.size.width, mn = sb.size.height;
+                cbrEvent("PRE-SURFACE landscape at makeKeyAndVisible: %.0fx%.0f -> %.0fx%.0f on %s",
+                         b.size.width, b.size.height, mx, mn, object_getClassName(self));
+                ((void(*)(id,SEL,CGRect))objc_msgSend)(self, sel_registerName("setBounds:"), CGRectMake(0,0,mx,mn));
+                ((void(*)(id,SEL,CGRect))objc_msgSend)(self, sel_registerName("setFrame:"),  CGRectMake(0,0,mx,mn));
             }
         }
     } @catch(...) {}
