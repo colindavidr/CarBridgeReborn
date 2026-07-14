@@ -1142,6 +1142,26 @@ static int gCBRBounceCount = 0;             // tap-replay attempts this host ses
 static int gCBRBounceBypass = 0;            // lets our own deactivate edge through the keep-alive hook
 static id gCBRContainerView = nil;          // inset app container (right of the dock strip)
 static CGFloat gCBRSidebarW = 0;            // v3.44.0 native-chrome reveal: left strip we leave uncovered
+static uint64_t gCBROwnBidHash = 0;         // v3.45.0 app-side: hash of THIS app's bundle id
+// v3.45.0 djb2 hash of a bundle id. The host publishes hash(hostedBid) as the notify state; each app
+// compares it to hash(ownBid). Only the app actually being hosted matches - so the landscape override
+// can never leak to a phone app (the Photos-went-landscape bug). Never returns 0 (0 = not hosting).
+static uint64_t cbrBidHash(const char *sV) {
+    if (!sV) return 0;
+    uint64_t h = 5381; int c;
+    while ((c = (unsigned char)*sV++)) h = ((h << 5) + h) + (uint64_t)c;
+    return h ? h : 1;
+}
+// v3.45.0 read the current host state (works in any process: app / SpringBoard / CarPlay).
+static uint64_t cbrReadHostState(void) {
+    @try {
+        static int _tok = 0;
+        if (!_tok) { if (notify_register_check("com.cbr.orient.landscape", &_tok) != 0) _tok = 0; }
+        uint64_t st = 0;
+        if (_tok) notify_get_state(_tok, &st);
+        return st;
+    } @catch(...) { return 0; }
+}
 static void cbrSBHostDismiss(void) {
     @try { CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.unlock"), NULL, NULL, YES); } @catch(...) {}
     // v3.42.0: stop advertising "hosting" to launching apps + drop the pending create-match + container.
@@ -1360,7 +1380,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                     CGFloat _lh=_cb.size.width>_cb.size.height?_cb.size.height:_cb.size.width;
                     if(_lw>0){ ((void(*)(id,SEL,CGRect))objc_msgSend)(rootWindow,sel_registerName("setBounds:"),CGRectMake(0,0,_lw,_lh));
                         ((void(*)(id,SEL,CGRect))objc_msgSend)(rootWindow,sel_registerName("setFrame:"),CGRectMake(0,0,_lw,_lh));
-                        gCBRSidebarW = (CGFloat)((int)(_lw * 0.11 + 0.5));
+                        gCBRSidebarW = (CGFloat)((int)(_lw * 0.09 + 0.5));   // v3.45.0: 0.11 left a bright gap; 0.09 matches the real chrome width
                         HHF("[GAMBLE] window car landscape %.0fx%.0f sidebar=%.0f\n",_lw,_lh,gCBRSidebarW); }
                     break; } }
         } @catch(...) { HH("[GAMBLE] window resize threw\n"); }
@@ -2593,8 +2613,10 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
         if (bid[0]) gCBRPendingHostBid = [NSString stringWithUTF8String:bid];
         gCBRBounceCount = 0;
         if (!gCBRHostStateToken) notify_register_check("com.cbr.orient.landscape", &gCBRHostStateToken);
-        if (gCBRHostStateToken) notify_set_state(gCBRHostStateToken, 3);
-        cbrSBLog("[CBR-SB] v3.42.0 host state=3 published, pending bid armed");
+        // v3.45.0: publish hash(hostedBid) so ONLY the hosted app matches - the override can no longer
+        // leak to phone apps (Photos went landscape because every app read the old constant state=3).
+        if (gCBRHostStateToken) notify_set_state(gCBRHostStateToken, cbrBidHash(bid[0] ? bid : ""));
+        cbrSBLog("[CBR-SB] v3.45.0 host state=hash(bid) published, pending bid armed");
     } @catch(...) {}
     // v3.20.11: PATH-A + probes REMOVED from the hot path. cbrSBReassignToCarPlay
     // poked the LIVE main-display scene's display config on every tap; the composite
@@ -2622,12 +2644,21 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     // cbrSBProbeTransition(bid);       // diagnostic only - off hot path
     // cbrSBProbeTxnCtx(bid);           // diagnostic only - off hot path
 }
+// v3.45.0 BUG2: the CarPlay process posts this when the user launches a DIFFERENT (native) app while
+// we are hosting, so we tear our window down and hand the car display back instead of leaving two apps
+// foregrounded (YouTube on top, Maps peeking through the sidebar gap).
+static void cbrSBDismissCallback(CFNotificationCenterRef c, void *obs, CFStringRef name, const void *o, CFDictionaryRef ui) {
+    dispatch_async(dispatch_get_main_queue(), ^{ @try { if (gCBRRootWindow) { cbrSBLog("[CBR-SB] host.dismiss received - tearing down for native app"); cbrSBHostDismiss(); } } @catch(...) {} });
+}
 static void cbrSBRegisterListener(void) {
     cbrSBLog("[CBR-SB] v3.14.0 listener registering in SpringBoard");
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
         NULL, cbrSBLaunchCallback, CFSTR("com.carbridgereborn.launch"),
         NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
-    cbrSBLog("[CBR-SB] observer registered for com.carbridgereborn.launch");
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+        NULL, cbrSBDismissCallback, CFSTR("com.cbr.host.dismiss"),
+        NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    cbrSBLog("[CBR-SB] observers registered (launch + host.dismiss)");
 }
 
 // v3.15.2: probe the CarPlayApp process's own scenes/screens. The car window
@@ -3194,6 +3225,23 @@ static void cbrCPProbeChromeGeom(void) {
         }
     } @catch(...) { handled = NO; }
 
+    // v3.45.0 BUG2: a NON-bridged (native) app is launching. If we are currently hosting a DIFFERENT
+    // app, ask SpringBoard to dismiss our window so the native app takes the car display cleanly
+    // instead of rendering under our still-foregrounded scene.
+    @try {
+        if (!handled) {
+            uint64_t _hs = cbrReadHostState();
+            if (_hs != 0) {
+                id _bo = cb(appInfo, "bundleIdentifier");
+                const char *_bid = _bo ? ((const char*(*)(id,SEL))objc_msgSend)(_bo, sel_registerName("UTF8String")) : NULL;
+                if (!_bid || cbrBidHash(_bid) != _hs) {
+                    CBCarLogFmt("[CBR-CP] foreign launch %s while hosting -> request dismiss", _bid ?: "?");
+                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.host.dismiss"), NULL, NULL, YES);
+                }
+            }
+        }
+    } @catch(...) {}
+
     if (handled) return nil;
     return %orig;
 }
@@ -3558,6 +3606,18 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
     @try {
         char nm[128]; nm[0]=0; if(name) CFStringGetCString(name,nm,sizeof(nm),kCFStringEncodingUTF8);
         if (strstr(nm,"unlock")) { gCBROrientOverride = -1; return; }
+        // v3.45.0: the landscape notification is broadcast to EVERY injected app. Only react if the
+        // host state matches THIS app's hash - otherwise a phone app (Photos) launched while we host
+        // on the car would flip landscape on the phone. This is the second half of the leak fix.
+        if (gCBROwnBidHash == 0) {
+            @try {
+                id _mb = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("NSBundle"), sel_registerName("mainBundle"));
+                id _bo = _mb ? ((id(*)(id,SEL))objc_msgSend)(_mb, sel_registerName("bundleIdentifier")) : nil;
+                const char *_bc = _bo ? ((const char*(*)(id,SEL))objc_msgSend)(_bo, sel_registerName("UTF8String")) : NULL;
+                gCBROwnBidHash = cbrBidHash(_bc);
+            } @catch(...) {}
+        }
+        { uint64_t _hs = cbrReadHostState(); if (_hs == 0 || _hs != gCBROwnBidHash) return; }
         gCBROrientOverride = 3;
         id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
         id arr = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("connectedScenes")), sel_registerName("allObjects"));
@@ -3570,6 +3630,7 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
             CGFloat sw=sb.size.width, sh=sb.size.height;
             CGFloat lw=(sw>sh)?sw:sh, lh=(sw>sh)?sh:sw;
             int carScene = (lw>0 && lw<=520);
+            if (!carScene) continue;   // v3.45.0: only force orientation on the CAR scene, never the phone scene
             id wins=((id(*)(id,SEL))objc_msgSend)(scene,sel_registerName("windows"));
             NSUInteger wc= wins?((NSUInteger(*)(id,SEL))objc_msgSend)(wins,sel_registerName("count")):0;
             for (NSUInteger w=0; w<wc; w++){
@@ -4195,12 +4256,16 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
         // mask. Read the host state SYNCHRONOUSLY here instead - no round trip, set before
         // UIApplicationMain, so the very FIRST resolution sees landscape-only.
         @try {
-            int _nt = 0; uint64_t _st = 0;
-            if (notify_register_check("com.cbr.orient.landscape", &_nt) == 0 && _nt) {
-                if (notify_get_state(_nt, &_st) == 0 && _st == 3) gCBROrientOverride = 3;
-                notify_cancel(_nt);
-            }
-            cbrEvent("SYNC-GATE state=%llu override=%d", (unsigned long long)_st, gCBROrientOverride);
+            // v3.45.0: own-bundle-id hash, so only the app actually hosted flips landscape.
+            @try {
+                id _mb = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("NSBundle"), sel_registerName("mainBundle"));
+                id _bo = _mb ? ((id(*)(id,SEL))objc_msgSend)(_mb, sel_registerName("bundleIdentifier")) : nil;
+                const char *_bc = _bo ? ((const char*(*)(id,SEL))objc_msgSend)(_bo, sel_registerName("UTF8String")) : NULL;
+                gCBROwnBidHash = cbrBidHash(_bc);
+            } @catch(...) {}
+            uint64_t _st = cbrReadHostState();
+            if (_st != 0 && _st == gCBROwnBidHash) gCBROrientOverride = 3;
+            cbrEvent("SYNC-GATE state=%llu ownHash=%llu override=%d", (unsigned long long)_st, (unsigned long long)gCBROwnBidHash, gCBROrientOverride);
             // v3.43.0: if we already read "hosting" synchronously, start the carplay-cast
             // keyWindow kick chain too (it self-guards on keyWindow existing yet).
             if (gCBROrientOverride == 3) cbrAppKickLandscape(0);
