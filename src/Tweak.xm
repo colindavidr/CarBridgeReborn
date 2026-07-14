@@ -2630,6 +2630,15 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     unlink("/var/mobile/CBR_drive.txt");
     for (int _i=0; _i<4; _i++) { double _d = 1.5 + _i*1.5;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(_d*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrSBSilentActivate(); }); }
+    // v3.43.0: RE-POST the landscape request AFTER launch settles (the carplay-cast
+    // moment - it posts inside _executeBlockAfterLaunchCompletes:). The host-time post at
+    // the top of cbrSBHostScene fires before the app's key window exists; these later
+    // posts reach the app once its UIKit is live so the app-side kick has a window to
+    // rotate. Cheap + idempotent.
+    for (int _i=0; _i<3; _i++) { double _d = 2.0 + _i*2.0;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(_d*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.landscape"), NULL, NULL, YES);
+        }); }
     // v3.42.0: after launch settles, ask the client settings how the app REALLY laid out; bounce if portrait.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(8.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrSBBounceCheck(); });
     // cbrSBReassignToCarPlay(bid);     // PATH-A - caused the load runaway - REMOVED
@@ -3524,6 +3533,39 @@ static void cbrYTGeomProbe(const char *tag) {
     } @catch(...) {}
 }
 
+// v3.43.0 THE CARPLAY-CAST KICK. This is handleRotationRequest: from carplay-cast
+// (src/hooks/UIApplication.xm) line-for-line: fetch the LIVE keyWindow and force it to
+// the single override orientation with force:1. carplay-cast calls exactly this, from a
+// notification SpringBoard posts inside _executeBlockAfterLaunchCompletes: - i.e. AFTER
+// the app process has launched and its key window exists. We can't hook that private
+// FBProcess block from the app side, so we approximate "after launch completes" by
+// firing on the landscape notification AND re-firing a few times across the first ~4s;
+// whichever call lands first once keyWindow is non-nil wins, and the rest are cheap
+// idempotent no-ops (the _setRotatableViewOrientation hook already forces the value).
+static void cbrEvent(const char *fmt, ...);   // v3.43.0: fwd decl - cbrEvent is defined
+                                               // ~120 lines below; this function and its
+                                               // callers sit above that definition.
+static void cbrAppKickLandscape(int depth) {
+    @try {
+        if (gCBROrientOverride <= 0) return;   // dismissed / not hosted -> stop
+        id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+        id keyWin = app ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("keyWindow")) : nil;
+        if (keyWin) {
+            SEL _sro = sel_registerName("_setRotatableViewOrientation:duration:force:");
+            if ([keyWin respondsToSelector:_sro]) {
+                ((void(*)(id,SEL,int,float,int))objc_msgSend)(keyWin, _sro, gCBROrientOverride, 0.0f, 1);
+                static int _k=0; if(_k++ < 16) cbrEvent("KICK _setRotatableViewOrientation:%d force:1 on keyWindow=%s (depth %d)", gCBROrientOverride, object_getClassName(keyWin), depth);
+            }
+        } else {
+            static int _nk=0; if(_nk++ < 8) cbrEvent("KICK keyWindow nil (depth %d) - will retry", depth);
+        }
+        // Re-fire across the launch window so a slow starter (YouTube TV) still gets a
+        // kick once its window is finally live. Matches carplay-cast firing after launch.
+        if (depth < 8) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.5*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrAppKickLandscape(depth+1); });
+        }
+    } @catch(...) {}
+}
 static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringRef name, const void *o, CFDictionaryRef ui) {
     @try {
         char nm[128]; nm[0]=0; if(name) CFStringGetCString(name,nm,sizeof(nm),kCFStringEncodingUTF8);
@@ -3563,6 +3605,10 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
             }
         }
         cbrYTGeomProbe("orient");
+        // v3.43.0: start the carplay-cast keyWindow kick chain (force landscape on the
+        // live key window, repeatedly across launch). This is the mechanism that makes
+        // carplay-cast upright 100% of the time; the window walk above is CBR legacy.
+        cbrAppKickLandscape(0);
     } @catch(...) {}
 }
 
@@ -3719,7 +3765,11 @@ static void cbrSwizzleLandscape(Class cls) {
             if (!m) continue;
             IMP orig = method_getImplementation(m);
             IMP newImp = imp_implementationWithBlock(^NSUInteger(id sf){
-                if (gCBROrientOverride > 0) return (NSUInteger)((1UL<<3)|(1UL<<4));
+                // v3.43.0: LandscapeRight ONLY (0x8). carplay-cast forces a SINGLE
+                // orientation (3) and never hooks supportedInterfaceOrientations at all;
+                // returning BOTH landscapes (0x18) let UIKit pick LandscapeLeft, which
+                // composites sideways on YouTube/YT-TV. One orientation = no wrong choice.
+                if (gCBROrientOverride > 0) return (NSUInteger)(1UL<<3);
                 return ((NSUInteger(*)(id,SEL))orig)(sf, sel);
             });
             const char *types = method_getTypeEncoding(m);
@@ -4044,12 +4094,12 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
 - (NSUInteger)supportedInterfaceOrientations {
     if (gCBROrientOverride > 0) {
         if (!gCBRVCFired) { gCBRVCFired = 1; CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.appside.vc-orient-fired"), NULL, NULL, YES); }
-        return (NSUInteger)((1UL<<3) | (1UL<<4));
+        return (NSUInteger)(1UL<<3);   // v3.43.0: LandscapeRight only
     }
     return %orig;
 }
 - (NSUInteger)__supportedInterfaceOrientations {
-    if (gCBROrientOverride > 0) return (NSUInteger)((1UL<<3) | (1UL<<4));
+    if (gCBROrientOverride > 0) return (NSUInteger)(1UL<<3);   // v3.43.0: LandscapeRight only
     return %orig;
 }
 %end
@@ -4065,11 +4115,11 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
 // reports landscape while hosted: the decision reads landscape AND requestGeometryUpdate is accepted.
 %hook YTAppViewControllerImpl
 - (NSUInteger)supportedInterfaceOrientations {
-    if (gCBROrientOverride > 0) return (NSUInteger)((1UL<<3) | (1UL<<4));
+    if (gCBROrientOverride > 0) return (NSUInteger)(1UL<<3);   // v3.43.0: LandscapeRight only
     return %orig;
 }
 - (NSUInteger)__supportedInterfaceOrientations {
-    if (gCBROrientOverride > 0) return (NSUInteger)((1UL<<3) | (1UL<<4));
+    if (gCBROrientOverride > 0) return (NSUInteger)(1UL<<3);   // v3.43.0: LandscapeRight only
     return %orig;
 }
 %end
@@ -4145,6 +4195,9 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
                 notify_cancel(_nt);
             }
             cbrEvent("SYNC-GATE state=%llu override=%d", (unsigned long long)_st, gCBROrientOverride);
+            // v3.43.0: if we already read "hosting" synchronously, start the carplay-cast
+            // keyWindow kick chain too (it self-guards on keyWindow existing yet).
+            if (gCBROrientOverride == 3) cbrAppKickLandscape(0);
         } @catch(...) {}
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.landscape"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrAppOrientCallback, CFSTR("com.cbr.orient.unlock"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
