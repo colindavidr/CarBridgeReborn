@@ -3815,6 +3815,35 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
 
 
 %hook UIWindow
+// v3.38.0 THE TIMING FIX. Deep scan proved NO rotation anywhere in the app view tree (non-identity
+// transforms: 0 on a sideways boot) - nothing rotates the content, the SURFACE is created with the
+// wrong SHAPE. Geom dump: YTMainWindow is 430x932 (PORTRAIT) at [orient]/launch and only flips to
+// 932x430 at the LATER activation transition. The host latches the surface while the window is still
+// portrait; that portrait surface is composited onto the landscape dash (rotated to fit) and the
+// shape is fixed before the window flips. Every prior fix ran on a ~1/sec tick or reacted to
+// setBounds: - all too late. makeKeyAndVisible is when the window first becomes visible and its
+// surface is created; force landscape HERE, before the surface exists.
+- (void)makeKeyAndVisible {
+    @try {
+        if (gCBROrientOverride > 0 && strstr(object_getClassName(self), "YTMainWindow")) {
+            CGRect b = ((CGRect(*)(id,SEL))objc_msgSend)(self, sel_registerName("bounds"));
+            if (b.size.height > b.size.width) {
+                id ws = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("windowScene"));
+                id sc = ws ? ((id(*)(id,SEL))objc_msgSend)(ws, sel_registerName("screen")) : nil;
+                CGRect sb = sc ? ((CGRect(*)(id,SEL))objc_msgSend)(sc, sel_registerName("bounds")) : CGRectZero;
+                CGFloat mx = sb.size.width > sb.size.height ? sb.size.width : sb.size.height;
+                CGFloat mn = sb.size.width > sb.size.height ? sb.size.height : sb.size.width;
+                if (mx > 0) {
+                    cbrEvent("PRE-SURFACE landscape at makeKeyAndVisible: %.0fx%.0f -> %.0fx%.0f",
+                             b.size.width, b.size.height, mx, mn);
+                    ((void(*)(id,SEL,CGRect))objc_msgSend)(self, sel_registerName("setBounds:"), CGRectMake(0,0,mx,mn));
+                    ((void(*)(id,SEL,CGRect))objc_msgSend)(self, sel_registerName("setFrame:"),  CGRectMake(0,0,mx,mn));
+                }
+            }
+        }
+    } @catch(...) {}
+    %orig;
+}
 - (void)_setRotatableViewOrientation:(int)orientation duration:(float)duration force:(int)force {
     gCBRSroCalls++; gCBRSroLastVal = orientation;
     if (gCBROrientOverride > 0) {
