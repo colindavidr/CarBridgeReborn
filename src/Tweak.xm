@@ -3568,11 +3568,41 @@ static void cbrForceLandscapeGeometry(id win) {
     @try {
         id rvc = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("rootViewController"));
         if (!rvc) return;
+        // v3.36.0 THE iOS 16+ ROTATION API. Apple's iOS 16 release notes: apps request rotation via
+        // [UIWindowScene requestGeometryUpdate:errorHandler:] with UIWindowSceneGeometryPreferencesIOS.
+        // shouldAutorotate is deprecated/unsupported; attemptRotationToDeviceOrientation is deprecated,
+        // replaced by setNeedsUpdateOfSupportedInterfaceOrientations. That is why every legacy lever
+        // failed here: _setRotatableViewOrientation called 4x with force:1 (sroCalls=4) and vcIfo STAYED
+        // 1; attemptRotation is a no-op; the supportedInterfaceOrientations swizzle only PERMITS
+        // landscape, it never REQUESTS it. requestGeometryUpdate is the only API that rotates on iOS16+,
+        // and CBR never called it (a v3.24.4 comment names it but the call was never written).
+        // Order matters: setNeedsUpdate... FIRST so UIKit re-reads our swizzled landscape mask, THEN
+        // request - else it fails "None of the requested orientations are supported by the view controller".
         SEL snu = sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
         if ([rvc respondsToSelector:snu]) ((void(*)(id,SEL))objc_msgSend)(rvc, snu);
-        SEL arto = sel_registerName("attemptRotationToDeviceOrientation");
-        Class vcCls = objc_getClass("UIViewController");
-        if ([vcCls respondsToSelector:arto]) ((void(*)(Class,SEL))objc_msgSend)(vcCls, arto);
+
+        id ws = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("windowScene"));
+        SEL reqSel = sel_registerName("requestGeometryUpdateWithPreferences:errorHandler:");
+        Class prefCls = objc_getClass("UIWindowSceneGeometryPreferencesIOS");
+        if (ws && prefCls && [ws respondsToSelector:reqSel]) {
+            // UIInterfaceOrientationMaskLandscapeRight = 1 << 3 = 8. vcIfo=3 is the confirmed upright state.
+            id prefs = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(
+                ((id(*)(Class,SEL))objc_msgSend)(prefCls, sel_registerName("alloc")),
+                sel_registerName("initWithInterfaceOrientations:"), (NSUInteger)(1UL << 3));
+            if (prefs) {
+                void (^errh)(id) = ^(id e){
+                    if (e) {
+                        id d = ((id(*)(id,SEL))objc_msgSend)(e, sel_registerName("localizedDescription"));
+                        cbrEvent("GEOM-REQ FAILED: %s", d ? [(NSString *)d UTF8String] : "?");
+                    }
+                };
+                ((void(*)(id,SEL,id,id))objc_msgSend)(ws, reqSel, prefs, errh);
+                static int _gq=0; if(_gq++ < 12) cbrEvent("GEOM-REQ requestGeometryUpdate LandscapeRight on %s", object_getClassName(ws));
+            }
+        } else {
+            static int _nx=0; if(_nx++ < 4) cbrEvent("GEOM-REQ UNAVAILABLE ws=%d prefCls=%d responds=%d",
+                ws?1:0, prefCls?1:0, (ws && [ws respondsToSelector:reqSel])?1:0);
+        }
         static int _rq=0; if(_rq++ < 8) cbrEvent("reeval landscape on %s", object_getClassName(rvc));
     } @catch(...) {}
 }
