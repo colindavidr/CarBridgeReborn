@@ -1141,6 +1141,7 @@ static int gCBRHostStateToken = 0;          // notify token: state 3 = hosting (
 static int gCBRBounceCount = 0;             // tap-replay attempts this host session
 static int gCBRBounceBypass = 0;            // lets our own deactivate edge through the keep-alive hook
 static id gCBRContainerView = nil;          // inset app container (right of the dock strip)
+static CGFloat gCBRSidebarW = 0;            // v3.44.0 native-chrome reveal: left strip we leave uncovered
 static void cbrSBHostDismiss(void) {
     @try { CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.unlock"), NULL, NULL, YES); } @catch(...) {}
     // v3.42.0: stop advertising "hosting" to launching apps + drop the pending create-match + container.
@@ -1359,10 +1360,21 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                     CGFloat _lh=_cb.size.width>_cb.size.height?_cb.size.height:_cb.size.width;
                     if(_lw>0){ ((void(*)(id,SEL,CGRect))objc_msgSend)(rootWindow,sel_registerName("setBounds:"),CGRectMake(0,0,_lw,_lh));
                         ((void(*)(id,SEL,CGRect))objc_msgSend)(rootWindow,sel_registerName("setFrame:"),CGRectMake(0,0,_lw,_lh));
-                        HHF("[GAMBLE] forced window to car landscape %.0fx%.0f\n",_lw,_lh); }
+                        gCBRSidebarW = (CGFloat)((int)(_lw * 0.11 + 0.5));
+                        HHF("[GAMBLE] window car landscape %.0fx%.0f sidebar=%.0f\n",_lw,_lh,gCBRSidebarW); }
                     break; } }
         } @catch(...) { HH("[GAMBLE] window resize threw\n"); }
         @try { id layer = cb(rootWindow, "layer"); ((void(*)(id,SEL,CGFloat))objc_msgSend)(layer, sel_registerName("setCornerRadius:"), (CGFloat)13.0); ((void(*)(id,SEL,BOOL))objc_msgSend)(layer, sel_registerName("setMasksToBounds:"), YES); } @catch(...) {}
+        // v3.44.0 NATIVE-CHROME REVEAL. Colin confirmed the CarPlay chrome (clock/signal/recents/
+        // dashboard button) is ALIVE UNDERNEATH our host window - a prior bad-render boot showed it
+        // through - so this is pure occlusion, not teardown. Make the host window transparent so the
+        // uncovered sidebar strip composites the real chrome through, instead of drawing our own dock.
+        @try {
+            ((void(*)(id,SEL,BOOL))objc_msgSend)(rootWindow, sel_registerName("setOpaque:"), NO);
+            id _cl = ((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIColor"), sel_registerName("clearColor"));
+            ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("setBackgroundColor:"), _cl);
+            HH("[v3.44.0] host window transparent - reveal native chrome beneath\n");
+        } @catch(...) {}
         // v3.20.26: force the WINDOW itself to landscape (orientation 3); scene orientation
         // alone leaves it portrait on auto-launch. Guarded + logged for iOS 17.
         @try {
@@ -1388,24 +1400,22 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         @try { id actSettings = getIvar(appVC, "_activationSettings"); if (actSettings) ((void(*)(id,SEL))objc_msgSend)(actSettings, sel_registerName("clearActivationSettings")); } @catch(...) {}
         @try {
             CGRect wf = ((CGRect(*)(id,SEL))objc_msgSend)(rootWindow, sel_registerName("frame"));
-            // v3.42.0 CHROME: reserve a left dock strip (carplay-cast model). The app container is
-            // INSET by the dock width and CLIPPED, so the app never covers the full car screen and
-            // dock taps can never be swallowed by the scene view - the reason the old EXIT button
-            // needed its own level-100 overlay window. Native CarPlay chrome is unreachable from
-            // SpringBoard (v3.20.29 finding: it lives in the CarPlayApp process; the level change
-            // could not reveal it), so we draw the strip ourselves, exactly like carplay-cast.
-            CGFloat dockW = 40.0;
+            // v3.44.0: inset the app container by the SIDEBAR width so the app never covers the native
+            // chrome strip on the left. The strip is left transparent (window is clear) so the real
+            // CarPlay sidebar shows through, and hitTest passes its touches down (see UIRootSceneWindow
+            // hook), so the native dashboard button - not a custom one - is what returns to the dash.
+            CGFloat sbW = gCBRSidebarW > 0 ? gCBRSidebarW : wf.size.width * 0.11;
             Class UIViewCls = objc_getClass("UIView");
-            id container = ((id(*)(id,SEL,CGRect))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(UIViewCls, sel_registerName("alloc")), sel_registerName("initWithFrame:"), CGRectMake(dockW, 0, wf.size.width - dockW, wf.size.height));
+            id container = ((id(*)(id,SEL,CGRect))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(UIViewCls, sel_registerName("alloc")), sel_registerName("initWithFrame:"), CGRectMake(sbW, 0, wf.size.width - sbW, wf.size.height));
             id clear = ((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIColor"), sel_registerName("clearColor"));
             ((void(*)(id,SEL,id))objc_msgSend)(container, sel_registerName("setBackgroundColor:"), clear);
             ((void(*)(id,SEL,BOOL))objc_msgSend)(container, sel_registerName("setClipsToBounds:"), YES);
             ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("addSubview:"), container);
             gCBRContainerView = container;
             id vcView = cb(appVC, "view");
-            ((void(*)(id,SEL,CGRect))objc_msgSend)(vcView, sel_registerName("setFrame:"), CGRectMake(0, 0, wf.size.width - dockW, wf.size.height));
+            ((void(*)(id,SEL,CGRect))objc_msgSend)(vcView, sel_registerName("setFrame:"), CGRectMake(0, 0, wf.size.width - sbW, wf.size.height));
             ((void(*)(id,SEL,id))objc_msgSend)(container, sel_registerName("addSubview:"), vcView);
-            HH("mounted appVC.view inset by 40pt dock\n");
+            HHF("mounted appVC.view inset by %.0fpt sidebar (native chrome revealed)\n", sbW);
         } @catch (NSException *e) { HHF("mount EXC: %s\n", [[e reason] UTF8String]?:"?"); }
         // --- v3.18.3: drive the transaction EXACTLY like the source ---
         @try {
@@ -1770,44 +1780,11 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
             #undef CF
         } @catch(...) {}
 
-        // v3.42.0 DOCK CHROME (replaces the v3.20.23 full-screen EXIT overlay + its level-100
-        // window). Left strip like carplay-cast: dark blur + CarPlay home glyph that dismisses to
-        // the dashboard. Sits NEXT TO the inset app container, never under the scene view.
-        @try {
-            CGRect wb2 = ((CGRect(*)(id,SEL))objc_msgSend)(rootWindow, sel_registerName("bounds"));
-            CGFloat dockW2 = 40.0;
-            id dock = ((id(*)(id,SEL,CGRect))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIView"), sel_registerName("alloc")), sel_registerName("initWithFrame:"), CGRectMake(0, 0, dockW2, wb2.size.height));
-            id dbg = ((id(*)(id,SEL,CGFloat,CGFloat))objc_msgSend)(objc_getClass("UIColor"), sel_registerName("colorWithWhite:alpha:"), (CGFloat)0.08, (CGFloat)0.85);
-            ((void(*)(id,SEL,id))objc_msgSend)(dock, sel_registerName("setBackgroundColor:"), dbg);
-            @try {
-                id be = ((id(*)(Class,SEL,long))objc_msgSend)(objc_getClass("UIBlurEffect"), sel_registerName("effectWithStyle:"), (long)2);
-                id ev = be ? ((id(*)(id,SEL,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIVisualEffectView"), sel_registerName("alloc")), sel_registerName("initWithEffect:"), be) : nil;
-                if (ev) { ((void(*)(id,SEL,CGRect))objc_msgSend)(ev, sel_registerName("setFrame:"), CGRectMake(0,0,dockW2,wb2.size.height)); ((void(*)(id,SEL,id))objc_msgSend)(dock, sel_registerName("addSubview:"), ev); }
-            } @catch(...) {}
-            if (!gCBRExitTarget) gCBRExitTarget = [[CBRExitTarget alloc] init];
-            id home = ((id(*)(Class,SEL,long))objc_msgSend)(objc_getClass("UIButton"), sel_registerName("buttonWithType:"), (long)0);
-            id icon = nil;
-            @try {
-                id cpBundle = ((id(*)(Class,SEL,id))objc_msgSend)(objc_getClass("NSBundle"), sel_registerName("bundleWithPath:"), @"/System/Library/CoreServices/CarPlay.app");
-                if (cpBundle) icon = ((id(*)(Class,SEL,id,id,id))objc_msgSend)(objc_getClass("UIImage"), sel_registerName("imageNamed:inBundle:compatibleWithTraitCollection:"), @"CarStatusBarIconsHomeButton", cpBundle, nil);
-            } @catch(...) {}
-            if (!icon) { @try { icon = ((id(*)(Class,SEL,id))objc_msgSend)(objc_getClass("UIImage"), sel_registerName("systemImageNamed:"), @"house.fill"); } @catch(...) {} }
-            if (icon) {
-                @try { icon = ((id(*)(id,SEL,long))objc_msgSend)(icon, sel_registerName("imageWithRenderingMode:"), (long)2); } @catch(...) {}
-                ((void(*)(id,SEL,id,long))objc_msgSend)(home, sel_registerName("setImage:forState:"), icon, (long)0);
-            } else {
-                ((void(*)(id,SEL,id,long))objc_msgSend)(home, sel_registerName("setTitle:forState:"), @"X", (long)0);
-            }
-            id wht2 = ((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIColor"), sel_registerName("whiteColor"));
-            ((void(*)(id,SEL,id))objc_msgSend)(home, sel_registerName("setTintColor:"), wht2);
-            CGFloat bs = 34.0;
-            ((void(*)(id,SEL,CGRect))objc_msgSend)(home, sel_registerName("setFrame:"), CGRectMake((dockW2-bs)/2.0, wb2.size.height - bs - 10.0, bs, bs));
-            ((void(*)(id,SEL,id,SEL,unsigned long))objc_msgSend)(home, sel_registerName("addTarget:action:forControlEvents:"), gCBRExitTarget, sel_registerName("cbrExitTapped"), (unsigned long)(1UL<<6));
-            ((void(*)(id,SEL,id))objc_msgSend)(dock, sel_registerName("addSubview:"), home);
-            ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("addSubview:"), dock);
-            ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("bringSubviewToFront:"), dock);
-            HH("dock chrome added (40pt strip, home->dismiss)\n");
-        } @catch(...) { HH("dock chrome failed\n"); }
+        // v3.44.0: custom dock REMOVED. The native CarPlay chrome now shows through the transparent
+        // sidebar strip (host window is clear + hitTest passes those touches to the CarPlay process),
+        // so we no longer draw our own home button. CBRExitTarget is kept defined so a fallback can be
+        // restored in one line if the passthrough ever regresses.
+        HH("[v3.44.0] native chrome reveal - custom dock not drawn\n");
         // --- v3.18.2: the scene is created ASYNC after launch. Re-run foreground +
         //     sceneView grab on a delay so the scene actually exists. ---
         // v3.20.7: delayed diagnostic pass REMOVED - it walked live scene client/subtree
@@ -3415,6 +3392,17 @@ static void cbrKLLog(const char *fmt, ...) {
     %orig;
 }
 %end
+// v3.44.0: pass touches in the left sidebar strip THROUGH our host window to the native CarPlay
+// chrome beneath (its dashboard button is the real exit). Gated to our exact host window instance so
+// no other UIRootSceneWindow is affected.
+%hook UIRootSceneWindow
+- (id)hitTest:(CGPoint)point withEvent:(id)event {
+    @try {
+        if ((id)self == gCBRRootWindow && gCBRSidebarW > 0.0 && point.x < gCBRSidebarW) return nil;
+    } @catch(...) {}
+    return %orig;
+}
+%end
 %hook SBSuspendedUnderLockManager
 - (int)_shouldBeBackgroundUnderLockForScene:(id)arg2 withSettings:(id)arg3 {
     int shouldBackground = %orig;
@@ -3778,6 +3766,23 @@ static void cbrSwizzleLandscape(Class cls) {
         cbrEvent("swizzled landscape on %s", cn);
     } @catch(...) {}
 }
+// v3.44.0: swizzle supportedInterfaceOrientations across the WHOLE view-controller tree, not just
+// the window's root VC. YouTube TV's portrait-locked content VC is a CHILD/PRESENTED controller, so
+// the root-only swizzle never reached it - which is why override=3 forced landscape everywhere except
+// the one class that actually decides YT TV's layout. Recurses children + presented, re-asks UIKit.
+static void cbrSwizzleVCTree(id vc, int depth) {
+    if (!vc || depth > 8) return;
+    @try {
+        cbrSwizzleLandscape(object_getClass(vc));
+        SEL snu = sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
+        if ([vc respondsToSelector:snu]) ((void(*)(id,SEL))objc_msgSend)(vc, snu);
+        id kids = [vc respondsToSelector:sel_registerName("childViewControllers")] ? ((id(*)(id,SEL))objc_msgSend)(vc, sel_registerName("childViewControllers")) : nil;
+        NSUInteger kc = kids ? ((NSUInteger(*)(id,SEL))objc_msgSend)(kids, sel_registerName("count")) : 0;
+        for (NSUInteger i=0;i<kc;i++) cbrSwizzleVCTree(((id(*)(id,SEL,NSUInteger))objc_msgSend)(kids,sel_registerName("objectAtIndex:"),i), depth+1);
+        id pres = [vc respondsToSelector:sel_registerName("presentedViewController")] ? ((id(*)(id,SEL))objc_msgSend)(vc, sel_registerName("presentedViewController")) : nil;
+        if (pres) cbrSwizzleVCTree(pres, depth+1);
+    } @catch(...) {}
+}
 static void cbrForceLandscapeGeometry(id win) {
     @try {
         id rvc = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("rootViewController"));
@@ -3884,20 +3889,21 @@ static void cbrProbeTick(void) {
                     (unsigned long)w, object_getClassName(win), wb.size.width, wb.size.height,
                     rvc ? object_getClassName(rvc) : "nil", vio,
                     _wtf.a,_wtf.b,_wtf.c,_wtf.d, _vtf.a,_vtf.b,_vtf.c,_vtf.d];
-                if (rvc && strcmp(object_getClassName(win), "YTMainWindow") == 0 && vio != gCBRLastVcIfo) {
+                if (rvc && gCBROrientOverride > 0 && vio != gCBRLastVcIfo) {   // v3.44.0: ALL hosted windows, not just YTMainWindow
                     NSUInteger rSupp = ((NSUInteger(*)(id,SEL))objc_msgSend)(rvc, sel_registerName("supportedInterfaceOrientations"));
                     SEL _priv = sel_registerName("__supportedInterfaceOrientations");
                     NSUInteger rPriv = [rvc respondsToSelector:_priv] ? ((NSUInteger(*)(id,SEL))objc_msgSend)(rvc, _priv) : 0;
                     SEL _pref = sel_registerName("_preferredInterfaceOrientationForPresentation");
                     long rPref = [rvc respondsToSelector:_pref] ? ((long(*)(id,SEL))objc_msgSend)(rvc, _pref) : -1;
-                    cbrEvent("YTMainWindow vcIfo %ld -> %ld | sceneIfo=%ld car=%d scene=%s | rvc=%s supp=0x%lx __supp=0x%lx pref=%ld | bounds=%.0fx%.0f sroCalls=%d lastAsk=%d",
-                        gCBRLastVcIfo, vio, io, isCar, object_getClassName(scene),
+                    cbrEvent("HOSTWIN[%s] vcIfo %ld -> %ld | sceneIfo=%ld car=%d scene=%s | rvc=%s supp=0x%lx __supp=0x%lx pref=%ld | bounds=%.0fx%.0f sroCalls=%d lastAsk=%d",
+                        object_getClassName(win), gCBRLastVcIfo, vio, io, isCar, object_getClassName(scene),
                         object_getClassName(rvc), (unsigned long)rSupp, (unsigned long)rPriv, rPref,
                         wb.size.width, wb.size.height, gCBRSroCalls, gCBRSroLastVal);
                     gCBRLastVcIfo = vio;
                 }
                 if (rvc && gCBROrientOverride > 0 && vio != 3) {
                     cbrSwizzleLandscape(object_getClass(rvc));
+                    cbrSwizzleVCTree(rvc, 0);   // v3.44.0: whole tree, catches YT TV's child content VC
                     cbrForceLandscapeGeometry(win);
                     // v3.35.0: ACTIVELY drive rotation like carplay-cast (it CALLS this on the key
                     // window, force=1). CBR only HOOKED the selector - clamping IF the app called it.
