@@ -1229,7 +1229,24 @@ static void cbrSBHostDismiss(void) {
             } else { DD("[exit] no stored bid to terminate\n"); }
         } @catch(NSException *e) { DD("[exit] terminate EXC\n"); }
 
-        if (gCBRRootWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRRootWindow, sel_registerName("setHidden:"), YES); }
+        // v3.50.0 CLOSE ANIMATION: fade + slight scale-down of the app container, then hide the
+        // window in the completion. Matches stock CarPlay app-close. Instant-hide fallback on throw.
+        @try {
+            id _cont = gCBRContainerView;
+            id _win = gCBRRootWindow;
+            if (_cont && _win) {
+                void (^_out)(void) = ^{
+                    ((void(*)(id,SEL,CGFloat))objc_msgSend)(_cont, sel_registerName("setAlpha:"), (CGFloat)0.0);
+                    ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(_cont, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.96, 0.96));
+                };
+                void (^_done)(BOOL) = ^(BOOL fin){ @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); } @catch(...) {} };
+                ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
+                    objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
+                    0.28, 0.0, (NSUInteger)(1UL<<16), _out, _done);
+            } else if (_win) {
+                ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES);
+            }
+        } @catch(...) { if (gCBRRootWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRRootWindow, sel_registerName("setHidden:"), YES); } }
         @try { if (gCBROverlayWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBROverlayWindow, sel_registerName("setHidden:"), YES); gCBROverlayWindow = nil; } } @catch(...) {}
         gCBRRootWindow = nil; gCBRAppVC = nil; gCBRActiveTxns = nil;
         // v3.20.32: NOW release keep-alive (the .25 retain kept the app running -> audio continued +
@@ -1382,7 +1399,13 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                     CGFloat _lh=_cb.size.width>_cb.size.height?_cb.size.height:_cb.size.width;
                     if(_lw>0){ ((void(*)(id,SEL,CGRect))objc_msgSend)(rootWindow,sel_registerName("setBounds:"),CGRectMake(0,0,_lw,_lh));
                         ((void(*)(id,SEL,CGRect))objc_msgSend)(rootWindow,sel_registerName("setFrame:"),CGRectMake(0,0,_lw,_lh));
-                        gCBRSidebarW = (CGFloat)((int)(_lw * 0.10 + 0.5));   // v3.46.0: 0.09 clipped the +, 0.11 left a gap; 0.10 (~47pt) is flush with the app-open chrome
+                        // v3.50.0: prefer the CarPlay-measured sidebar width (com.cbr.sidebar.w);
+                        // fall back to 10% only if nothing has been published yet.
+                        { uint64_t _mw = 0; static int _mt = 0;
+                          if (!_mt) notify_register_check("com.cbr.sidebar.w", &_mt);
+                          if (_mt) notify_get_state(_mt, &_mw);
+                          if (_mw > 0) { gCBRSidebarW = (CGFloat)_mw; HHF("[v3.50.0] sidebar width MEASURED = %.0fpt\n", gCBRSidebarW); }
+                          else { gCBRSidebarW = (CGFloat)((int)(_lw * 0.10 + 0.5)); HHF("[v3.50.0] sidebar width fallback (no measurement) = %.0fpt\n", gCBRSidebarW); } }
                         HHF("[GAMBLE] window car landscape %.0fx%.0f sidebar=%.0f\n",_lw,_lh,gCBRSidebarW); }
                     break; } }
         } @catch(...) { HH("[GAMBLE] window resize threw\n"); }
@@ -1438,6 +1461,19 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
             ((void(*)(id,SEL,CGRect))objc_msgSend)(vcView, sel_registerName("setFrame:"), CGRectMake(0, 0, wf.size.width - sbW, wf.size.height));
             ((void(*)(id,SEL,id))objc_msgSend)(container, sel_registerName("addSubview:"), vcView);
             HHF("mounted appVC.view inset by %.0fpt sidebar (native chrome revealed)\n", sbW);
+            // v3.50.0 OPEN ANIMATION: fade + slight scale-up, matching stock CarPlay app-open.
+            @try {
+                ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)0.0);
+                CGAffineTransform _start = CGAffineTransformMakeScale(0.96, 0.96);
+                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), _start);
+                void (^_anim)(void) = ^{
+                    ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
+                    ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity);
+                };
+                ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
+                    objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
+                    0.30, 0.0, (NSUInteger)(1UL<<16) /*EaseInOut*/, _anim, (void(^)(BOOL))nil);
+            } @catch(...) {}
         } @catch (NSException *e) { HHF("mount EXC: %s\n", [[e reason] UTF8String]?:"?"); }
         // --- v3.18.3: drive the transaction EXACTLY like the source ---
         @try {
@@ -2694,6 +2730,13 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
             CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.landscape"), NULL, NULL, YES);
         }); }
     // v3.42.0: after launch settles, ask the client settings how the app REALLY laid out; bounce if portrait.
+    // v3.50.0 BOOT AUTO-REPLAY: unconditionally replay the phone-tap activation edge once, a beat
+    // after launch settles. On a sideways-composited boot the scene often reports landscape (truth
+    // encodes upright) so the truth-gated bounce never fires - but a real fg-ACTIVE value change
+    // still corrects it, exactly as tapping the icon on the phone does. Two staggered attempts
+    // cover fast (Reddit) and slow (YouTube TV) launchers.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(4.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ @try { if (gCBRRootWindow) { cbrSBLog("[CBR-SB] v3.50.0 boot auto-replay edge #1"); cbrSBSilentActivate(); } } @catch(...) {} });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(9.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ @try { if (gCBRRootWindow) { cbrSBLog("[CBR-SB] v3.50.0 boot auto-replay edge #2"); cbrSBSilentActivate(); } } @catch(...) {} });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(8.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrSBBounceCheck(); });
     // v3.47.0: slow launchers (YouTube TV) may not have published truth by +8s; check again late.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(16.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrSBBounceCheck(); });
@@ -3173,8 +3216,21 @@ static void cbrCPProbeChrome(void) {
 // v3.20.43: CHROME GEOMETRY probe - walk CarPlayApp's view tree on the car window and log
 // every view's class + frame, so we find the sidebar/dock position+width to crop our app window
 // around it (revealing CarPlay's native chrome instead of an exit button).
+// v3.50.0: measure the REAL CarPlay sidebar width and hand it to SpringBoard, replacing the
+// hardcoded 0.10 inset guess that left a dashboard sliver. Publishes over notify state.
+static void cbrCPPublishSidebarW(CGFloat w) {
+    @try {
+        if (w <= 0) return;
+        static int _tok = 0;
+        if (!_tok) notify_register_check("com.cbr.sidebar.w", &_tok);
+        if (_tok) notify_set_state(_tok, (uint64_t)(w + 0.5));
+        int lf = open("/var/mobile/CBR_sidebar_w.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        if (lf >= 0) { char _b[80]; int _n = snprintf(_b, sizeof(_b), "measured sidebar right-edge = %.0fpt\n", w); if (_n>0) write(lf,_b,(size_t)_n); close(lf); }
+    } @catch(...) {}
+}
 static void cbrCPProbeChromeGeom(void) {
     int cf = open("/var/mobile/CBR_chromegeom.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    CGFloat _sbEdge = 0; CGFloat _winW = 0, _winH = 0;   // v3.50.0 sidebar measurement
     #define CG(...) do{ char _b[360]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(cf>=0)write(cf,_b,_n);}while(0)
     CG("==== CHROME GEOMETRY PROBE ====\n");
     @try {
@@ -3190,6 +3246,7 @@ static void cbrCPProbeChromeGeom(void) {
                 id w=[wins objectAtIndex:j];
                 CGRect wf=((CGRect(*)(id,SEL))objc_msgSend)(w,sel_registerName("frame"));
                 CG("WINDOW %s frame=%.0f,%.0f %.0fx%.0f\n", class_getName(object_getClass(w)), wf.origin.x,wf.origin.y,wf.size.width,wf.size.height);
+                if (wf.size.width > _winW) { _winW = wf.size.width; _winH = wf.size.height; }   // v3.50.0: car window size
                 // recursively walk the view tree, logging class+frame, depth-limited
                 id rvc=[w respondsToSelector:sel_registerName("rootViewController")]?((id(*)(id,SEL))objc_msgSend)(w,sel_registerName("rootViewController")):nil;
                 id rv=rvc?((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")):nil;
@@ -3209,6 +3266,12 @@ static void cbrCPProbeChromeGeom(void) {
                             char ind[24]; int ii; for(ii=0;ii<d && ii<10;ii++) ind[ii]=' '; ind[ii]=0;
                             // only log views wider/taller than trivial + name hints of chrome
                             CG("  %s%s frame=%.0f,%.0f %.0fx%.0f\n", ind, vn, vf.origin.x,vf.origin.y,vf.size.width,vf.size.height);
+                            // v3.50.0 sidebar test: left-anchored (x<=2), narrow (20..140), tall (>=70% of window height).
+                            if (_winH > 0 && vf.origin.x <= 2.0 && vf.size.width >= 20.0 && vf.size.width <= 140.0
+                                && vf.size.height >= _winH * 0.70) {
+                                CGFloat _edge = vf.origin.x + vf.size.width;
+                                if (_edge > _sbEdge) _sbEdge = _edge;   // widest qualifying strip wins
+                            }
                             if (d < 4) {
                                 id subs=((id(*)(id,SEL))objc_msgSend)(v,sel_registerName("subviews"));
                                 NSUInteger sn=subs?[subs count]:0;
@@ -3220,6 +3283,11 @@ static void cbrCPProbeChromeGeom(void) {
             }
         }
     } @catch(NSException *e){ CG("PROBE EXC: %s\n", [[e reason] UTF8String]?:"?"); }
+    // v3.50.0: publish the measured sidebar edge; if nothing qualified, publish 10% so SB still
+    // gets a concrete value rather than falling to its internal guess.
+    if (_sbEdge <= 0 && _winW > 0) { _sbEdge = (CGFloat)((int)(_winW * 0.10 + 0.5)); CG("no sidebar view matched - publishing 10%% fallback = %.0f\n", _sbEdge); }
+    else CG("measured sidebar edge = %.0f (win %.0fx%.0f)\n", _sbEdge, _winW, _winH);
+    cbrCPPublishSidebarW(_sbEdge);
     CG("==== END ====\n");
     if(cf>=0)close(cf);
     #undef CG
@@ -3506,8 +3574,14 @@ static void cbrKLLog(const char *fmt, ...) {
         if ((id)self == gCBRRootWindow && gCBRSidebarW > 0.0 && point.x < gCBRSidebarW) {
             // v3.46.0: bottom home-button zone -> let our transparent dismiss button take the tap.
             CGRect _hb = ((CGRect(*)(id,SEL))objc_msgSend)(self, sel_registerName("bounds"));
+            // v3.50.0: the bottom home-button zone must NOT pass through - passing through triggers
+            // CarPlay's own go-home transition (visible in the sliver) and lands on the CarPlay
+            // homescreen, not the dashboard we opened from. Route the tap to OUR dismiss target,
+            // whose teardown returns to the dashboard. Return self so the tap hits our overlay
+            // button (added at rootWindow level in cbrSBHostScene), not the app beneath.
             if (gCBRHomeZoneH > 0.0 && point.y >= (_hb.size.height - gCBRHomeZoneH)) return %orig;
-            return nil;   // status + recents: pass through to native CarPlay chrome
+            // status + recents strip (above the home zone): still pass through for recents handoff.
+            return nil;
         }
     } @catch(...) {}
     return %orig;
