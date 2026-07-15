@@ -2504,6 +2504,10 @@ static void cbrSBSilentActivate(void);
 // diffs settings and a no-change update never reaches the app. An EDGE does.
 static void cbrSBBounceCheck(void) {
     @try {
+        static double _lastChk = 0; struct timespec _dts; clock_gettime(CLOCK_MONOTONIC, &_dts);   // v3.49.0 chain-collapse
+        double _dnow = _dts.tv_sec + _dts.tv_nsec/1e9;
+        if (_dnow - _lastChk < 2.0) return;
+        _lastChk = _dnow;
         int fd = open("/var/mobile/CBR_bounce.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
         #define BB(...) do{ char _b[300]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(fd>=0)write(fd,_b,(size_t)_n);}while(0)
         id scn = gCBRSceneHandle ? ((id(*)(id,SEL))objc_msgSend)(gCBRSceneHandle, sel_registerName("sceneIfExists")) : nil;
@@ -2522,16 +2526,31 @@ static void cbrSBBounceCheck(void) {
         if (!gCBRTruthTokenSB) notify_register_check("com.cbr.app.truth", &gCBRTruthTokenSB);
         if (gCBRTruthTokenSB) notify_get_state(gCBRTruthTokenSB, &_enc);
         long tifo = (long)(_enc % 10); int tland = _enc >= 10 ? 1 : 0;
-        BB("BOUNCE-CHECK clientIfo=%ld truth=%llu (ifo=%ld winLandscape=%d) bounces=%d\n", cifo, (unsigned long long)_enc, tifo, tland, gCBRBounceCount);
+        { static uint64_t _le = 999999; static int _bc2 = 0;   // v3.49.0: log on change or 1-in-12
+          if (_enc != _le || (_bc2++ % 12) == 0) BB("BOUNCE-CHECK clientIfo=%ld truth=%llu (ifo=%ld winLandscape=%d) bounces=%d\n", cifo, (unsigned long long)_enc, tifo, tland, gCBRBounceCount);
+          _le = _enc; }
         if (_enc == 0) {
             static int _nt = 0;
             if (_nt++ < 4) { BB("no truth published yet - re-check in 3s (%d/4)\n", _nt); if(fd>=0)close(fd);
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBBounceCheck(); });
                 return; }
-            BB("truth never arrived - refusing to bounce blind\n"); if(fd>=0)close(fd); return;
+            static int _rl = 0; if ((_rl++ % 12) == 0) BB("truth never arrived - refusing to bounce blind (watching every 5s)\n");   // v3.49.0
+            if(fd>=0)close(fd);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBBounceCheck(); });
+            return;
         }
-        if ((tifo == 3 || tifo == 4) && tland) { BB("app TRULY landscape (scene+window agree) - upright, no bounce\n"); if(fd>=0)close(fd); return; }
-        if (gCBRBounceCount >= 3) { BB("max bounces reached - stopping (pull this log)\n"); if(fd>=0)close(fd); return; }
+        if ((tifo == 3 || tifo == 4) && tland) {
+            gCBRBounceCount = 0;   // v3.49.0: fresh 3-bounce budget per incident
+            static int _hl = 0; if ((_hl++ % 12) == 0) BB("app TRULY landscape - upright; watching every 5s (budget reset)\n");
+            if(fd>=0)close(fd);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBBounceCheck(); });
+            return;
+        }
+        if (gCBRBounceCount >= 3) {
+            static int _mx = 0; if ((_mx++ % 6) == 0) BB("max bounces reached for this incident - re-checking every 30s\n");   // v3.49.0
+            if(fd>=0)close(fd);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(30.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBBounceCheck(); });
+            return; }
         gCBRBounceCount++;
         BB("BOUNCE#%d: driving deactivate edge\n", gCBRBounceCount);
         if (fd>=0) close(fd);
@@ -3660,7 +3679,12 @@ static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringR
                 gCBROwnBidHash = cbrBidHash(_bc);
             } @catch(...) {}
         }
-        { uint64_t _hs = cbrReadHostState(); if (_hs == 0 || _hs != gCBROwnBidHash) return; }
+        { uint64_t _hs = cbrReadHostState();
+          if (_hs == 0 || _hs != gCBROwnBidHash) {
+              // v3.49.0: log the verdict instead of vanishing.
+              static int _mm = 0; if (_mm++ < 6) cbrEvent("ORIENT-NOTE ignored: state=%llu own=%llu (not the hosted app)", (unsigned long long)_hs, (unsigned long long)gCBROwnBidHash);
+              return;
+          } }
         gCBROrientOverride = 3;
         id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
         id arr = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("connectedScenes")), sel_registerName("allObjects"));
@@ -3934,6 +3958,24 @@ static void cbrProbeTick(void) {
     // v3.22.2: NO early bail. v3.22.1 returned here whenever the gate was shut, so "no file"
     // was ambiguous between "probe never ran" and "never hosted". Always write; the dump
     // reports override so we can tell which.
+    // v3.49.0 HOST-STATE ARM: see patch header. Runs BEFORE the main probe body so an
+    // exception anywhere in the dump can never starve the arming path.
+    @try {
+        if (gCBROrientOverride <= 0) {
+            if (gCBROwnBidHash == 0) {
+                id _mb = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("NSBundle"), sel_registerName("mainBundle"));
+                id _bo = _mb ? ((id(*)(id,SEL))objc_msgSend)(_mb, sel_registerName("bundleIdentifier")) : nil;
+                const char *_bc = _bo ? ((const char*(*)(id,SEL))objc_msgSend)(_bo, sel_registerName("UTF8String")) : NULL;
+                gCBROwnBidHash = cbrBidHash(_bc);
+            }
+            uint64_t _hs2 = cbrReadHostState();
+            if (_hs2 != 0 && _hs2 == gCBROwnBidHash) {
+                gCBROrientOverride = 3;
+                cbrEvent("HOST-STATE armed at probe tick (state=%llu) -> override=3", (unsigned long long)_hs2);
+                cbrAppKickLandscape(0);
+            }
+        }
+    } @catch(...) {}
     @try {
         id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
         if (!app) return;
@@ -4091,6 +4133,9 @@ static void cbrProbeTick(void) {
         // Encoded as ifo (1..4) + 10 when the main window is landscape-shaped, so SB can log
         // both facts from one value. Only the hash-gated hosted app ever has override>0 now
         // (v3.45.0), so no bystander can pollute this channel.
+        if (gCBROrientOverride > 0 && _truthBest <= 0) {
+            static int _ts = 0; if (_ts++ < 6) cbrEvent("TRUTH skipped: armed but no window found in connectedScenes");   // v3.49.0
+        }
         if (gCBROrientOverride > 0 && _truthBest > 0) {
             @try {
                 uint64_t _enc = (uint64_t)_truthIfo + ((_truthW > _truthH) ? 10 : 0);
@@ -4195,7 +4240,7 @@ static inline int cbrIsHostedLandscapeWindow(id win) {
         id sc = ws ? ((id(*)(id,SEL))objc_msgSend)(ws, sel_registerName("screen")) : nil;
         if (!sc) return 0;
         CGRect sb = ((CGRect(*)(id,SEL))objc_msgSend)(sc, sel_registerName("bounds"));
-        return (sb.size.width > sb.size.height && sb.size.width > 0) ? 1 : 0;   // landscape car screen
+        return (sb.size.width > 0 && sb.size.height > 0) ? 1 : 0;   // v3.49.0: any live screen; override is the gate
     } @catch(...) { return 0; }
 }
 - (void)setBounds:(CGRect)bounds {
@@ -4210,6 +4255,9 @@ static inline int cbrIsHostedLandscapeWindow(id win) {
     // v3.48.0: app-agnostic (was gated to YTMainWindow, i.e. plain YouTube only). Fires the
     // landscape lock on ANY hosted app's window that tries to go portrait - which is exactly
     // what the AVPlayer fullscreen-exit does on Amazon / YouTube TV / Reddit.
+    if (bounds.size.height > bounds.size.width && !cbrIsHostedLandscapeWindow(self)) {
+        static int _lsk = 0; if (_lsk++ < 8) cbrEvent("LOCK-SKIP portrait setBounds %s %.0fx%.0f (override=%d)", object_getClassName(self), bounds.size.width, bounds.size.height, gCBROrientOverride);   // v3.49.0
+    }
     if (bounds.size.height > bounds.size.width && cbrIsHostedLandscapeWindow(self)) {
         @try {
             id _ws = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("windowScene"));
@@ -4259,6 +4307,22 @@ static inline int cbrIsHostedLandscapeWindow(id win) {
 - (NSUInteger)__supportedInterfaceOrientations {
     if (gCBROrientOverride > 0) return (NSUInteger)(1UL<<3);   // v3.43.0: LandscapeRight only
     return %orig;
+}
+%end
+// v3.49.0 GEO-REWRITE (see patch header).
+%hook UIWindowScene
+- (void)requestGeometryUpdateWithPreferences:(id)prefs errorHandler:(id)handler {
+    @try {
+        if (gCBROrientOverride > 0 && prefs && [prefs respondsToSelector:sel_registerName("interfaceOrientations")]) {
+            NSUInteger _m = ((NSUInteger(*)(id,SEL))objc_msgSend)(prefs, sel_registerName("interfaceOrientations"));
+            if (_m != 0 && (_m & (NSUInteger)(1UL<<3)) == 0) {
+                static int _gr = 0; if (_gr++ < 12) cbrEvent("GEO-REWRITE app asked mask=0x%lx -> 0x8 LandscapeRight on %s", (unsigned long)_m, object_getClassName(self));
+                if ([prefs respondsToSelector:sel_registerName("setInterfaceOrientations:")])
+                    ((void(*)(id,SEL,NSUInteger))objc_msgSend)(prefs, sel_registerName("setInterfaceOrientations:"), (NSUInteger)(1UL<<3));
+            }
+        }
+    } @catch(...) {}
+    %orig(prefs, handler);
 }
 %end
 %hook UIDevice
