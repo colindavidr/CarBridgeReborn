@@ -1138,6 +1138,7 @@ static NSMutableSet *gCBRKeepAlive = nil;  // v3.20.18: bundle IDs whose scenes 
 // v3.42.0 globals.
 static NSString *gCBRPendingHostBid = nil;  // bid being hosted - matched by the BORN-LANDSCAPE create hook
 static int gCBRHostStateToken = 0;          // notify token: state 3 = hosting (apps read it SYNCHRONOUSLY at ctor)
+static int gCBRTruthTokenSB = 0;            // v3.47.0: notify token for com.cbr.app.truth (app publishes its REAL scene orientation)
 static int gCBRBounceCount = 0;             // tap-replay attempts this host session
 static int gCBRBounceBypass = 0;            // lets our own deactivate edge through the keep-alive hook
 static id gCBRContainerView = nil;          // inset app container (right of the dock strip)
@@ -2513,9 +2514,23 @@ static void cbrSBBounceCheck(void) {
             if (cs && [cs respondsToSelector:sel_registerName("interfaceOrientation")])
                 cifo = ((long(*)(id,SEL))objc_msgSend)(cs, sel_registerName("interfaceOrientation"));
         } @catch(...) {}
-        BB("BOUNCE-CHECK clientIfo=%ld bounces=%d\n", cifo, gCBRBounceCount);
-        if (cifo == 3 || cifo == 4) { BB("client reports LANDSCAPE - upright, no bounce\n"); if(fd>=0)close(fd); return; }
-        if (cifo == -99) { BB("clientSettings unreadable - refusing to bounce blind\n"); if(fd>=0)close(fd); return; }
+        // v3.47.0: clientSettings proved to be an ACK of OUR writes (always 3), not what the
+        // app's UIKit actually did - that false green is why no bounce ever fired while every
+        // boot stayed sideways. Decide on the app-published TRUTH instead; log both so the
+        // divergence (clientIfo=3 vs truth=1) is the smoking gun in this file.
+        uint64_t _enc = 0;
+        if (!gCBRTruthTokenSB) notify_register_check("com.cbr.app.truth", &gCBRTruthTokenSB);
+        if (gCBRTruthTokenSB) notify_get_state(gCBRTruthTokenSB, &_enc);
+        long tifo = (long)(_enc % 10); int tland = _enc >= 10 ? 1 : 0;
+        BB("BOUNCE-CHECK clientIfo=%ld truth=%llu (ifo=%ld winLandscape=%d) bounces=%d\n", cifo, (unsigned long long)_enc, tifo, tland, gCBRBounceCount);
+        if (_enc == 0) {
+            static int _nt = 0;
+            if (_nt++ < 4) { BB("no truth published yet - re-check in 3s (%d/4)\n", _nt); if(fd>=0)close(fd);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBBounceCheck(); });
+                return; }
+            BB("truth never arrived - refusing to bounce blind\n"); if(fd>=0)close(fd); return;
+        }
+        if ((tifo == 3 || tifo == 4) && tland) { BB("app TRULY landscape (scene+window agree) - upright, no bounce\n"); if(fd>=0)close(fd); return; }
         if (gCBRBounceCount >= 3) { BB("max bounces reached - stopping (pull this log)\n"); if(fd>=0)close(fd); return; }
         gCBRBounceCount++;
         BB("BOUNCE#%d: driving deactivate edge\n", gCBRBounceCount);
@@ -2633,6 +2648,10 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
         // v3.45.0: publish hash(hostedBid) so ONLY the hosted app matches - the override can no longer
         // leak to phone apps (Photos went landscape because every app read the old constant state=3).
         if (gCBRHostStateToken) notify_set_state(gCBRHostStateToken, cbrBidHash(bid[0] ? bid : ""));
+        // v3.47.0: zero the truth channel for the new host session (stale landscape from the
+        // last app would wrongly suppress the bounce).
+        if (!gCBRTruthTokenSB) notify_register_check("com.cbr.app.truth", &gCBRTruthTokenSB);
+        if (gCBRTruthTokenSB) notify_set_state(gCBRTruthTokenSB, 0);
         cbrSBLog("[CBR-SB] v3.45.0 host state=hash(bid) published, pending bid armed");
     } @catch(...) {}
     // v3.20.11: PATH-A + probes REMOVED from the hot path. cbrSBReassignToCarPlay
@@ -2657,6 +2676,8 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
         }); }
     // v3.42.0: after launch settles, ask the client settings how the app REALLY laid out; bounce if portrait.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(8.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrSBBounceCheck(); });
+    // v3.47.0: slow launchers (YouTube TV) may not have published truth by +8s; check again late.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(16.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrSBBounceCheck(); });
     // cbrSBReassignToCarPlay(bid);     // PATH-A - caused the load runaway - REMOVED
     // cbrSBProbeTransition(bid);       // diagnostic only - off hot path
     // cbrSBProbeTxnCtx(bid);           // diagnostic only - off hot path
@@ -3928,6 +3949,11 @@ static void cbrProbeTick(void) {
         CGFloat msc = ((CGFloat(*)(id,SEL))objc_msgSend)(ms, sel_registerName("scale"));
         [out appendFormat:@"UIScreen.main bounds=%.0fx%.0f scale=%.1f\n", mb.size.width, mb.size.height, msc];
 
+        // v3.47.0 TRUTH CHANNEL locals: track the LARGEST window across all scenes (the app's
+        // real main window - phone-canvas ~430x932/932x430 dwarfs any 472x281 template window)
+        // and remember ITS scene's interfaceOrientation. That pair is the app's actual layout
+        // truth; clientSettings proved to be an ACK of what we wrote, not what UIKit did.
+        long _truthIfo = 0; CGFloat _truthW = 0, _truthH = 0, _truthBest = 0;
         id scenes = ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("connectedScenes"));
         id arr = scenes ? ((id(*)(id,SEL))objc_msgSend)(scenes, sel_registerName("allObjects")) : nil;
         NSUInteger sc = arr ? ((NSUInteger(*)(id,SEL))objc_msgSend)(arr, sel_registerName("count")) : 0;
@@ -3958,6 +3984,11 @@ static void cbrProbeTick(void) {
                 CGRect wb = ((CGRect(*)(id,SEL))objc_msgSend)(win, sel_registerName("bounds"));
                 id rvc = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("rootViewController"));
                 long vio = rvc ? ((long(*)(id,SEL))objc_msgSend)(rvc, sel_registerName("interfaceOrientation")) : -1;
+                // v3.47.0: truth tracking - biggest window wins; its scene ifo is the app's truth.
+                if (gCBROrientOverride > 0) {
+                    CGFloat _a = wb.size.width * wb.size.height;
+                    if (_a > _truthBest) { _truthBest = _a; _truthIfo = io; _truthW = wb.size.width; _truthH = wb.size.height; }
+                }
                 // v3.27.2: log WINDOW + rootVC-view TRANSFORM for EVERY window (not just YTMainWindow).
                 // Amazon renders upright, all others sideways, but we've only ever logged YTMainWindow -
                 // so we've never seen what Amazon does differently. supportedInterfaceOrientations is
@@ -4055,6 +4086,22 @@ static void cbrProbeTick(void) {
             }
         }
 
+        // v3.47.0 TRUTH PUBLISH: hand SpringBoard the app's REAL layout state as notify state.
+        // Encoded as ifo (1..4) + 10 when the main window is landscape-shaped, so SB can log
+        // both facts from one value. Only the hash-gated hosted app ever has override>0 now
+        // (v3.45.0), so no bystander can pollute this channel.
+        if (gCBROrientOverride > 0 && _truthBest > 0) {
+            @try {
+                uint64_t _enc = (uint64_t)_truthIfo + ((_truthW > _truthH) ? 10 : 0);
+                static int _tt = 0; if (!_tt) notify_register_check("com.cbr.app.truth", &_tt);
+                if (_tt) notify_set_state(_tt, _enc);
+                static uint64_t _lastEnc = 999; static int _tlog = 0;
+                if (_enc != _lastEnc || _tlog < 3) {
+                    cbrEvent("TRUTH sceneIfo=%ld win=%.0fx%.0f enc=%llu (published)", _truthIfo, _truthW, _truthH, (unsigned long long)_enc);
+                    _lastEnc = _enc; _tlog++;
+                }
+            } @catch(...) {}
+        }
         // v3.22.2 FIX: YouTube is SANDBOXED and cannot write to /var/mobile -- that is why the
         // v3.22.1 probe produced no file. v78's own app-side probes use NSTemporaryDirectory();
         // do the same. Also try /var/mobile as a bonus (harmless if the sandbox denies it).
