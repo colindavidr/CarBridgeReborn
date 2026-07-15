@@ -1143,6 +1143,7 @@ static int gCBRBounceBypass = 0;            // lets our own deactivate edge thro
 static id gCBRContainerView = nil;          // inset app container (right of the dock strip)
 static CGFloat gCBRSidebarW = 0;            // v3.44.0 native-chrome reveal: left strip we leave uncovered
 static uint64_t gCBROwnBidHash = 0;         // v3.45.0 app-side: hash of THIS app's bundle id
+static CGFloat gCBRHomeZoneH = 0;           // v3.46.0: bottom sidebar strip that dismisses (native home button lives here)
 // v3.45.0 djb2 hash of a bundle id. The host publishes hash(hostedBid) as the notify state; each app
 // compares it to hash(ownBid). Only the app actually being hosted matches - so the landscape override
 // can never leak to a phone app (the Photos-went-landscape bug). Never returns 0 (0 = not hosting).
@@ -1380,7 +1381,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                     CGFloat _lh=_cb.size.width>_cb.size.height?_cb.size.height:_cb.size.width;
                     if(_lw>0){ ((void(*)(id,SEL,CGRect))objc_msgSend)(rootWindow,sel_registerName("setBounds:"),CGRectMake(0,0,_lw,_lh));
                         ((void(*)(id,SEL,CGRect))objc_msgSend)(rootWindow,sel_registerName("setFrame:"),CGRectMake(0,0,_lw,_lh));
-                        gCBRSidebarW = (CGFloat)((int)(_lw * 0.09 + 0.5));   // v3.45.0: 0.11 left a bright gap; 0.09 matches the real chrome width
+                        gCBRSidebarW = (CGFloat)((int)(_lw * 0.10 + 0.5));   // v3.46.0: 0.09 clipped the +, 0.11 left a gap; 0.10 (~47pt) is flush with the app-open chrome
                         HHF("[GAMBLE] window car landscape %.0fx%.0f sidebar=%.0f\n",_lw,_lh,gCBRSidebarW); }
                     break; } }
         } @catch(...) { HH("[GAMBLE] window resize threw\n"); }
@@ -1800,11 +1801,27 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
             #undef CF
         } @catch(...) {}
 
-        // v3.44.0: custom dock REMOVED. The native CarPlay chrome now shows through the transparent
-        // sidebar strip (host window is clear + hitTest passes those touches to the CarPlay process),
-        // so we no longer draw our own home button. CBRExitTarget is kept defined so a fallback can be
-        // restored in one line if the passthrough ever regresses.
+        // v3.44.0: custom dock REMOVED - the native CarPlay chrome shows through the transparent strip.
         HH("[v3.44.0] native chrome reveal - custom dock not drawn\n");
+        // v3.46.0 HOME BUTTON. The native home/dashboard button (bottom of the sidebar) can't work via
+        // pure passthrough: CarPlay thinks it is ALREADY on the dashboard (our host window is invisible
+        // to it), so its home tap is a no-op. Overlay a transparent dismiss target on exactly that spot -
+        // the user still sees the native glyph, and tapping it tears our window down = back to the dash.
+        // The rest of the sidebar (status, recents) still passes through (recents launch handoff works).
+        @try {
+            if (!gCBRExitTarget) gCBRExitTarget = [[CBRExitTarget alloc] init];
+            CGRect _wb = ((CGRect(*)(id,SEL))objc_msgSend)(rootWindow, sel_registerName("bounds"));
+            CGFloat _hz = 50.0; gCBRHomeZoneH = _hz;
+            CGFloat _sbw = gCBRSidebarW > 0 ? gCBRSidebarW : 47.0;
+            id _hb = ((id(*)(Class,SEL,long))objc_msgSend)(objc_getClass("UIButton"), sel_registerName("buttonWithType:"), (long)0);
+            ((void(*)(id,SEL,CGRect))objc_msgSend)(_hb, sel_registerName("setFrame:"), CGRectMake(0, _wb.size.height - _hz, _sbw, _hz));
+            id _clr = ((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIColor"), sel_registerName("clearColor"));
+            ((void(*)(id,SEL,id))objc_msgSend)(_hb, sel_registerName("setBackgroundColor:"), _clr);
+            ((void(*)(id,SEL,id,SEL,unsigned long))objc_msgSend)(_hb, sel_registerName("addTarget:action:forControlEvents:"), gCBRExitTarget, sel_registerName("cbrExitTapped"), (unsigned long)(1UL<<6));
+            ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("addSubview:"), _hb);
+            ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("bringSubviewToFront:"), _hb);
+            HH("[v3.46.0] home-button dismiss zone added (bottom sidebar)\n");
+        } @catch(...) { HH("home zone failed\n"); }
         // --- v3.18.2: the scene is created ASYNC after launch. Re-run foreground +
         //     sceneView grab on a delay so the scene actually exists. ---
         // v3.20.7: delayed diagnostic pass REMOVED - it walked live scene client/subtree
@@ -3446,7 +3463,12 @@ static void cbrKLLog(const char *fmt, ...) {
 %hook UIRootSceneWindow
 - (id)hitTest:(CGPoint)point withEvent:(id)event {
     @try {
-        if ((id)self == gCBRRootWindow && gCBRSidebarW > 0.0 && point.x < gCBRSidebarW) return nil;
+        if ((id)self == gCBRRootWindow && gCBRSidebarW > 0.0 && point.x < gCBRSidebarW) {
+            // v3.46.0: bottom home-button zone -> let our transparent dismiss button take the tap.
+            CGRect _hb = ((CGRect(*)(id,SEL))objc_msgSend)(self, sel_registerName("bounds"));
+            if (gCBRHomeZoneH > 0.0 && point.y >= (_hb.size.height - gCBRHomeZoneH)) return %orig;
+            return nil;   // status + recents: pass through to native CarPlay chrome
+        }
     } @catch(...) {}
     return %orig;
 }
