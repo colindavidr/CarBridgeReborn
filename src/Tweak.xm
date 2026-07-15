@@ -3929,6 +3929,7 @@ static void cbrForceLandscapeGeometry(id win) {
         static int _rq=0; if(_rq++ < 8) cbrEvent("reeval landscape on %s", object_getClassName(rvc));
     } @catch(...) {}
 }
+static inline int cbrIsHostedLandscapeWindow(id win);   // v3.48.0 fwd decl (defined in the UIWindow hook below)
 static void cbrProbeTick(void) {
     // v3.22.2: NO early bail. v3.22.1 returned here whenever the gate was shut, so "no file"
     // was ambiguous between "probe never ran" and "never hosted". Always write; the dump
@@ -4037,7 +4038,7 @@ static void cbrProbeTick(void) {
                 // v3.35.1: ACTIVE-SRO, UNGATED. v3.35.0 nested the active _setRotatableViewOrientation
                 // call inside "if (vio != 3)", but the probe reports vcIfo=3 on these boots so it never
                 // ran (zero ACTIVE-SRO lines). carplay-cast calls it unconditionally at host time.
-                if (gCBROrientOverride > 0 && strcmp(object_getClassName(win), "YTMainWindow") == 0) {
+                if (cbrIsHostedLandscapeWindow(win)) {   // v3.48.0: all hosted apps, was YTMainWindow only
                     @try {
                         id _app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
                         id _kw = _app ? ((id(*)(id,SEL))objc_msgSend)(_app, sel_registerName("keyWindow")) : nil;
@@ -4052,7 +4053,7 @@ static void cbrProbeTick(void) {
                 // v3.33.0 DIRECT ASSERT: reactive setBounds: lock never fired on sideways boots
                 // (reused/inactive scene never calls setBounds: with a portrait value). Assert the
                 // landscape shape directly every tick - tap capture proved 932x430 = upright.
-                if (strcmp(object_getClassName(win), "YTMainWindow") == 0 && gCBROrientOverride > 0) {
+                if (cbrIsHostedLandscapeWindow(win)) {   // v3.48.0: all hosted apps, was YTMainWindow only
                     @try {
                         id _ws = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("windowScene"));
                         id _sc = _ws ? ((id(*)(id,SEL))objc_msgSend)(_ws, sel_registerName("screen")) : nil;
@@ -4061,7 +4062,7 @@ static void cbrProbeTick(void) {
                             CGFloat _mx = _sb.size.width > _sb.size.height ? _sb.size.width : _sb.size.height;
                             CGFloat _mn = _sb.size.width > _sb.size.height ? _sb.size.height : _sb.size.width;
                             if (_mx > 0 && (wb.size.height > wb.size.width || fabs(wb.size.width - _mx) > 1.0)) {
-                                static int _da=0; if(_da++ < 20) cbrEvent("DIRECT-ASSERT YTMainWindow %.0fx%.0f -> %.0fx%.0f (screen %.0fx%.0f)", wb.size.width, wb.size.height, _mx, _mn, _sb.size.width, _sb.size.height);
+                                static int _da=0; if(_da++ < 20) cbrEvent("DIRECT-ASSERT %s %.0fx%.0f -> %.0fx%.0f (screen %.0fx%.0f)", object_getClassName(win), wb.size.width, wb.size.height, _mx, _mn, _sb.size.width, _sb.size.height);
                                 ((void(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("setBounds:"), CGRectMake(0,0,_mx,_mn));
                                 ((void(*)(id,SEL,CGRect))objc_msgSend)(win, sel_registerName("setFrame:"),  CGRectMake(0,0,_mx,_mn));
                             }
@@ -4181,6 +4182,22 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
     }
     %orig;
 }
+// v3.48.0: is this the hosted app's window on a landscape (car) screen? The landscape lock
+// used to key on the literal class "YTMainWindow", which ONLY matched plain YouTube - so
+// Amazon / YouTube TV (Unplugged) / Reddit were never protected and broke on the AVPlayer
+// fullscreen-exit portrait write. Gate on the hosting override (set ONLY for the hash-matched
+// hosted app, v3.45.0) AND a landscape scene screen, so no genuine phone-portrait window is
+// touched. This makes the lock app-agnostic without risking non-hosted apps.
+static inline int cbrIsHostedLandscapeWindow(id win) {
+    if (gCBROrientOverride <= 0 || !win) return 0;
+    @try {
+        id ws = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("windowScene"));
+        id sc = ws ? ((id(*)(id,SEL))objc_msgSend)(ws, sel_registerName("screen")) : nil;
+        if (!sc) return 0;
+        CGRect sb = ((CGRect(*)(id,SEL))objc_msgSend)(sc, sel_registerName("bounds"));
+        return (sb.size.width > sb.size.height && sb.size.width > 0) ? 1 : 0;   // landscape car screen
+    } @catch(...) { return 0; }
+}
 - (void)setBounds:(CGRect)bounds {
     // v3.32.0 THE ROTATION FIX (proven by the tap capture): the manual tap flips YTMainWindow from
     // 430x932 (portrait, sideways) to 932x430 (landscape, upright) on a 932x430 io=3 screen. The
@@ -4190,8 +4207,10 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
     // <=520pt - but the hosted app's screen is 932x430 (max 932), so the gate ALWAYS failed and the
     // lock never ran (same reason the old portrait lock never fired). Gate on gCBROrientOverride>0
     // (set only while hosted) and derive the landscape size from the window's own scene screen.
-    if (gCBROrientOverride > 0 && bounds.size.height > bounds.size.width
-        && strstr(object_getClassName(self), "YTMainWindow")) {
+    // v3.48.0: app-agnostic (was gated to YTMainWindow, i.e. plain YouTube only). Fires the
+    // landscape lock on ANY hosted app's window that tries to go portrait - which is exactly
+    // what the AVPlayer fullscreen-exit does on Amazon / YouTube TV / Reddit.
+    if (bounds.size.height > bounds.size.width && cbrIsHostedLandscapeWindow(self)) {
         @try {
             id _ws = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("windowScene"));
             id _sc = _ws ? ((id(*)(id,SEL))objc_msgSend)(_ws, sel_registerName("screen")) : nil;
@@ -4200,7 +4219,7 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
                 CGFloat _mx = _sb.size.width > _sb.size.height ? _sb.size.width : _sb.size.height;
                 CGFloat _mn = _sb.size.width > _sb.size.height ? _sb.size.height : _sb.size.width;
                 if (_mx > 0) {
-                    static int _ll=0; if(_ll++ < 12) cbrEvent("LANDSCAPE-LOCK setBounds: %.0fx%.0f -> %.0fx%.0f (screen %.0fx%.0f)", bounds.size.width, bounds.size.height, _mx, _mn, _sb.size.width, _sb.size.height);
+                    static int _ll=0; if(_ll++ < 24) cbrEvent("LANDSCAPE-LOCK setBounds: %s %.0fx%.0f -> %.0fx%.0f (screen %.0fx%.0f)", object_getClassName(self), bounds.size.width, bounds.size.height, _mx, _mn, _sb.size.width, _sb.size.height);
                     bounds.size.width = _mx; bounds.size.height = _mn;
                 }
             }
@@ -4210,8 +4229,8 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
 }
 - (void)setFrame:(CGRect)frame {
     // v3.32.0: landscape lock (see setBounds:).
-    if (gCBROrientOverride > 0 && frame.size.height > frame.size.width
-        && strstr(object_getClassName(self), "YTMainWindow")) {
+    // v3.48.0: app-agnostic (see setBounds:).
+    if (frame.size.height > frame.size.width && cbrIsHostedLandscapeWindow(self)) {
         @try {
             id _ws = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("windowScene"));
             id _sc = _ws ? ((id(*)(id,SEL))objc_msgSend)(_ws, sel_registerName("screen")) : nil;
@@ -4219,7 +4238,10 @@ static inline int cbrCarSizeForWindow(id win, CGFloat *outMin, CGFloat *outMax) 
                 CGRect _sb = ((CGRect(*)(id,SEL))objc_msgSend)(_sc, sel_registerName("bounds"));
                 CGFloat _mx = _sb.size.width > _sb.size.height ? _sb.size.width : _sb.size.height;
                 CGFloat _mn = _sb.size.width > _sb.size.height ? _sb.size.height : _sb.size.width;
-                if (_mx > 0) { frame.size.width = _mx; frame.size.height = _mn; }
+                if (_mx > 0) {
+                    static int _lf=0; if(_lf++ < 12) cbrEvent("LANDSCAPE-LOCK setFrame: %s %.0fx%.0f -> %.0fx%.0f", object_getClassName(self), frame.size.width, frame.size.height, _mx, _mn);
+                    frame.size.width = _mx; frame.size.height = _mn;
+                }
             }
         } @catch(...) {}
     }
