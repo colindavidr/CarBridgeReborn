@@ -76,8 +76,37 @@ static void CBCarLogFmt(const char *fmt, ...) {
     va_end(ap);
     CBCarLog(buf);
 }
+static uint64_t cbrBidHash(const char *sV);   // v3.51.0 fwd decl (defined below)
+static CGFloat gCBRIconCX = 0, gCBRIconCY = 0;   // v3.51.0: last-highlighted dashboard icon center (car window coords)
+static double  gCBRIconTS = 0;                   // v3.51.0: when it was captured (monotonic)
 static void CBPostLaunch(const char *bid_cstr) {
     if (!bid_cstr) return;
+    // v3.51.0 ZOOM ORIGIN: publish the tapped icon's center so SpringBoard can grow the app
+    // out of the icon (and shrink it back into it on close), like stock CarPlay. 0 = no recent
+    // capture -> SpringBoard falls back to a center zoom.
+    @try {
+        static int _ict = 0;
+        if (!_ict) notify_register_check("com.cbr.icon.center", &_ict);
+        uint64_t _icv = 0;
+        struct timespec _its; clock_gettime(CLOCK_MONOTONIC, &_its);
+        double _inow = _its.tv_sec + _its.tv_nsec/1e9;
+        if (gCBRIconTS > 0 && (_inow - gCBRIconTS) < 3.0 && gCBRIconCX >= 0 && gCBRIconCY >= 0)
+            _icv = (((uint64_t)(gCBRIconCX + 0.5)) << 16) | ((uint64_t)(gCBRIconCY + 0.5));
+        if (_ict) notify_set_state(_ict, _icv);
+        if (_icv) CBCarLogFmt("[CBR-CP] v3.51.0 zoom origin published %.0f,%.0f", gCBRIconCX, gCBRIconCY);
+    } @catch(...) {}
+    // v3.51.0 PRE-SPAWN ARM: publish hash(bid) BEFORE the pending file and the launch
+    // notification. Until now the state was only written inside SpringBoard's launch callback,
+    // so the app process could win the spawn race, read state=0 at its ctor SYNC-GATE, resolve
+    // its FIRST orientation with the real portrait mask, and composite sideways from frame 1
+    // (Reddit sometimes, YouTube TV almost always; YouTube won the race, hence always upright).
+    // Publishing here means the state exists before ANY spawn path runs. SpringBoard re-publishes
+    // the same value moments later (harmless), dismiss + respring still zero it.
+    @try {
+        static int _pst = 0;
+        if (!_pst) notify_register_check("com.cbr.orient.landscape", &_pst);
+        if (_pst) { notify_set_state(_pst, cbrBidHash(bid_cstr)); CBCarLogFmt("[CBR-CP] v3.51.0 pre-spawn arm published -> %s", bid_cstr); }
+    } @catch(...) {}
     { int pfd = open("/var/mobile/CBR_pending_launch.txt",
                      O_WRONLY|O_CREAT|O_TRUNC, 0644);
       if (pfd >= 0) { write(pfd, bid_cstr, strlen(bid_cstr)); close(pfd); } }
@@ -1140,11 +1169,13 @@ static NSString *gCBRPendingHostBid = nil;  // bid being hosted - matched by the
 static int gCBRHostStateToken = 0;          // notify token: state 3 = hosting (apps read it SYNCHRONOUSLY at ctor)
 static int gCBRTruthTokenSB = 0;            // v3.47.0: notify token for com.cbr.app.truth (app publishes its REAL scene orientation)
 static int gCBRBounceCount = 0;             // tap-replay attempts this host session
+static int gCBRBlindBounce = 0;             // v3.51.0: no-truth blind edges this host session (max 2)
 static int gCBRBounceBypass = 0;            // lets our own deactivate edge through the keep-alive hook
 static id gCBRContainerView = nil;          // inset app container (right of the dock strip)
 static CGFloat gCBRSidebarW = 0;            // v3.44.0 native-chrome reveal: left strip we leave uncovered
 static uint64_t gCBROwnBidHash = 0;         // v3.45.0 app-side: hash of THIS app's bundle id
 static CGFloat gCBRHomeZoneH = 0;           // v3.46.0: bottom sidebar strip that dismisses (native home button lives here)
+static id gCBRHomeButton = nil;             // v3.51.0: the transparent dismiss button - hitTest returns it EXPLICITLY
 // v3.45.0 djb2 hash of a bundle id. The host publishes hash(hostedBid) as the notify state; each app
 // compares it to hash(ownBid). Only the app actually being hosted matches - so the landscape override
 // can never leak to a phone app (the Photos-went-landscape bug). Never returns 0 (0 = not hosting).
@@ -1167,7 +1198,7 @@ static uint64_t cbrReadHostState(void) {
 static void cbrSBHostDismiss(void) {
     @try { CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.unlock"), NULL, NULL, YES); } @catch(...) {}
     // v3.42.0: stop advertising "hosting" to launching apps + drop the pending create-match + container.
-    @try { if (gCBRHostStateToken) notify_set_state(gCBRHostStateToken, 0); gCBRPendingHostBid = nil; gCBRBounceCount = 0; gCBRBounceBypass = 0; gCBRContainerView = nil; } @catch(...) {}
+    @try { if (gCBRHostStateToken) notify_set_state(gCBRHostStateToken, 0); gCBRPendingHostBid = nil; gCBRBounceCount = 0; gCBRBounceBypass = 0; } @catch(...) {}   // v3.51.0: container must SURVIVE until the close zoom reads it - v3.50 nil'd it right here, so the close animation always saw nil and instant-hid (the "abrupt close")
     @try {
         int fd=open("/var/mobile/CBR_sb_host.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
         #define DD(m) do{ if(fd>=0){const char*_m=(m);write(fd,_m,strlen(_m));} }while(0)
@@ -1229,26 +1260,27 @@ static void cbrSBHostDismiss(void) {
             } else { DD("[exit] no stored bid to terminate\n"); }
         } @catch(NSException *e) { DD("[exit] terminate EXC\n"); }
 
-        // v3.50.0 CLOSE ANIMATION: fade + slight scale-down of the app container, then hide the
-        // window in the completion. Matches stock CarPlay app-close. Instant-hide fallback on throw.
+        // v3.51.0 CLOSE ANIMATION: ZOOM-OUT - the last rendered frame shrinks to the center
+        // (0.25) and fades, then the CAPTURED window hides in the completion (a re-host started
+        // mid-animation gets a fresh window and is never touched). Instant-hide on throw.
         @try {
             id _cont = gCBRContainerView;
             id _win = gCBRRootWindow;
             if (_cont && _win) {
                 void (^_out)(void) = ^{
                     ((void(*)(id,SEL,CGFloat))objc_msgSend)(_cont, sel_registerName("setAlpha:"), (CGFloat)0.0);
-                    ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(_cont, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.96, 0.96));
+                    ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(_cont, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.25, 0.25));
                 };
                 void (^_done)(BOOL) = ^(BOOL fin){ @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); } @catch(...) {} };
                 ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
                     objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
-                    0.28, 0.0, (NSUInteger)(1UL<<16), _out, _done);
+                    0.26, 0.0, (NSUInteger)(1UL<<16) /*EaseIn*/, _out, _done);
             } else if (_win) {
                 ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES);
             }
         } @catch(...) { if (gCBRRootWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRRootWindow, sel_registerName("setHidden:"), YES); } }
         @try { if (gCBROverlayWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBROverlayWindow, sel_registerName("setHidden:"), YES); gCBROverlayWindow = nil; } } @catch(...) {}
-        gCBRRootWindow = nil; gCBRAppVC = nil; gCBRActiveTxns = nil;
+        gCBRRootWindow = nil; gCBRAppVC = nil; gCBRActiveTxns = nil; gCBRSceneHandle = nil; gCBRContainerView = nil; gCBRHomeButton = nil;   // v3.51.0: release the grafted scene handle (leak = CarPlay content still composited after disconnect -> phone screenshot duplication) + container + button
         // v3.20.32: NOW release keep-alive (the .25 retain kept the app running -> audio continued +
         // left it in a half-state that black-screened on reopen). Releasing lets it suspend cleanly.
         @try { if (gCBRKeepAlive) [gCBRKeepAlive removeAllObjects]; } @catch(...) {}
@@ -1461,10 +1493,32 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
             ((void(*)(id,SEL,CGRect))objc_msgSend)(vcView, sel_registerName("setFrame:"), CGRectMake(0, 0, wf.size.width - sbW, wf.size.height));
             ((void(*)(id,SEL,id))objc_msgSend)(container, sel_registerName("addSubview:"), vcView);
             HHF("mounted appVC.view inset by %.0fpt sidebar (native chrome revealed)\n", sbW);
-            // v3.50.0 OPEN ANIMATION: fade + slight scale-up, matching stock CarPlay app-open.
+            // v3.51.0 OPEN ANIMATION: ZOOM-FROM-ICON, not fade. Anchor the container's zoom at
+            // the tapped dashboard icon (published by CarPlay over com.cbr.icon.center; center
+            // fallback), so the app grows out of the icon and the close zoom shrinks back into
+            // it - stock CarPlay behavior.
             @try {
-                ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)0.0);
-                CGAffineTransform _start = CGAffineTransformMakeScale(0.96, 0.96);
+                @try {
+                    uint64_t _icv = 0; static int _ict2 = 0;
+                    if (!_ict2) notify_register_check("com.cbr.icon.center", &_ict2);
+                    if (_ict2) notify_get_state(_ict2, &_icv);
+                    id _clyr2 = ((id(*)(id,SEL))objc_msgSend)(container, sel_registerName("layer"));
+                    CGRect _cf2 = ((CGRect(*)(id,SEL))objc_msgSend)(container, sel_registerName("frame"));
+                    if (_clyr2 && _cf2.size.width > 0 && _cf2.size.height > 0) {
+                        CGFloat _ax = 0.5, _ay = 0.5;
+                        if (_icv) {
+                            CGFloat _ix = (CGFloat)((_icv >> 16) & 0xFFFF), _iy = (CGFloat)(_icv & 0xFFFF);
+                            _ax = (_ix - _cf2.origin.x) / _cf2.size.width; _ay = _iy / _cf2.size.height;
+                            if (_ax < 0.02) _ax = 0.02; if (_ax > 0.98) _ax = 0.98;
+                            if (_ay < 0.02) _ay = 0.02; if (_ay > 0.98) _ay = 0.98;
+                        }
+                        ((void(*)(id,SEL,CGPoint))objc_msgSend)(_clyr2, sel_registerName("setAnchorPoint:"), CGPointMake(_ax, _ay));
+                        ((void(*)(id,SEL,CGPoint))objc_msgSend)(_clyr2, sel_registerName("setPosition:"), CGPointMake(_cf2.origin.x + _ax*_cf2.size.width, _cf2.origin.y + _ay*_cf2.size.height));
+                        HHF("[v3.51.0] zoom origin %s ax=%.2f ay=%.2f\n", _icv ? "ICON" : "center(fallback)", _ax, _ay);
+                    }
+                } @catch(...) {}
+                ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)0.35);
+                CGAffineTransform _start = CGAffineTransformMakeScale(0.30, 0.30);
                 ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), _start);
                 void (^_anim)(void) = ^{
                     ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
@@ -1472,7 +1526,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 };
                 ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
                     objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
-                    0.30, 0.0, (NSUInteger)(1UL<<16) /*EaseInOut*/, _anim, (void(^)(BOOL))nil);
+                    0.32, 0.0, (NSUInteger)(2UL<<16) /*EaseOut*/, _anim, (void(^)(BOOL))nil);
             } @catch(...) {}
         } @catch (NSException *e) { HHF("mount EXC: %s\n", [[e reason] UTF8String]?:"?"); }
         // --- v3.18.3: drive the transaction EXACTLY like the source ---
@@ -1857,7 +1911,8 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
             ((void(*)(id,SEL,id,SEL,unsigned long))objc_msgSend)(_hb, sel_registerName("addTarget:action:forControlEvents:"), gCBRExitTarget, sel_registerName("cbrExitTapped"), (unsigned long)(1UL<<6));
             ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("addSubview:"), _hb);
             ((void(*)(id,SEL,id))objc_msgSend)(rootWindow, sel_registerName("bringSubviewToFront:"), _hb);
-            HH("[v3.46.0] home-button dismiss zone added (bottom sidebar)\n");
+            gCBRHomeButton = _hb;   // v3.51.0: kept so hitTest can return it explicitly
+            HH("[v3.51.0] home-button dismiss zone added + stored (bottom sidebar)\n");
         } @catch(...) { HH("home zone failed\n"); }
         // --- v3.18.2: the scene is created ASYNC after launch. Re-run foreground +
         //     sceneView grab on a delay so the scene actually exists. ---
@@ -2507,6 +2562,24 @@ static void cbrApplyCarplayCastScale(void) {
             msz.height = mb.size.width > mb.size.height ? mb.size.height : mb.size.width;
         }
         if (msz.width <= 0 || msz.height <= 0) return;
+        // v3.51.0 CHROME-SNAP: setTransform: scales about the view's CENTER (anchor 0.5/0.5),
+        // so shrinking the 932pt content into the ~885pt container pulled BOTH edges toward the
+        // middle - opening a transparent strip on the container's left through which the
+        // dashboard showed. The measured 47pt inset was right; the anchor was wrong. Pin the
+        // content layer's anchor to the TOP-LEFT and derive the source size from the content's
+        // OWN bounds, so the app's left edge lands exactly on the chrome's right edge.
+        @try {
+            id _clyr = ((id(*)(id,SEL))objc_msgSend)(content, sel_registerName("layer"));
+            if (_clyr) {
+                CGPoint _ap = ((CGPoint(*)(id,SEL))objc_msgSend)(_clyr, sel_registerName("anchorPoint"));
+                if (_ap.x != 0.0 || _ap.y != 0.0) {
+                    ((void(*)(id,SEL,CGPoint))objc_msgSend)(_clyr, sel_registerName("setAnchorPoint:"), CGPointMake(0,0));
+                    ((void(*)(id,SEL,CGPoint))objc_msgSend)(_clyr, sel_registerName("setPosition:"), CGPointMake(0,0));
+                }
+            }
+        } @catch(...) {}
+        CGRect _cb2 = ((CGRect(*)(id,SEL))objc_msgSend)(content, sel_registerName("bounds"));
+        if (_cb2.size.width > 1 && _cb2.size.height > 1) { msz.width = _cb2.size.width; msz.height = _cb2.size.height; }
         CGFloat wScale = carB.size.width  / msz.width;
         CGFloat hScale = carB.size.height / msz.height;
         CGAffineTransform cur = ((CGAffineTransform(*)(id,SEL))objc_msgSend)(content, sel_registerName("transform"));
@@ -2520,7 +2593,7 @@ static void cbrApplyCarplayCastScale(void) {
                 if (_f >= 0) {
                     char _b[300];
                     int _n = snprintf(_b, sizeof(_b),
-                        "[CPC-SCALE] content %s scaled %.3f x %.3f (car %.0fx%.0f / main-landscape %.0fx%.0f)\n",
+                        "[CPC-SCALE v3.51.0] content %s scaled %.3f x %.3f (host %.0fx%.0f / src %.0fx%.0f anchor-pinned)\n",
                         object_getClassName(content), wScale, hScale,
                         carB.size.width, carB.size.height, msz.width, msz.height);
                     if (_n > 0) write(_f, _b, (size_t)_n);
@@ -2561,21 +2634,32 @@ static void cbrSBBounceCheck(void) {
         uint64_t _enc = 0;
         if (!gCBRTruthTokenSB) notify_register_check("com.cbr.app.truth", &gCBRTruthTokenSB);
         if (gCBRTruthTokenSB) notify_get_state(gCBRTruthTokenSB, &_enc);
-        long tifo = (long)(_enc % 10); int tland = _enc >= 10 ? 1 : 0;
+        long tifo = (long)(_enc % 10); int tland = (int)((_enc / 10) % 10); long tvio = (long)((_enc / 100) % 10);   // v3.51.0 decode
+        int contentPortrait = (tvio == 1 || tvio == 2);   // v3.51.0: rootVC laid out portrait = sideways composite
         { static uint64_t _le = 999999; static int _bc2 = 0;   // v3.49.0: log on change or 1-in-12
-          if (_enc != _le || (_bc2++ % 12) == 0) BB("BOUNCE-CHECK clientIfo=%ld truth=%llu (ifo=%ld winLandscape=%d) bounces=%d\n", cifo, (unsigned long long)_enc, tifo, tland, gCBRBounceCount);
+          if (_enc != _le || (_bc2++ % 12) == 0) BB("BOUNCE-CHECK clientIfo=%ld truth=%llu (ifo=%ld winLandscape=%d vio=%ld cp=%d) bounces=%d\n", cifo, (unsigned long long)_enc, tifo, tland, tvio, contentPortrait, gCBRBounceCount);
           _le = _enc; }
         if (_enc == 0) {
             static int _nt = 0;
             if (_nt++ < 4) { BB("no truth published yet - re-check in 3s (%d/4)\n", _nt); if(fd>=0)close(fd);
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBBounceCheck(); });
                 return; }
-            static int _rl = 0; if ((_rl++ % 12) == 0) BB("truth never arrived - refusing to bounce blind (watching every 5s)\n");   // v3.49.0
-            if(fd>=0)close(fd);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBBounceCheck(); });
-            return;
+            // v3.51.0 BLIND-BOUNCE: an armed app publishes truth every second, so sustained
+            // silence means the app never armed or its main queue never ran - exactly the
+            // population that boots sideways. The edge is the proven manual-tap replay and a
+            // no-op on a healthy app, so after the retries drive it anyway (max 2 per session);
+            // the edge also resumes a stalled main queue, which un-blocks probe arming itself.
+            if (gCBRBlindBounce < 2 && gCBRBounceCount < 3) {
+                gCBRBlindBounce++;
+                BB("BLIND-BOUNCE %d/2: no truth after retries - driving the edge anyway\n", gCBRBlindBounce);
+            } else {
+                static int _rl = 0; if ((_rl++ % 12) == 0) BB("truth never arrived - refusing to bounce blind (watching every 5s)\n");   // v3.49.0
+                if(fd>=0)close(fd);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBBounceCheck(); });
+                return;
+            }
         }
-        if ((tifo == 3 || tifo == 4) && tland) {
+        if ((tifo == 3 || tifo == 4) && tland && !contentPortrait) {   // v3.51.0: the CONTENT must agree, not just the scene
             gCBRBounceCount = 0;   // v3.49.0: fresh 3-bounce budget per incident
             static int _hl = 0; if ((_hl++ % 12) == 0) BB("app TRULY landscape - upright; watching every 5s (budget reset)\n");
             if(fd>=0)close(fd);
@@ -2588,7 +2672,7 @@ static void cbrSBBounceCheck(void) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(30.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBBounceCheck(); });
             return; }
         gCBRBounceCount++;
-        BB("BOUNCE#%d: driving deactivate edge\n", gCBRBounceCount);
+        BB("BOUNCE#%d: driving deactivate edge (%s)\n", gCBRBounceCount, contentPortrait ? "CONTENT-PORTRAIT sideways composite" : (_enc == 0 ? "blind - no truth" : "scene portrait"));
         if (fd>=0) close(fd);
         #undef BB
         gCBRBounceBypass = 1;
@@ -2698,7 +2782,7 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     // loaded-ping round-trip race) and remember the bid for the BORN-LANDSCAPE create hook.
     @try {
         if (bid[0]) gCBRPendingHostBid = [NSString stringWithUTF8String:bid];
-        gCBRBounceCount = 0;
+        gCBRBounceCount = 0; gCBRBlindBounce = 0;   // v3.51.0: fresh blind budget per host session
         if (!gCBRHostStateToken) notify_register_check("com.cbr.orient.landscape", &gCBRHostStateToken);
         // v3.45.0: publish hash(hostedBid) so ONLY the hosted app matches - the override can no longer
         // leak to phone apps (Photos went landscape because every app read the old constant state=3).
@@ -2730,13 +2814,11 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
             CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.landscape"), NULL, NULL, YES);
         }); }
     // v3.42.0: after launch settles, ask the client settings how the app REALLY laid out; bounce if portrait.
-    // v3.50.0 BOOT AUTO-REPLAY: unconditionally replay the phone-tap activation edge once, a beat
-    // after launch settles. On a sideways-composited boot the scene often reports landscape (truth
-    // encodes upright) so the truth-gated bounce never fires - but a real fg-ACTIVE value change
-    // still corrects it, exactly as tapping the icon on the phone does. Two staggered attempts
-    // cover fast (Reddit) and slow (YouTube TV) launchers.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(4.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ @try { if (gCBRRootWindow) { cbrSBLog("[CBR-SB] v3.50.0 boot auto-replay edge #1"); cbrSBSilentActivate(); } } @catch(...) {} });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(9.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ @try { if (gCBRRootWindow) { cbrSBLog("[CBR-SB] v3.50.0 boot auto-replay edge #2"); cbrSBSilentActivate(); } } @catch(...) {} });
+    // v3.51.0: the v3.50 auto-replay edges are REMOVED. cbrSBSilentActivate already fires 4x at
+    // host time (1.5/3/4.5/6s) and never fixed a sideways boot: a same-value settings write
+    // produces NO diff, so it never reaches the app. The lever that matches the manual phone tap
+    // is the bounce's deactivate->reactivate EDGE - which finally fires now that truth carries
+    // the content orientation (vio) and no-truth sessions escalate blind.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(8.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrSBBounceCheck(); });
     // v3.47.0: slow launchers (YouTube TV) may not have published truth by +8s; check again late.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(16.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ cbrSBBounceCheck(); });
@@ -2758,7 +2840,31 @@ static void cbrSBRegisterListener(void) {
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
         NULL, cbrSBDismissCallback, CFSTR("com.cbr.host.dismiss"),
         NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
-    cbrSBLog("[CBR-SB] observers registered (launch + host.dismiss)");
+    // v3.51.0 DISCONNECT TEARDOWN: nothing ever tore the host down when the car screen went
+    // away - the grafted scene + root window survived the disconnect, kept compositing, and
+    // showed up in PHONE screenshots (the screenshot-duplication bug). Tear down the moment the
+    // car screen disconnects while we host.
+    @try {
+        id _nc = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("NSNotificationCenter"), sel_registerName("defaultCenter"));
+        if (_nc) {
+            void (^_dis)(id) = ^(id note){
+                @try {
+                    id _scr = note ? ((id(*)(id,SEL))objc_msgSend)(note, sel_registerName("object")) : nil;
+                    SEL _ic = sel_registerName("_isCarScreen");
+                    BOOL _car = (_scr && [_scr respondsToSelector:_ic]) ? ((BOOL(*)(id,SEL))objc_msgSend)(_scr, _ic) : YES;
+                    if (!_car) return;
+                } @catch(...) {}
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    @try { if (gCBRRootWindow) { cbrSBLog("[CBR-SB] v3.51.0 car screen disconnected while hosting -> teardown"); cbrSBHostDismiss(); } } @catch(...) {}
+                });
+            };
+            ((id(*)(id,SEL,id,id,id,void(^)(id)))objc_msgSend)(_nc,
+                sel_registerName("addObserverForName:object:queue:usingBlock:"),
+                @"UIScreenDidDisconnectNotification", nil, nil, _dis);
+            cbrSBLog("[CBR-SB] v3.51.0 screen-disconnect teardown observer registered");
+        }
+    } @catch(...) {}
+    cbrSBLog("[CBR-SB] observers registered (launch + host.dismiss + screen-disconnect)");
 }
 
 // v3.15.2: probe the CarPlayApp process's own scenes/screens. The car window
@@ -3377,6 +3483,21 @@ static void cbrCPProbeChromeGeom(void) {
 // ── DBIconView — long press ───────────────────────────────────────────────────
 %hook DBIconView
 
+// v3.51.0 ZOOM ORIGIN capture: record the icon's center (window coords) the moment it
+// highlights; CBPostLaunch publishes it if the launch follows within 3s. If DBIconView has no
+// setHighlighted: this hook is a silent no-op and the zoom falls back to center.
+- (void)setHighlighted:(BOOL)h {
+    %orig;
+    @try {
+        if (h) {
+            CGRect _b = ((CGRect(*)(id,SEL))objc_msgSend)(self, sel_registerName("bounds"));
+            CGRect _wr = ((CGRect(*)(id,SEL,CGRect,id))objc_msgSend)(self, sel_registerName("convertRect:toView:"), _b, (id)nil);
+            gCBRIconCX = _wr.origin.x + _wr.size.width/2.0; gCBRIconCY = _wr.origin.y + _wr.size.height/2.0;
+            struct timespec _hts; clock_gettime(CLOCK_MONOTONIC, &_hts); gCBRIconTS = _hts.tv_sec + _hts.tv_nsec/1e9;
+        }
+    } @catch(...) {}
+}
+
 - (void)didMoveToWindow {
     %orig;
     @try {
@@ -3399,6 +3520,12 @@ static void cbrCPProbeChromeGeom(void) {
         if (!bidObj) return;
         const char *bid = ((const char*(*)(id,SEL))objc_msgSend)(bidObj,
             sel_registerName("UTF8String"));
+        @try {
+            CGRect _b = ((CGRect(*)(id,SEL))objc_msgSend)(self, sel_registerName("bounds"));
+            CGRect _wr = ((CGRect(*)(id,SEL,CGRect,id))objc_msgSend)(self, sel_registerName("convertRect:toView:"), _b, (id)nil);
+            gCBRIconCX = _wr.origin.x + _wr.size.width/2.0; gCBRIconCY = _wr.origin.y + _wr.size.height/2.0;
+            struct timespec _lts; clock_gettime(CLOCK_MONOTONIC, &_lts); gCBRIconTS = _lts.tv_sec + _lts.tv_nsec/1e9;
+        } @catch(...) {}
         CBCarLogFmt("[CBR-CP] tap(longpress) -> %s", bid ?: "?");
         CBPostLaunch(bid);
         CBLogFmt("[CBR] Long press: %s", bid ?: "?");
@@ -3579,7 +3706,14 @@ static void cbrKLLog(const char *fmt, ...) {
             // homescreen, not the dashboard we opened from. Route the tap to OUR dismiss target,
             // whose teardown returns to the dashboard. Return self so the tap hits our overlay
             // button (added at rootWindow level in cbrSBHostScene), not the app beneath.
-            if (gCBRHomeZoneH > 0.0 && point.y >= (_hb.size.height - gCBRHomeZoneH)) return %orig;
+            if (gCBRHomeZoneH > 0.0 && point.y >= (_hb.size.height - gCBRHomeZoneH)) {
+                // v3.51.0: return our dismiss button EXPLICITLY. Both prior behaviors were wrong:
+                // %orig let the tap fall to CarPlay's native go-home underneath (homescreen, not
+                // dashboard) and our dismiss never fired - the v3.50 "fix" kept %orig and changed
+                // nothing. An explicit return removes every hit-testing failure mode at once.
+                if (gCBRHomeButton) return gCBRHomeButton;
+                return %orig;
+            }
             // status + recents strip (above the home zone): still pass through for recents handoff.
             return nil;
         }
@@ -4047,6 +4181,29 @@ static void cbrProbeTick(void) {
                 gCBROrientOverride = 3;
                 cbrEvent("HOST-STATE armed at probe tick (state=%llu) -> override=3", (unsigned long long)_hs2);
                 cbrAppKickLandscape(0);
+                // v3.51.0 ARM-NUDGE: arming at a probe tick means we armed AFTER the app's first
+                // layout (warm app / lost race). The mask hooks now answer landscape-only but
+                // UIKit never re-asks on its own - force a re-resolution on every rootVC.
+                @try {
+                    id _napp = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+                    id _narr = _napp ? ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(_napp, sel_registerName("connectedScenes")), sel_registerName("allObjects")) : nil;
+                    NSUInteger _nsc = _narr ? ((NSUInteger(*)(id,SEL))objc_msgSend)(_narr, sel_registerName("count")) : 0;
+                    for (NSUInteger _ni = 0; _ni < _nsc; _ni++) {
+                        id _nsce = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(_narr, sel_registerName("objectAtIndex:"), _ni);
+                        if (!_nsce || ![_nsce isKindOfClass:objc_getClass("UIWindowScene")]) continue;
+                        id _nwins = ((id(*)(id,SEL))objc_msgSend)(_nsce, sel_registerName("windows"));
+                        NSUInteger _nwc = _nwins ? ((NSUInteger(*)(id,SEL))objc_msgSend)(_nwins, sel_registerName("count")) : 0;
+                        for (NSUInteger _nw = 0; _nw < _nwc; _nw++) {
+                            id _nwin = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(_nwins, sel_registerName("objectAtIndex:"), _nw);
+                            id _nrvc = _nwin ? ((id(*)(id,SEL))objc_msgSend)(_nwin, sel_registerName("rootViewController")) : nil;
+                            SEL _nupd = sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
+                            if (_nrvc && [_nrvc respondsToSelector:_nupd]) {
+                                static int _an = 0; if (_an++ < 6) cbrEvent("ARM-NUDGE re-resolution on %s", object_getClassName(_nrvc));
+                                ((void(*)(id,SEL))objc_msgSend)(_nrvc, _nupd);
+                            }
+                        }
+                    }
+                } @catch(...) {}
             }
         }
     } @catch(...) {}
@@ -4070,7 +4227,7 @@ static void cbrProbeTick(void) {
         // real main window - phone-canvas ~430x932/932x430 dwarfs any 472x281 template window)
         // and remember ITS scene's interfaceOrientation. That pair is the app's actual layout
         // truth; clientSettings proved to be an ACK of what we wrote, not what UIKit did.
-        long _truthIfo = 0; CGFloat _truthW = 0, _truthH = 0, _truthBest = 0;
+        long _truthIfo = 0, _truthVio = 0; CGFloat _truthW = 0, _truthH = 0, _truthBest = 0;   // v3.51.0: content orientation joins the truth
         id scenes = ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("connectedScenes"));
         id arr = scenes ? ((id(*)(id,SEL))objc_msgSend)(scenes, sel_registerName("allObjects")) : nil;
         NSUInteger sc = arr ? ((NSUInteger(*)(id,SEL))objc_msgSend)(arr, sel_registerName("count")) : 0;
@@ -4104,7 +4261,7 @@ static void cbrProbeTick(void) {
                 // v3.47.0: truth tracking - biggest window wins; its scene ifo is the app's truth.
                 if (gCBROrientOverride > 0) {
                     CGFloat _a = wb.size.width * wb.size.height;
-                    if (_a > _truthBest) { _truthBest = _a; _truthIfo = io; _truthW = wb.size.width; _truthH = wb.size.height; }
+                    if (_a > _truthBest) { _truthBest = _a; _truthIfo = io; _truthW = wb.size.width; _truthH = wb.size.height; _truthVio = (vio > 0 && vio <= 4) ? vio : 0; }   // v3.51.0: capture content orientation too
                 }
                 // v3.27.2: log WINDOW + rootVC-view TRANSFORM for EVERY window (not just YTMainWindow).
                 // Amazon renders upright, all others sideways, but we've only ever logged YTMainWindow -
@@ -4212,12 +4369,16 @@ static void cbrProbeTick(void) {
         }
         if (gCBROrientOverride > 0 && _truthBest > 0) {
             @try {
-                uint64_t _enc = (uint64_t)_truthIfo + ((_truthW > _truthH) ? 10 : 0);
+                // v3.51.0: hundreds digit = rootVC content orientation. An upright landscape
+                // boot (vio=3) and a sideways one (vio=1) BOTH published sceneIfo=3 + a
+                // landscape-shaped window (enc=13) - identical truth, so the bounce read
+                // "truly landscape" and never fired on the exact boots that needed it.
+                uint64_t _enc = (uint64_t)_truthIfo + ((_truthW > _truthH) ? 10 : 0) + ((uint64_t)_truthVio * 100);
                 static int _tt = 0; if (!_tt) notify_register_check("com.cbr.app.truth", &_tt);
                 if (_tt) notify_set_state(_tt, _enc);
                 static uint64_t _lastEnc = 999; static int _tlog = 0;
                 if (_enc != _lastEnc || _tlog < 3) {
-                    cbrEvent("TRUTH sceneIfo=%ld win=%.0fx%.0f enc=%llu (published)", _truthIfo, _truthW, _truthH, (unsigned long long)_enc);
+                    cbrEvent("TRUTH sceneIfo=%ld vio=%ld win=%.0fx%.0f enc=%llu (published)", _truthIfo, _truthVio, _truthW, _truthH, (unsigned long long)_enc);
                     _lastEnc = _enc; _tlog++;
                 }
             } @catch(...) {}
