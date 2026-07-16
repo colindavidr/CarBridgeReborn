@@ -3222,7 +3222,38 @@ static void cbrCPProbeScenes(void) {
     close(fd);
     CBLog("[CBR] CarPlayApp scene probe written to CBR_cp_scenes.txt");
 }
+static double gCBRHomeDownMs = 0;   // v3.58.0: DBStatusBarHomeButton press-start time (short vs long press)
 %group CARPLAY
+
+// v3.58.0 HOME BUTTON FIX (confirmed target from the v3.57 probe: DBStatusBarHomeButton on
+// DBRootStatusBarViewController fires homeButtonDown:/homeButtonUp:). A SHORT press while we host
+// returns to the CarPlay DASHBOARD (tear our host down), not the homescreen. A LONG press is left
+// untouched so Siri - which fires on the HOLD, between down and up - still works.
+%hook DBRootStatusBarViewController
+- (void)homeButtonDown:(id)arg1 {
+    @try { struct timespec _t; clock_gettime(CLOCK_MONOTONIC,&_t); gCBRHomeDownMs = _t.tv_sec*1000.0 + _t.tv_nsec/1000000.0; } @catch(...) {}
+    %orig;
+}
+- (void)homeButtonUp:(id)arg1 {
+    @try {
+        uint64_t _hs = cbrReadHostState();
+        double _now; { struct timespec _t; clock_gettime(CLOCK_MONOTONIC,&_t); _now = _t.tv_sec*1000.0 + _t.tv_nsec/1000000.0; }
+        double _dur = (gCBRHomeDownMs > 0) ? (_now - gCBRHomeDownMs) : 99999.0;
+        int _hf = open("/var/mobile/CBR_home_probe.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+        if (_hf >= 0) { char _b[160]; int _n = snprintf(_b,sizeof(_b),"[HOME-UP] dur=%.0fms hosting=%d\n", _dur, _hs!=0?1:0); if(_n>0) write(_hf,_b,(size_t)_n); close(_hf); }
+        if (_hs != 0 && _dur < 500.0) {
+            // short press while hosting -> return to the dashboard: post dismiss (tear our host down)
+            // + SWALLOW the native go-homescreen action. Long press (>=500ms) falls through so Siri
+            // stays intact.
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.host.dismiss"), NULL, NULL, YES);
+            int _hf2 = open("/var/mobile/CBR_home_probe.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+            if (_hf2 >= 0) { const char *_m = "  -> SHORT press while hosting: posted dismiss + swallowed (return to dashboard)\n"; write(_hf2,_m,strlen(_m)); close(_hf2); }
+            return;   // swallow - do NOT navigate to the homescreen
+        }
+    } @catch(...) {}
+    %orig;
+}
+%end
 
 // ── Phase 1: DashBoard._newApplicationLibrary ─────────────────────────────────
 // Pure C storage via __bridge void* — zero ARC, zero ObjC, zero PAC issues
@@ -4481,7 +4512,7 @@ static void cbrProbeTick(void) {
                 // the VCs UIKit resolves the pill from. The LEAF is what to hook (like CBR hooks
                 // YTAppViewControllerImpl for orientation). leafHidden=0 means the leaf overrides
                 // prefersHomeIndicatorAutoHidden and returns NO (bypassing our base hook = pill shows).
-                if (rvc && gCBROrientOverride > 0) {
+                if (rvc) {   // v3.58.0: ungated - the pill shows when DISARMED, so capture the chain regardless of ovr (ovr is logged)
                     static int _ppw = 0;
                     if (_ppw++ < 10) {
                         @try {
