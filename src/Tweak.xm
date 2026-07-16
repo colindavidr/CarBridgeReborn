@@ -3238,6 +3238,21 @@ static void cbrCPProbeScenes(void) {
     return lib;
 }
 
+// v3.56.0 HOME-BUTTON PROBE (SAFE, log-only). carplay-cast returns to the dashboard by sending a
+// CAREvent type 1 ("Close carplay app") to the dashboard via handleEvent:. Log every event (type +
+// class + whether CBR is hosting) so we can confirm the iOS-17 home-press path BEFORE acting on it
+// - a wrong CarPlay hook drops CarPlay into safe mode, so we capture first. Always calls %orig,
+// never swallows, so it cannot change navigation. If DashBoard has no handleEvent: this is inert.
+- (void)handleEvent:(id)event {
+    @try {
+        long _et = (event && [event respondsToSelector:sel_registerName("type")]) ? ((long(*)(id,SEL))objc_msgSend)(event, sel_registerName("type")) : -1;
+        uint64_t _hs = cbrReadHostState();
+        int _f = open("/var/mobile/CBR_home_probe.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+        if (_f >= 0) { char _b[240]; int _n = snprintf(_b,sizeof(_b),"[DashBoard handleEvent] type=%ld hosting=%d event=%s\n", _et, _hs!=0?1:0, event?object_getClassName(event):"nil"); if(_n>0) write(_f,_b,(size_t)_n); close(_f); }
+    } @catch(...) {}
+    %orig;
+}
+
 %end
 
 
@@ -3637,6 +3652,23 @@ static void cbrKLLog(const char *fmt, ...) {
                     ((void(*)(id,SEL,NSInteger))objc_msgSend)(ms, sel_registerName("setInterfaceOrientation:"), (NSInteger)3);
                     if ([ms respondsToSelector:sel_registerName("setDeviceOrientation:")])
                         ((void(*)(id,SEL,NSInteger))objc_msgSend)(ms, sel_registerName("setDeviceOrientation:"), (NSInteger)3);
+                    // v3.56.0 CONTENT-REFERENCE-SIZE (CarBridge RE linchpin): set the app's content
+                    // canvas + orientation TOGETHER so EVERY window it creates (main/keyboard/player/
+                    // launch) inherits landscape - the value UIKit propagates to the whole layout,
+                    // which frame-only setting never reaches. iOS17 may lack it; respondsToSelector-
+                    // gated + logged so it is inert if absent, never a regression.
+                    @try {
+                        cbrEnsurePhoneSize();
+                        CGFloat _crw = (gCBRPhoneH > gCBRPhoneW) ? gCBRPhoneH : gCBRPhoneW;
+                        CGFloat _crh = (gCBRPhoneH > gCBRPhoneW) ? gCBRPhoneW : gCBRPhoneH;
+                        SEL _crs2 = sel_registerName("setContentReferenceSize:withInterfaceOrientation:");
+                        int _crf = open("/var/mobile/CBR_create_scene.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+                        if (_crw > 0 && [ms respondsToSelector:_crs2]) {
+                            ((void(*)(id,SEL,CGSize,NSInteger))objc_msgSend)(ms, _crs2, CGSizeMake(_crw,_crh), (NSInteger)3);
+                            if (_crf>=0){ char _b[140]; int _n=snprintf(_b,sizeof(_b),"[v3.56.0 CRS2] setContentReferenceSize %.0fx%.0f io=3 APPLIED\n", _crw, _crh); if(_n>0)write(_crf,_b,(size_t)_n); }
+                        } else if (_crf>=0) { const char*_m="[v3.56.0 CRS2] setContentReferenceSize:withInterfaceOrientation: NOT available on this iOS\n"; write(_crf,_m,strlen(_m)); }
+                        if (_crf>=0) close(_crf);
+                    } @catch(...) {}
                     ((void(*)(id,SEL,id))objc_msgSend)(mp, sel_registerName("setSettings:"), ms);
                     @try {
                         id ct = [mp respondsToSelector:sel_registerName("clientSettings")] ? ((id(*)(id,SEL))objc_msgSend)(mp, sel_registerName("clientSettings")) : nil;
@@ -4700,6 +4732,14 @@ static inline int cbrIsHostedLandscapeWindow(id win) {
 // v3.53.0: hide the iOS home-indicator pill on the hosted app (Colin: remove the home bar from
 // the dash). Only while armed, so a genuine phone-foreground app is untouched.
 - (BOOL)prefersHomeIndicatorAutoHidden {
+    if (gCBROrientOverride > 0) return YES;
+    return %orig;
+}
+// v3.56.0: also hook the PRIVATE resolved variant. Per the CarBridge RE doc, apps override the
+// PUBLIC prefersHomeIndicatorAutoHidden (Amazon/Netflix/Reddit) so the base public hook loses, but
+// they rarely override the private resolved getter - hooking it catches them (same reason CarBridge
+// hooks __supportedInterfaceOrientations, not just the public method).
+- (BOOL)_preferredHomeIndicatorAutoHidden {
     if (gCBROrientOverride > 0) return YES;
     return %orig;
 }
