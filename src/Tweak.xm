@@ -2813,40 +2813,6 @@ static void cbrSBSilentActivate(void) {
         if(fd>=0){const char*m="[silent] foreground-activate delivered\n";write(fd,m,strlen(m));close(fd);}
     } @catch(...) {}
 }
-static int gCBRWatchOn = 0;   // v3.54.0: disconnect-watch running guard
-static void cbrSBDisconnectWatch(void) {
-    @try {
-        if (!gCBRRootWindow) { gCBRWatchOn = 0; return; }   // not hosting -> stop
-        int carPresent = 0;
-        id screens = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("screens"));
-        NSUInteger n = screens ? ((NSUInteger(*)(id,SEL))objc_msgSend)(screens, sel_registerName("count")) : 0;
-        for (NSUInteger i=0;i<n;i++){
-            id sc = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(screens, sel_registerName("objectAtIndex:"), i);
-            SEL _ic = sel_registerName("_isCarScreen");
-            if (sc && [sc respondsToSelector:_ic] && ((BOOL(*)(id,SEL))objc_msgSend)(sc, _ic)) { carPresent = 1; break; }
-        }
-        if (!carPresent) {
-            // v3.54.0 DISCONNECT WATCH: the UIScreenDidDisconnect observer never fired on CarPlay
-            // disconnect (zero FIRED lines), so the host window + its display binding survived as a
-            // phantom screen (the extra black+pill screenshot) AND the app scene was left in grafted
-            // display-mode 4 (YouTube black-screens on the phone until respring). Poll instead: the
-            // car UIScreen vanishes on disconnect - gone while we still host -> tear down. dismiss
-            // restores the app scene to mode 0 (fixes the black screen) + kills + hides.
-            cbrSBLog("[CBR-SB] v3.54.0 DISCONNECT-WATCH: car screen gone, still hosting -> teardown");
-            id _w = gCBRRootWindow;
-            cbrSBHostDismiss();
-            @try {
-                if (_w) {
-                    ((void(*)(id,SEL,id))objc_msgSend)(_w, sel_registerName("setRootViewController:"), (id)nil);
-                    if ([_w respondsToSelector:sel_registerName("setWindowScene:")]) ((void(*)(id,SEL,id))objc_msgSend)(_w, sel_registerName("setWindowScene:"), (id)nil);
-                }
-            } @catch(...) {}
-            gCBRWatchOn = 0;
-            return;
-        }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBDisconnectWatch(); });
-    } @catch(...) { gCBRWatchOn = 0; }
-}
 static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
                                 CFStringRef name, const void *object,
                                 CFDictionaryRef userInfo) {
@@ -2884,7 +2850,6 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     // cbrSBProbeSceneHandle(bid);      // diagnostic only - off hot path
     id _cbrHandle = cbrSBCreateSceneHandle(bid);
     cbrSBHostScene(bid, _cbrHandle);
-    if (!gCBRWatchOn) { gCBRWatchOn = 1; dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBDisconnectWatch(); }); }   // v3.54.0: watch for CarPlay disconnect (screenshot phantom + YouTube black-screen)
     // v3.25.7: wipe the drive log at host time so EACH open is a clean, self-contained capture.
     unlink("/var/mobile/CBR_drive.txt");
     for (int _i=0; _i<4; _i++) { double _d = 1.5 + _i*1.5;
@@ -3870,6 +3835,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
 // v3.20.44: APP-SIDE orientation lock (carplay-cast technique, into YouTube via filter).
 static int gCBROrientOverride = -1;
 static int gCBRWasArmed = 0;   // v3.54.0: this process was hosted (armed) at least once
+static double gCBRLastUnlock = 0;   // v3.55.0: monotonic ms of the last unlock (re-arm grace)
 static int gCBRVCFired = 0;
 static void cbrSBAppsideCallback(CFNotificationCenterRef c, void *obs, CFStringRef name, const void *o, CFDictionaryRef ui) {
     @try {
@@ -3978,7 +3944,7 @@ static void cbrAppKickLandscape(int depth) {
 static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringRef name, const void *o, CFDictionaryRef ui) {
     @try {
         char nm[128]; nm[0]=0; if(name) CFStringGetCString(name,nm,sizeof(nm),kCFStringEncodingUTF8);
-        if (strstr(nm,"unlock")) { static int _ud=0; if(_ud++ < 20) cbrEvent("UNLOCK-DISARM received -> ovr=-1 (was %d)", gCBROrientOverride); gCBROrientOverride = -1; return; }
+        if (strstr(nm,"unlock")) { static int _ud=0; if(_ud++ < 20) cbrEvent("UNLOCK-DISARM received -> ovr=-1 (was %d)", gCBROrientOverride); { struct timespec _ut; clock_gettime(CLOCK_MONOTONIC,&_ut); gCBRLastUnlock = _ut.tv_sec*1000.0 + _ut.tv_nsec/1000000.0; } gCBROrientOverride = -1; return; }
         // v3.45.0: the landscape notification is broadcast to EVERY injected app. Only react if the
         // host state matches THIS app's hash - otherwise a phone app (Photos) launched while we host
         // on the car would flip landscape on the phone. This is the second half of the leak fix.
@@ -4351,7 +4317,15 @@ static void cbrProbeTick(void) {
                 }
             } @catch(...) {}
             int _hostMatch = (_hs2 != 0 && _hs2 == gCBROwnBidHash);
-            int _stillHosted = ((_armSIfo == 3 || _armSIfo == 4) && (gCBRWasArmed || _hostMatch));
+            // v3.55.0: the wasArmed re-arm recovers a SPURIOUS unlock (app disarmed but still hosted)
+            // but must NOT fire during a GENUINE exit, or it re-arms + keep-alives a dying app and
+            // fights the teardown (= can't-exit, 2 overlapping scenes, YouTube zombie that won't
+            // re-host). A genuine dismiss SIGKILLs the app in ~1-2s, so wait 3s after the last unlock
+            // before re-arming on wasArmed alone. hostMatch (a real re-host republished the state)
+            // still re-arms immediately.
+            double _nowU; { struct timespec _nt; clock_gettime(CLOCK_MONOTONIC,&_nt); _nowU = _nt.tv_sec*1000.0 + _nt.tv_nsec/1000000.0; }
+            int _graceOK = (gCBRLastUnlock == 0 || (_nowU - gCBRLastUnlock) > 3000.0);
+            int _stillHosted = ((_armSIfo == 3 || _armSIfo == 4) && ((gCBRWasArmed && _graceOK) || _hostMatch));
             if (_hostMatch || _stillHosted) {
                 gCBROrientOverride = 3;
                 gCBRWasArmed = 1;
