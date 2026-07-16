@@ -105,7 +105,8 @@ static void CBPostLaunch(const char *bid_cstr) {
     @try {
         static int _pst = 0;
         if (!_pst) notify_register_check("com.cbr.orient.landscape", &_pst);
-        if (_pst) { notify_set_state(_pst, cbrBidHash(bid_cstr)); CBCarLogFmt("[CBR-CP] v3.51.0 pre-spawn arm published -> %s", bid_cstr); }
+        if (_pst) { notify_set_state(_pst, cbrBidHash(bid_cstr)); CBCarLogFmt("[CBR-CP] v3.52.0 pre-spawn arm published -> %s hash=%llu", bid_cstr, (unsigned long long)cbrBidHash(bid_cstr));
+            int _af=open("/var/mobile/CBR_arm_diag.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_af>=0){ char _ab[320]; int _an=snprintf(_ab,sizeof(_ab),"CP-PRESPAWN bid=[%s] hash=%llu\n", bid_cstr, (unsigned long long)cbrBidHash(bid_cstr)); if(_an>0)write(_af,_ab,(size_t)_an); close(_af);} }
     } @catch(...) {}
     { int pfd = open("/var/mobile/CBR_pending_launch.txt",
                      O_WRONLY|O_CREAT|O_TRUNC, 0644);
@@ -1176,13 +1177,17 @@ static CGFloat gCBRSidebarW = 0;            // v3.44.0 native-chrome reveal: lef
 static uint64_t gCBROwnBidHash = 0;         // v3.45.0 app-side: hash of THIS app's bundle id
 static CGFloat gCBRHomeZoneH = 0;           // v3.46.0: bottom sidebar strip that dismisses (native home button lives here)
 static id gCBRHomeButton = nil;             // v3.51.0: the transparent dismiss button - hitTest returns it EXPLICITLY
+static int gCBRScaleAnimated = 0;           // v3.52.0: one-shot scene grow-in per host session
 // v3.45.0 djb2 hash of a bundle id. The host publishes hash(hostedBid) as the notify state; each app
 // compares it to hash(ownBid). Only the app actually being hosted matches - so the landscape override
 // can never leak to a phone app (the Photos-went-landscape bug). Never returns 0 (0 = not hosting).
 static uint64_t cbrBidHash(const char *sV) {
     if (!sV) return 0;
     uint64_t h = 5381; int c;
-    while ((c = (unsigned char)*sV++)) h = ((h << 5) + h) + (uint64_t)c;
+    // v3.52.0: lowercase before hashing so a case difference between CarPlays launch-info bid
+    // string and the apps own NSBundle bundleIdentifier cannot desync the two hashes (that is
+    // why only YouTube - whose strings happened to match exactly - ever armed).
+    while ((c = (unsigned char)*sV++)) { if (c >= 'A' && c <= 'Z') c += 32; h = ((h << 5) + h) + (uint64_t)c; }
     return h ? h : 1;
 }
 // v3.45.0 read the current host state (works in any process: app / SpringBoard / CarPlay).
@@ -1294,7 +1299,7 @@ static void cbrSBHostDismiss(void) {
 @interface CBRExitTarget : NSObject
 @end
 @implementation CBRExitTarget
-- (void)cbrExitTapped { cbrSBHostDismiss(); }
+- (void)cbrExitTapped { int _f=open("/var/mobile/CBR_home.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_f>=0){ const char*m="EXIT-TAPPED fired -> dismiss\n"; write(_f,m,strlen(m)); close(_f);} cbrSBHostDismiss(); }   // v3.52.0 home diag
 @end
 static CBRExitTarget *gCBRExitTarget = nil;
 // v3.19.2: REFERENCE PROBE v2 - three routes to a live app scene view.
@@ -1481,7 +1486,14 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
             // chrome strip on the left. The strip is left transparent (window is clear) so the real
             // CarPlay sidebar shows through, and hitTest passes its touches down (see UIRootSceneWindow
             // hook), so the native dashboard button - not a custom one - is what returns to the dash.
-            CGFloat sbW = gCBRSidebarW > 0 ? gCBRSidebarW : wf.size.width * 0.11;
+            // v3.52.0 CHROME-OVERLAP: inset the app ~10pt LESS than the chrome width so its opaque
+            // left edge extends UNDER the chrome and covers the dashboard sliver that showed in the
+            // seam. 47pt landed the edge in the gap on every prior build; overlapping kills it. If
+            // the chrome glyph ever looks clipped, lower _overlap; if a sliver returns, raise it.
+            CGFloat _chromeW = gCBRSidebarW > 0 ? gCBRSidebarW : wf.size.width * 0.11;
+            CGFloat _overlap = 10.0;
+            CGFloat sbW = _chromeW - _overlap; if (sbW < 0) sbW = 0;
+            HHF("[v3.52.0] chrome overlap: chromeW=%.0f overlap=%.0f -> app inset=%.0f\n", _chromeW, _overlap, sbW);
             Class UIViewCls = objc_getClass("UIView");
             id container = ((id(*)(id,SEL,CGRect))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(UIViewCls, sel_registerName("alloc")), sel_registerName("initWithFrame:"), CGRectMake(sbW, 0, wf.size.width - sbW, wf.size.height));
             id clear = ((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIColor"), sel_registerName("clearColor"));
@@ -2562,30 +2574,31 @@ static void cbrApplyCarplayCastScale(void) {
             msz.height = mb.size.width > mb.size.height ? mb.size.height : mb.size.width;
         }
         if (msz.width <= 0 || msz.height <= 0) return;
-        // v3.51.0 CHROME-SNAP: setTransform: scales about the view's CENTER (anchor 0.5/0.5),
-        // so shrinking the 932pt content into the ~885pt container pulled BOTH edges toward the
-        // middle - opening a transparent strip on the container's left through which the
-        // dashboard showed. The measured 47pt inset was right; the anchor was wrong. Pin the
-        // content layer's anchor to the TOP-LEFT and derive the source size from the content's
-        // OWN bounds, so the app's left edge lands exactly on the chrome's right edge.
-        @try {
-            id _clyr = ((id(*)(id,SEL))objc_msgSend)(content, sel_registerName("layer"));
-            if (_clyr) {
-                CGPoint _ap = ((CGPoint(*)(id,SEL))objc_msgSend)(_clyr, sel_registerName("anchorPoint"));
-                if (_ap.x != 0.0 || _ap.y != 0.0) {
-                    ((void(*)(id,SEL,CGPoint))objc_msgSend)(_clyr, sel_registerName("setAnchorPoint:"), CGPointMake(0,0));
-                    ((void(*)(id,SEL,CGPoint))objc_msgSend)(_clyr, sel_registerName("setPosition:"), CGPointMake(0,0));
-                }
-            }
-        } @catch(...) {}
-        CGRect _cb2 = ((CGRect(*)(id,SEL))objc_msgSend)(content, sel_registerName("bounds"));
-        if (_cb2.size.width > 1 && _cb2.size.height > 1) { msz.width = _cb2.size.width; msz.height = _cb2.size.height; }
+        // v3.52.0: REVERTED the v3.51 anchor-pin + content-bounds divisor. Using the content's OWN
+        // (already-scaled) bounds as the divisor made this frames scale depend on last frames scale
+        // - a feedback loop that shrank the app a little more every FBScene tick (the runaway Colin
+        // saw). Back to the stable v3.50 math: fixed main-screen landscape size, center anchor. The
+        // chrome gap is now closed by the container OVERLAP inset instead (see cbrSBHostScene).
         CGFloat wScale = carB.size.width  / msz.width;
         CGFloat hScale = carB.size.height / msz.height;
         CGAffineTransform cur = ((CGAffineTransform(*)(id,SEL))objc_msgSend)(content, sel_registerName("transform"));
         if (fabs(cur.a - wScale) > 0.001 || fabs(cur.d - hScale) > 0.001) {
+            CGAffineTransform _final = CGAffineTransformMakeScale(wScale, hScale);
+            if (!gCBRScaleAnimated) {
+                // v3.52.0 SCENE GROW-IN: the container zoom animates the chrome frame, but the apps
+                // render surface attaches async AFTER that and popped in. The first time we scale it
+                // this host, start ~12% smaller and grow to final so the surface has its own entrance.
+                gCBRScaleAnimated = 1;
+                @try {
+                    ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(content, sel_registerName("setTransform:"), CGAffineTransformScale(_final, 0.88, 0.88));
+                    void (^_grow)(void) = ^{ ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(content, sel_registerName("setTransform:"), _final); };
+                    ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
+                        objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
+                        0.30, 0.0, (NSUInteger)(2UL<<16) /*EaseOut*/, _grow, (void(^)(BOOL))nil);
+                } @catch(...) { ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(content, sel_registerName("setTransform:"), _final); }
+            } else
             ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(content, sel_registerName("setTransform:"),
-                CGAffineTransformMakeScale(wScale, hScale));
+                _final);
             static int _sc=0;
             if (_sc++ < 12) {
                 // CHF() needs a local cfd that only exists in the host block - write directly.
@@ -2593,7 +2606,7 @@ static void cbrApplyCarplayCastScale(void) {
                 if (_f >= 0) {
                     char _b[300];
                     int _n = snprintf(_b, sizeof(_b),
-                        "[CPC-SCALE v3.51.0] content %s scaled %.3f x %.3f (host %.0fx%.0f / src %.0fx%.0f anchor-pinned)\n",
+                        "[CPC-SCALE v3.52.0] content %s scaled %.3f x %.3f (host %.0fx%.0f / main-landscape %.0fx%.0f stable)\n",
                         object_getClassName(content), wScale, hScale,
                         carB.size.width, carB.size.height, msz.width, msz.height);
                     if (_n > 0) write(_f, _b, (size_t)_n);
@@ -2782,7 +2795,7 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     // loaded-ping round-trip race) and remember the bid for the BORN-LANDSCAPE create hook.
     @try {
         if (bid[0]) gCBRPendingHostBid = [NSString stringWithUTF8String:bid];
-        gCBRBounceCount = 0; gCBRBlindBounce = 0;   // v3.51.0: fresh blind budget per host session
+        gCBRBounceCount = 0; gCBRBlindBounce = 0; gCBRScaleAnimated = 0;   // v3.51.0/v3.52.0: fresh blind budget + grow-in per host session
         if (!gCBRHostStateToken) notify_register_check("com.cbr.orient.landscape", &gCBRHostStateToken);
         // v3.45.0: publish hash(hostedBid) so ONLY the hosted app matches - the override can no longer
         // leak to phone apps (Photos went landscape because every app read the old constant state=3).
@@ -2791,7 +2804,8 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
         // last app would wrongly suppress the bounce).
         if (!gCBRTruthTokenSB) notify_register_check("com.cbr.app.truth", &gCBRTruthTokenSB);
         if (gCBRTruthTokenSB) notify_set_state(gCBRTruthTokenSB, 0);
-        cbrSBLog("[CBR-SB] v3.45.0 host state=hash(bid) published, pending bid armed");
+        { char _pb[320]; int _pn=snprintf(_pb,sizeof(_pb),"[CBR-SB] v3.52.0 host published bid=[%s] hash=%llu", bid[0]?bid:"(empty)", (unsigned long long)cbrBidHash(bid[0]?bid:"")); if(_pn>0) cbrSBLog(_pb);
+          int _af=open("/var/mobile/CBR_arm_diag.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_af>=0){ char _ab[320]; int _an=snprintf(_ab,sizeof(_ab),"SB-PUBLISH bid=[%s] hash=%llu\n", bid[0]?bid:"(empty)", (unsigned long long)cbrBidHash(bid[0]?bid:"")); if(_an>0)write(_af,_ab,(size_t)_an); close(_af);} }
     } @catch(...) {}
     // v3.20.11: PATH-A + probes REMOVED from the hot path. cbrSBReassignToCarPlay
     // poked the LIVE main-display scene's display config on every tap; the composite
@@ -3371,7 +3385,9 @@ static void cbrCPProbeChromeGeom(void) {
                             // indent by depth
                             char ind[24]; int ii; for(ii=0;ii<d && ii<10;ii++) ind[ii]=' '; ind[ii]=0;
                             // only log views wider/taller than trivial + name hints of chrome
-                            CG("  %s%s frame=%.0f,%.0f %.0fx%.0f\n", ind, vn, vf.origin.x,vf.origin.y,vf.size.width,vf.size.height);
+                            const char *_mk = "";
+                            if (vn && (strcasestr(vn,"button")||strcasestr(vn,"home")||strcasestr(vn,"dashboard")||strcasestr(vn,"dock"))) _mk = "   <== BTN/HOME/DASH?";   // v3.52.0: greppable for the supported-vs-unsupported home/chrome comparison
+                            CG("  %s%s frame=%.0f,%.0f %.0fx%.0f%s\n", ind, vn, vf.origin.x,vf.origin.y,vf.size.width,vf.size.height, _mk);
                             // v3.50.0 sidebar test: left-anchored (x<=2), narrow (20..140), tall (>=70% of window height).
                             if (_winH > 0 && vf.origin.x <= 2.0 && vf.size.width >= 20.0 && vf.size.width <= 140.0
                                 && vf.size.height >= _winH * 0.70) {
@@ -3707,6 +3723,7 @@ static void cbrKLLog(const char *fmt, ...) {
             // whose teardown returns to the dashboard. Return self so the tap hits our overlay
             // button (added at rootWindow level in cbrSBHostScene), not the app beneath.
             if (gCBRHomeZoneH > 0.0 && point.y >= (_hb.size.height - gCBRHomeZoneH)) {
+                { static int _hl=0; if(_hl++ < 40){ int _f=open("/var/mobile/CBR_home.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_f>=0){ char _b[200]; int _n=snprintf(_b,sizeof(_b),"HITTEST home-zone x=%.0f y=%.0f winH=%.0f sbW=%.0f zoneH=%.0f btn=%d\n", point.x, point.y, _hb.size.height, gCBRSidebarW, gCBRHomeZoneH, gCBRHomeButton?1:0); if(_n>0)write(_f,_b,(size_t)_n); close(_f);} } }   // v3.52.0 home diag
                 // v3.51.0: return our dismiss button EXPLICITLY. Both prior behaviors were wrong:
                 // %orig let the tap fall to CarPlay's native go-home underneath (homescreen, not
                 // dashboard) and our dismiss never fired - the v3.50 "fix" kept %orig and changed
@@ -4652,6 +4669,7 @@ static inline int cbrIsHostedLandscapeWindow(id win) {
                 id _bo = _mb ? ((id(*)(id,SEL))objc_msgSend)(_mb, sel_registerName("bundleIdentifier")) : nil;
                 const char *_bc = _bo ? ((const char*(*)(id,SEL))objc_msgSend)(_bo, sel_registerName("UTF8String")) : NULL;
                 gCBROwnBidHash = cbrBidHash(_bc);
+                cbrEvent("SYNC-GATE ownBid=[%s]", _bc ? _bc : "(nil)");   // v3.52.0: log the string so a CP/app bid mismatch is visible
             } @catch(...) {}
             uint64_t _st = cbrReadHostState();
             if (_st != 0 && _st == gCBROwnBidHash) gCBROrientOverride = 3;
