@@ -3603,6 +3603,20 @@ static void cbrCPProbeChromeGeom(void) {
 
 %end
 
+// v3.57.0 HOME-BUTTON PROBE v2: DashBoard.handleEvent: never fired, so log every UIControl tap in
+// the CarPlay process (action selector + target class + the control's own class + hosting). The
+// home/dashboard button is a control, so pressing it reveals exactly what to hook + call for the fix.
+%hook UIControl
+- (void)sendAction:(SEL)action to:(id)target forEvent:(id)event
+{
+    @try {
+        uint64_t _hs = cbrReadHostState();
+        int _f = open("/var/mobile/CBR_home_probe.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+        if (_f >= 0) { char _b[300]; int _n = snprintf(_b,sizeof(_b),"[UIControl] action=%s target=%s control=%s hosting=%d\n", action?sel_getName(action):"nil", target?object_getClassName(target):"nil", object_getClassName(self), _hs!=0?1:0); if(_n>0) write(_f,_b,(size_t)_n); close(_f); }
+    } @catch(...) {}
+    %orig;
+}
+%end
 %end  // group CARPLAY
 
 
@@ -4463,6 +4477,28 @@ static void cbrProbeTick(void) {
                     (unsigned long)w, object_getClassName(win), wb.size.width, wb.size.height,
                     rvc ? object_getClassName(rvc) : "nil", vio,
                     _wtf.a,_wtf.b,_wtf.c,_wtf.d, _vtf.a,_vtf.b,_vtf.c,_vtf.d];
+                // v3.57.0 PILL PROBE: walk the childViewControllerForHomeIndicatorAutoHidden chain -
+                // the VCs UIKit resolves the pill from. The LEAF is what to hook (like CBR hooks
+                // YTAppViewControllerImpl for orientation). leafHidden=0 means the leaf overrides
+                // prefersHomeIndicatorAutoHidden and returns NO (bypassing our base hook = pill shows).
+                if (rvc && gCBROrientOverride > 0) {
+                    static int _ppw = 0;
+                    if (_ppw++ < 10) {
+                        @try {
+                            id _cur = rvc; int _d = 0; char _chain[400]; int _co = 0;
+                            SEL _scHI = sel_registerName("childViewControllerForHomeIndicatorAutoHidden");
+                            while (_cur && _d < 8) {
+                                int _wr = snprintf(_chain+_co, sizeof(_chain)-_co, "%s%s", _d?" -> ":"", object_getClassName(_cur));
+                                if (_wr <= 0) break; _co += _wr;
+                                id _nx = [_cur respondsToSelector:_scHI] ? ((id(*)(id,SEL))objc_msgSend)(_cur, _scHI) : nil;
+                                if (!_nx || _nx == _cur) break; _cur = _nx; _d++;
+                            }
+                            SEL _spHI = sel_registerName("prefersHomeIndicatorAutoHidden");
+                            int _leaf = (_cur && [_cur respondsToSelector:_spHI]) ? ((BOOL(*)(id,SEL))objc_msgSend)(_cur, _spHI) : -1;
+                            cbrEvent("PILL-PROBE chain=[%s] leaf=%s leafHidden=%d ovr=%d", _chain, _cur?object_getClassName(_cur):"nil", _leaf, gCBROrientOverride);
+                        } @catch(...) {}
+                    }
+                }
                 if (rvc && gCBROrientOverride > 0 && vio != gCBRLastVcIfo) {   // v3.44.0: ALL hosted windows, not just YTMainWindow
                     NSUInteger rSupp = ((NSUInteger(*)(id,SEL))objc_msgSend)(rvc, sel_registerName("supportedInterfaceOrientations"));
                     SEL _priv = sel_registerName("__supportedInterfaceOrientations");
@@ -4804,6 +4840,21 @@ static inline int cbrIsHostedLandscapeWindow(id win) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
+        // v3.57.0 DISCONNECT PROBE: the screenshot phantom needs teardown on CarPlay disconnect, and
+        // UIScreenDidDisconnect never fired in SpringBoard. Observe the likely signals in the CarPlay
+        // process + log which fires on unplug (CBR_disconnect_probe.txt).
+        @try {
+            unlink("/var/mobile/CBR_disconnect_probe.txt");
+            id _dc = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("NSNotificationCenter"), sel_registerName("defaultCenter"));
+            NSArray *_dnames = @[@"UIScreenDidDisconnectNotification", @"UISceneDidDisconnectNotification", @"UISceneWillDeactivateNotification", @"UIApplicationDidEnterBackgroundNotification", @"UIApplicationWillResignActiveNotification"];
+            for (NSString *_dn in _dnames) {
+                NSString *_dncap = _dn;
+                void (^_dblk)(id) = ^(id note){
+                    @try { int _f=open("/var/mobile/CBR_disconnect_probe.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_f>=0){ char _b[200]; int _n=snprintf(_b,sizeof(_b),"[DISCONNECT-PROBE] fired: %s\n", [_dncap UTF8String]); if(_n>0)write(_f,_b,(size_t)_n); close(_f);} } @catch(...) {}
+                };
+                ((id(*)(id,SEL,id,id,id,void(^)(id)))objc_msgSend)(_dc, sel_registerName("addObserverForName:object:queue:usingBlock:"), _dn, nil, nil, _dblk);
+            }
+        } @catch(...) {}
         // v3.29.0: start the CarPlay-side rotation probe (the one process never instrumented).
         unlink("/var/mobile/CBR_cp_rotation.txt");
         cbrCPRotationSchedule();
