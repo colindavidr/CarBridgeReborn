@@ -1940,8 +1940,10 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         @try {
             if (!gCBRExitTarget) gCBRExitTarget = [[CBRExitTarget alloc] init];
             CGRect _owb = ((CGRect(*)(id,SEL))objc_msgSend)(rootWindow, sel_registerName("bounds"));
-            Class _owc = objc_getClass("UIRootSceneWindow");
-            id _ovl = ((id(*)(id,SEL,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(_owc, sel_registerName("alloc")), sel_registerName("initWithDisplayConfiguration:"), dispCfg);
+            // v3.54.0: overlay window DISABLED - zero OVERLAY-HIT in the logs (the CarPlay chrome
+            // owns the sidebar touches, not our SpringBoard window stack), and a full-display
+            // level-100 window only risked the recents inconsistency. Home needs a CarPlay-side hook.
+            id _ovl = nil;
             if (_ovl) {
                 gCBROverlayWindow = _ovl;
                 ((void(*)(id,SEL,double))objc_msgSend)(_ovl, sel_registerName("setWindowLevel:"), (double)100.0);
@@ -2811,6 +2813,40 @@ static void cbrSBSilentActivate(void) {
         if(fd>=0){const char*m="[silent] foreground-activate delivered\n";write(fd,m,strlen(m));close(fd);}
     } @catch(...) {}
 }
+static int gCBRWatchOn = 0;   // v3.54.0: disconnect-watch running guard
+static void cbrSBDisconnectWatch(void) {
+    @try {
+        if (!gCBRRootWindow) { gCBRWatchOn = 0; return; }   // not hosting -> stop
+        int carPresent = 0;
+        id screens = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("screens"));
+        NSUInteger n = screens ? ((NSUInteger(*)(id,SEL))objc_msgSend)(screens, sel_registerName("count")) : 0;
+        for (NSUInteger i=0;i<n;i++){
+            id sc = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(screens, sel_registerName("objectAtIndex:"), i);
+            SEL _ic = sel_registerName("_isCarScreen");
+            if (sc && [sc respondsToSelector:_ic] && ((BOOL(*)(id,SEL))objc_msgSend)(sc, _ic)) { carPresent = 1; break; }
+        }
+        if (!carPresent) {
+            // v3.54.0 DISCONNECT WATCH: the UIScreenDidDisconnect observer never fired on CarPlay
+            // disconnect (zero FIRED lines), so the host window + its display binding survived as a
+            // phantom screen (the extra black+pill screenshot) AND the app scene was left in grafted
+            // display-mode 4 (YouTube black-screens on the phone until respring). Poll instead: the
+            // car UIScreen vanishes on disconnect - gone while we still host -> tear down. dismiss
+            // restores the app scene to mode 0 (fixes the black screen) + kills + hides.
+            cbrSBLog("[CBR-SB] v3.54.0 DISCONNECT-WATCH: car screen gone, still hosting -> teardown");
+            id _w = gCBRRootWindow;
+            cbrSBHostDismiss();
+            @try {
+                if (_w) {
+                    ((void(*)(id,SEL,id))objc_msgSend)(_w, sel_registerName("setRootViewController:"), (id)nil);
+                    if ([_w respondsToSelector:sel_registerName("setWindowScene:")]) ((void(*)(id,SEL,id))objc_msgSend)(_w, sel_registerName("setWindowScene:"), (id)nil);
+                }
+            } @catch(...) {}
+            gCBRWatchOn = 0;
+            return;
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBDisconnectWatch(); });
+    } @catch(...) { gCBRWatchOn = 0; }
+}
 static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
                                 CFStringRef name, const void *object,
                                 CFDictionaryRef userInfo) {
@@ -2848,6 +2884,7 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     // cbrSBProbeSceneHandle(bid);      // diagnostic only - off hot path
     id _cbrHandle = cbrSBCreateSceneHandle(bid);
     cbrSBHostScene(bid, _cbrHandle);
+    if (!gCBRWatchOn) { gCBRWatchOn = 1; dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBDisconnectWatch(); }); }   // v3.54.0: watch for CarPlay disconnect (screenshot phantom + YouTube black-screen)
     // v3.25.7: wipe the drive log at host time so EACH open is a clean, self-contained capture.
     unlink("/var/mobile/CBR_drive.txt");
     for (int _i=0; _i<4; _i++) { double _d = 1.5 + _i*1.5;
@@ -3832,6 +3869,7 @@ static void cbrLogHook(int fd, const char *clsName, char kind, const char *selNa
 
 // v3.20.44: APP-SIDE orientation lock (carplay-cast technique, into YouTube via filter).
 static int gCBROrientOverride = -1;
+static int gCBRWasArmed = 0;   // v3.54.0: this process was hosted (armed) at least once
 static int gCBRVCFired = 0;
 static void cbrSBAppsideCallback(CFNotificationCenterRef c, void *obs, CFStringRef name, const void *o, CFDictionaryRef ui) {
     @try {
@@ -3940,7 +3978,7 @@ static void cbrAppKickLandscape(int depth) {
 static void cbrAppOrientCallback(CFNotificationCenterRef c, void *obs, CFStringRef name, const void *o, CFDictionaryRef ui) {
     @try {
         char nm[128]; nm[0]=0; if(name) CFStringGetCString(name,nm,sizeof(nm),kCFStringEncodingUTF8);
-        if (strstr(nm,"unlock")) { gCBROrientOverride = -1; return; }
+        if (strstr(nm,"unlock")) { static int _ud=0; if(_ud++ < 20) cbrEvent("UNLOCK-DISARM received -> ovr=-1 (was %d)", gCBROrientOverride); gCBROrientOverride = -1; return; }
         // v3.45.0: the landscape notification is broadcast to EVERY injected app. Only react if the
         // host state matches THIS app's hash - otherwise a phone app (Photos) launched while we host
         // on the car would flip landscape on the phone. This is the second half of the leak fix.
@@ -4278,6 +4316,7 @@ static void cbrProbeTick(void) {
     // reports override so we can tell which.
     // v3.49.0 HOST-STATE ARM: see patch header. Runs BEFORE the main probe body so an
     // exception anywhere in the dump can never starve the arming path.
+    if (gCBROrientOverride > 0) gCBRWasArmed = 1;   // v3.54.0: remember we were hosted this process
     @try {
         if (gCBROrientOverride <= 0) {
             if (gCBROwnBidHash == 0) {
@@ -4287,9 +4326,36 @@ static void cbrProbeTick(void) {
                 gCBROwnBidHash = cbrBidHash(_bc);
             }
             uint64_t _hs2 = cbrReadHostState();
-            if (_hs2 != 0 && _hs2 == gCBROwnBidHash) {
+            // v3.54.0 RE-ARM: sideways == ovr disarmed by a spurious unlock while STILL hosted.
+            // Read the biggest window's SCENE orientation; a hosted app's scene is landscape (3/4,
+            // we set BORN-LANDSCAPE), a phone app's is portrait (1). Landscape scene + (armed this
+            // process OR host state still matches) == still hosted -> re-arm and re-force landscape.
+            long _armSIfo = -1; CGFloat _armBest = 0;
+            @try {
+                id _aapp = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+                id _aarr = _aapp ? ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(_aapp, sel_registerName("connectedScenes")), sel_registerName("allObjects")) : nil;
+                NSUInteger _asc = _aarr ? ((NSUInteger(*)(id,SEL))objc_msgSend)(_aarr, sel_registerName("count")) : 0;
+                for (NSUInteger _ai=0; _ai<_asc; _ai++){
+                    id _asce = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(_aarr, sel_registerName("objectAtIndex:"), _ai);
+                    if (!_asce || ![_asce isKindOfClass:objc_getClass("UIWindowScene")]) continue;
+                    long _aio = ((long(*)(id,SEL))objc_msgSend)(_asce, sel_registerName("interfaceOrientation"));
+                    id _awins = ((id(*)(id,SEL))objc_msgSend)(_asce, sel_registerName("windows"));
+                    NSUInteger _awc = _awins ? ((NSUInteger(*)(id,SEL))objc_msgSend)(_awins, sel_registerName("count")) : 0;
+                    for (NSUInteger _aw=0; _aw<_awc; _aw++){
+                        id _awin = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(_awins, sel_registerName("objectAtIndex:"), _aw);
+                        if(!_awin) continue;
+                        CGRect _awb = ((CGRect(*)(id,SEL))objc_msgSend)(_awin, sel_registerName("bounds"));
+                        CGFloat _aa = _awb.size.width*_awb.size.height;
+                        if(_aa > _armBest){ _armBest=_aa; _armSIfo=_aio; }
+                    }
+                }
+            } @catch(...) {}
+            int _hostMatch = (_hs2 != 0 && _hs2 == gCBROwnBidHash);
+            int _stillHosted = ((_armSIfo == 3 || _armSIfo == 4) && (gCBRWasArmed || _hostMatch));
+            if (_hostMatch || _stillHosted) {
                 gCBROrientOverride = 3;
-                cbrEvent("HOST-STATE armed at probe tick (state=%llu) -> override=3", (unsigned long long)_hs2);
+                gCBRWasArmed = 1;
+                cbrEvent("%s -> override=3 (hostMatch=%d sceneIfo=%ld wasArmed=%d)", _hostMatch ? "HOST-STATE armed at probe tick" : "RE-ARM still-hosted (spurious unlock recovered)", _hostMatch, _armSIfo, gCBRWasArmed);
                 cbrAppKickLandscape(0);
                 // v3.51.0 ARM-NUDGE: arming at a probe tick means we armed AFTER the app's first
                 // layout (warm app / lost race). The mask hooks now answer landscape-only but
@@ -4311,6 +4377,8 @@ static void cbrProbeTick(void) {
                                 static int _an = 0; if (_an++ < 6) cbrEvent("ARM-NUDGE re-resolution on %s", object_getClassName(_nrvc));
                                 ((void(*)(id,SEL))objc_msgSend)(_nrvc, _nupd);
                             }
+                            SEL _nhi = sel_registerName("setNeedsUpdateOfHomeIndicatorAutoHidden");   // v3.54.0: refresh the pill hide now that we are armed
+                            if (_nrvc && [_nrvc respondsToSelector:_nhi]) ((void(*)(id,SEL))objc_msgSend)(_nrvc, _nhi);
                         }
                     }
                 } @catch(...) {}
