@@ -883,6 +883,7 @@ static void cbrSBProbeDisplays(void) {
 // points at the exact failing operation.
 static id gCBRCarWindow = nil;
 static id gCBROverlayWindow = nil;  // v3.20.31: separate window for exit button
+static id gCBROverlayBtn = nil;     // v3.53.0: the home button living in that overlay window
 static NSString *gCBRLastBidStr = nil;  // v3.20.33: bid to terminate on exit
 // cbrFindCarWindowScene: scene-attach variant  // retain so ARC doesn't release it
 static void cbrSBRenderWindow(void) {
@@ -1201,6 +1202,7 @@ static uint64_t cbrReadHostState(void) {
     } @catch(...) { return 0; }
 }
 static void cbrSBHostDismiss(void) {
+    { int _f=open("/var/mobile/CBR_home.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_f>=0){ const char*m="HOST-DISMISS entered (our exit path running)\n"; write(_f,m,strlen(m)); close(_f);} }   // v3.53.0: proves whether our teardown actually runs on a home tap
     @try { CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.unlock"), NULL, NULL, YES); } @catch(...) {}
     // v3.42.0: stop advertising "hosting" to launching apps + drop the pending create-match + container.
     @try { if (gCBRHostStateToken) notify_set_state(gCBRHostStateToken, 0); gCBRPendingHostBid = nil; gCBRBounceCount = 0; gCBRBounceBypass = 0; } @catch(...) {}   // v3.51.0: container must SURVIVE until the close zoom reads it - v3.50 nil'd it right here, so the close animation always saw nil and instant-hid (the "abrupt close")
@@ -1491,9 +1493,11 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
             // seam. 47pt landed the edge in the gap on every prior build; overlapping kills it. If
             // the chrome glyph ever looks clipped, lower _overlap; if a sliver returns, raise it.
             CGFloat _chromeW = gCBRSidebarW > 0 ? gCBRSidebarW : wf.size.width * 0.11;
-            CGFloat _overlap = 10.0;
+            // v3.53.0: 10pt reached into the sidebar and covered the recents icons (couldn't tap
+            // them). 4pt still swallows the thin dashboard sliver without intruding on the icons.
+            CGFloat _overlap = 4.0;
             CGFloat sbW = _chromeW - _overlap; if (sbW < 0) sbW = 0;
-            HHF("[v3.52.0] chrome overlap: chromeW=%.0f overlap=%.0f -> app inset=%.0f\n", _chromeW, _overlap, sbW);
+            HHF("[v3.53.0] chrome overlap: chromeW=%.0f overlap=%.0f -> app inset=%.0f\n", _chromeW, _overlap, sbW);
             Class UIViewCls = objc_getClass("UIView");
             id container = ((id(*)(id,SEL,CGRect))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(UIViewCls, sel_registerName("alloc")), sel_registerName("initWithFrame:"), CGRectMake(sbW, 0, wf.size.width - sbW, wf.size.height));
             id clear = ((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIColor"), sel_registerName("clearColor"));
@@ -1926,6 +1930,36 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
             gCBRHomeButton = _hb;   // v3.51.0: kept so hitTest can return it explicitly
             HH("[v3.51.0] home-button dismiss zone added + stored (bottom sidebar)\n");
         } @catch(...) { HH("home zone failed\n"); }
+        // v3.53.0 HOME BUTTON via SEPARATE OVERLAY WINDOW - the v3.20.31 mechanism Colin confirmed
+        // PROVABLY exited the app. The subview button above fails because it sits UNDER the app's
+        // full-screen scene view in the SAME window, which swallows the tap. A separate
+        // UIRootSceneWindow at level 100 sits ABOVE the scene view so its button actually gets the
+        // tap. Transparent; its hitTest (below) passes everything except the home zone through, so
+        // recents + app are untouched. No makeKeyAndVisible (keeps the app scene's active state
+        // clean for the orientation work).
+        @try {
+            if (!gCBRExitTarget) gCBRExitTarget = [[CBRExitTarget alloc] init];
+            CGRect _owb = ((CGRect(*)(id,SEL))objc_msgSend)(rootWindow, sel_registerName("bounds"));
+            Class _owc = objc_getClass("UIRootSceneWindow");
+            id _ovl = ((id(*)(id,SEL,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(_owc, sel_registerName("alloc")), sel_registerName("initWithDisplayConfiguration:"), dispCfg);
+            if (_ovl) {
+                gCBROverlayWindow = _ovl;
+                ((void(*)(id,SEL,double))objc_msgSend)(_ovl, sel_registerName("setWindowLevel:"), (double)100.0);
+                ((void(*)(id,SEL,BOOL))objc_msgSend)(_ovl, sel_registerName("setOpaque:"), NO);
+                id _oclr = ((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIColor"), sel_registerName("clearColor"));
+                ((void(*)(id,SEL,id))objc_msgSend)(_ovl, sel_registerName("setBackgroundColor:"), _oclr);
+                CGFloat _obw = gCBRSidebarW > 0 ? gCBRSidebarW : 47.0;
+                CGFloat _obz = gCBRHomeZoneH > 0 ? gCBRHomeZoneH : 50.0;
+                id _obtn = ((id(*)(Class,SEL,long))objc_msgSend)(objc_getClass("UIButton"), sel_registerName("buttonWithType:"), (long)0);
+                ((void(*)(id,SEL,CGRect))objc_msgSend)(_obtn, sel_registerName("setFrame:"), CGRectMake(0, _owb.size.height - _obz, _obw, _obz));
+                ((void(*)(id,SEL,id))objc_msgSend)(_obtn, sel_registerName("setBackgroundColor:"), _oclr);
+                ((void(*)(id,SEL,id,SEL,unsigned long))objc_msgSend)(_obtn, sel_registerName("addTarget:action:forControlEvents:"), gCBRExitTarget, sel_registerName("cbrExitTapped"), (unsigned long)(1UL<<6));
+                ((void(*)(id,SEL,id))objc_msgSend)(_ovl, sel_registerName("addSubview:"), _obtn);
+                gCBROverlayBtn = _obtn;
+                ((void(*)(id,SEL,BOOL))objc_msgSend)(_ovl, sel_registerName("setHidden:"), NO);
+                HH("[v3.53.0] home button in SEPARATE overlay window level 100 (proven exit mechanism)\n");
+            } else { HH("[v3.53.0] overlay window alloc failed - subview button is the fallback\n"); }
+        } @catch(...) { HH("overlay home button failed\n"); }
         // --- v3.18.2: the scene is created ASYNC after launch. Re-run foreground +
         //     sceneView grab on a delay so the scene actually exists. ---
         // v3.20.7: delayed diagnostic pass REMOVED - it walked live scene client/subtree
@@ -2866,6 +2900,7 @@ static void cbrSBRegisterListener(void) {
                     id _scr = note ? ((id(*)(id,SEL))objc_msgSend)(note, sel_registerName("object")) : nil;
                     SEL _ic = sel_registerName("_isCarScreen");
                     BOOL _car = (_scr && [_scr respondsToSelector:_ic]) ? ((BOOL(*)(id,SEL))objc_msgSend)(_scr, _ic) : YES;
+                    { char _b[140]; int _n=snprintf(_b,sizeof(_b),"[CBR-SB] v3.53.0 UIScreenDidDisconnect FIRED isCar=%d hosting=%d", (int)_car, gCBRRootWindow?1:0); if(_n>0) cbrSBLog(_b); }   // v3.53.0: does the observer even fire on CarPlay disconnect? (screenshot leak)
                     if (!_car) return;
                 } @catch(...) {}
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -3714,6 +3749,18 @@ static void cbrKLLog(const char *fmt, ...) {
 %hook UIRootSceneWindow
 - (id)hitTest:(CGPoint)point withEvent:(id)event {
     @try {
+        // v3.53.0: the overlay home window (level 100, above the scene view). Home zone -> our
+        // button; everything else -> nil so the app + recents below stay fully interactive.
+        if ((id)self == gCBROverlayWindow) {
+            CGRect _ob = ((CGRect(*)(id,SEL))objc_msgSend)(self, sel_registerName("bounds"));
+            CGFloat _ozw = gCBRSidebarW > 0 ? gCBRSidebarW : 47.0;
+            CGFloat _ozh = gCBRHomeZoneH > 0 ? gCBRHomeZoneH : 50.0;
+            if (point.x < _ozw && point.y >= (_ob.size.height - _ozh)) {
+                { static int _ol=0; if(_ol++ < 40){ int _f=open("/var/mobile/CBR_home.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_f>=0){ char _b[160]; int _n=snprintf(_b,sizeof(_b),"OVERLAY-HIT home x=%.0f y=%.0f -> overlay button\n", point.x, point.y); if(_n>0)write(_f,_b,(size_t)_n); close(_f);} } }
+                if (gCBROverlayBtn) return gCBROverlayBtn;
+            }
+            return nil;
+        }
         if ((id)self == gCBRRootWindow && gCBRSidebarW > 0.0 && point.x < gCBRSidebarW) {
             // v3.46.0: bottom home-button zone -> let our transparent dismiss button take the tap.
             CGRect _hb = ((CGRect(*)(id,SEL))objc_msgSend)(self, sel_registerName("bounds"));
@@ -3732,6 +3779,7 @@ static void cbrKLLog(const char *fmt, ...) {
                 return %orig;
             }
             // status + recents strip (above the home zone): still pass through for recents handoff.
+            { static int _rl=0; if(_rl++ < 40){ int _f=open("/var/mobile/CBR_home.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_f>=0){ char _b[160]; int _n=snprintf(_b,sizeof(_b),"HITTEST recents-strip x=%.0f y=%.0f sbW=%.0f -> passthrough(nil)\n", point.x, point.y, gCBRSidebarW); if(_n>0)write(_f,_b,(size_t)_n); close(_f);} } }   // v3.53.0 recents diag
             return nil;
         }
     } @catch(...) {}
@@ -4179,6 +4227,51 @@ static void cbrForceLandscapeGeometry(id win) {
     } @catch(...) {}
 }
 static inline int cbrIsHostedLandscapeWindow(id win);   // v3.48.0 fwd decl (defined in the UIWindow hook below)
+// v3.53.0 ORIENT3 PROBE. Colin's repro is 3 clean states: (S1) boot SIDEWAYS, (S2) tap the app
+// on the PHONE -> UPRIGHT, (S3) fullscreen a video then exit -> SIDEWAYS again. The phone tap is
+// the one lever that always works; we have never captured what it flips that our silent-activate
+// does not. This logs one compact, diffable line of the biggest window's真 state so S1 vs S2 vs S3
+// can be diffed directly. vTf b/c != 0 == the view is rotated 90 (sideways composite); vio is the
+// content orientation; act=0 is foreground-ACTIVE (what the phone tap achieves).
+static void cbrOrient3(const char *trig, int force) {
+    @try {
+        id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+        if (!app) return;
+        id arr = ((id(*)(id,SEL))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("connectedScenes")), sel_registerName("allObjects"));
+        NSUInteger sc = arr ? ((NSUInteger(*)(id,SEL))objc_msgSend)(arr, sel_registerName("count")) : 0;
+        id bestScene=nil, bestWin=nil; CGFloat bestA=0;
+        for (NSUInteger i=0;i<sc;i++){
+            id scene=((id(*)(id,SEL,NSUInteger))objc_msgSend)(arr,sel_registerName("objectAtIndex:"),i);
+            if (!scene || ![scene isKindOfClass:objc_getClass("UIWindowScene")]) continue;
+            id wins=((id(*)(id,SEL))objc_msgSend)(scene,sel_registerName("windows"));
+            NSUInteger wc=wins?((NSUInteger(*)(id,SEL))objc_msgSend)(wins,sel_registerName("count")):0;
+            for (NSUInteger w=0;w<wc;w++){
+                id win=((id(*)(id,SEL,NSUInteger))objc_msgSend)(wins,sel_registerName("objectAtIndex:"),w);
+                if(!win) continue;
+                CGRect wb=((CGRect(*)(id,SEL))objc_msgSend)(win,sel_registerName("bounds"));
+                CGFloat a=wb.size.width*wb.size.height;
+                if(a>bestA){bestA=a;bestWin=win;bestScene=scene;}
+            }
+        }
+        if(!bestScene||!bestWin) return;
+        long act=((long(*)(id,SEL))objc_msgSend)(bestScene,sel_registerName("activationState"));
+        long sIfo=((long(*)(id,SEL))objc_msgSend)(bestScene,sel_registerName("interfaceOrientation"));
+        CGRect wb=((CGRect(*)(id,SEL))objc_msgSend)(bestWin,sel_registerName("bounds"));
+        id rvc=((id(*)(id,SEL))objc_msgSend)(bestWin,sel_registerName("rootViewController"));
+        long vio=rvc?((long(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("interfaceOrientation")):-1;
+        NSUInteger supp=rvc?((NSUInteger(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("supportedInterfaceOrientations")):0;
+        CGAffineTransform vtf=CGAffineTransformIdentity; CGRect vb=CGRectZero;
+        if(rvc){ id v=((id(*)(id,SEL))objc_msgSend)(rvc,sel_registerName("view")); if(v){ vtf=((CGAffineTransform(*)(id,SEL))objc_msgSend)(v,sel_registerName("transform")); vb=((CGRect(*)(id,SEL))objc_msgSend)(v,sel_registerName("bounds")); } }
+        static long _lh=0;
+        long h = act + sIfo*10 + vio*100 + (long)(wb.size.width>wb.size.height?1:0)*1000 + (long)supp*10000 + (long)((vtf.b!=0||vtf.c!=0)?1:0)*100000;
+        if(!force && h==_lh) return; _lh=h;
+        const char *actn=(act==0?"FG-ACTIVE":(act==1?"FG-INACTIVE":(act==2?"BG":"UNATT")));
+        char line[440];
+        int n=snprintf(line,sizeof(line),"[ORIENT3 %s] ovr=%d act=%ld(%s) sIfo=%ld win=%.0fx%.0f rvc=%s vio=%ld supp=0x%lx vTf=[%.2f %.2f %.2f %.2f] vB=%.0fx%.0f\n",
+            trig, gCBROrientOverride, act, actn, sIfo, wb.size.width, wb.size.height, rvc?object_getClassName(rvc):"nil", vio, (unsigned long)supp, vtf.a,vtf.b,vtf.c,vtf.d, vb.size.width, vb.size.height);
+        if(n>0){ @try { NSString *p=[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_orient3.txt"]; int fd=open([p fileSystemRepresentation],O_WRONLY|O_CREAT|O_APPEND,0644); if(fd>=0){write(fd,line,(size_t)n); close(fd);} } @catch(...) {} }
+    } @catch(...) {}
+}
 static void cbrProbeTick(void) {
     // v3.22.2: NO early bail. v3.22.1 returned here whenever the gate was shut, so "no file"
     // was ambiguous between "probe never ran" and "never hosted". Always write; the dump
@@ -4231,6 +4324,7 @@ static void cbrProbeTick(void) {
 
         static int _tick = 0; _tick++;
         cbrEvent("tick %d (heartbeat)", _tick);
+        cbrOrient3("tick", 0);   // v3.53.0: steady-state, logs only on change
         NSMutableString *out = [NSMutableString string];
         [out appendFormat:@"=== CBR PROBE v3.24.0 tick=%d override=%d hosted=%s car=%.0fx%.0f sroCalls=%d lastAsk=%d ===\n",
             _tick, gCBROrientOverride, (gCBROrientOverride > 0 ? "YES" : "no"), gCBRCarW, gCBRCarH, gCBRSroCalls, gCBRSroLastVal];
@@ -4265,6 +4359,7 @@ static void cbrProbeTick(void) {
                 // identical); dump the full window/layer tree the instant activation changes so a
                 // sideways->active dump can be diffed against pre-active to see what the tap mutates.
                 @try { char _tag[64]; snprintf(_tag,sizeof(_tag),"ACT-TRANSITION-%ld-to-%ld",gCBRLastAct,act); cbrYTGeomProbe(_tag); } @catch(...) {}
+                @try { char _o3[48]; snprintf(_o3,sizeof(_o3),"ACT-%ld->%ld",gCBRLastAct,act); cbrOrient3(_o3, 1); } @catch(...) {}   // v3.53.0: the phone-tap edge
                 gCBRLastAct = act;
             }
             id wins = ((id(*)(id,SEL))objc_msgSend)(scene, sel_registerName("windows"));
@@ -4560,6 +4655,12 @@ static inline int cbrIsHostedLandscapeWindow(id win) {
     if (gCBROrientOverride > 0) return (NSUInteger)(1UL<<3);   // v3.43.0: LandscapeRight only
     return %orig;
 }
+// v3.53.0: hide the iOS home-indicator pill on the hosted app (Colin: remove the home bar from
+// the dash). Only while armed, so a genuine phone-foreground app is untouched.
+- (BOOL)prefersHomeIndicatorAutoHidden {
+    if (gCBROrientOverride > 0) return YES;
+    return %orig;
+}
 %end
 // v3.49.0 GEO-REWRITE (see patch header).
 %hook UIWindowScene
@@ -4567,6 +4668,7 @@ static inline int cbrIsHostedLandscapeWindow(id win) {
     @try {
         if (gCBROrientOverride > 0 && prefs && [prefs respondsToSelector:sel_registerName("interfaceOrientations")]) {
             NSUInteger _m = ((NSUInteger(*)(id,SEL))objc_msgSend)(prefs, sel_registerName("interfaceOrientations"));
+            @try { char _o3[64]; snprintf(_o3,sizeof(_o3),"GEO-req mask=0x%lx",(unsigned long)_m); cbrOrient3(_o3, 1); } @catch(...) {}   // v3.53.0: the fullscreen-exit re-break moment
             if (_m != 0 && (_m & (NSUInteger)(1UL<<3)) == 0) {
                 static int _gr = 0; if (_gr++ < 12) cbrEvent("GEO-REWRITE app asked mask=0x%lx -> 0x8 LandscapeRight on %s", (unsigned long)_m, object_getClassName(self));
                 if ([prefs respondsToSelector:sel_registerName("setInterfaceOrientations:")])
