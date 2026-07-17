@@ -1164,6 +1164,7 @@ static id cbrGetCarplayCADisplay(void) {
 static id gCBRRootWindow = nil;
 static int gCBRHardDismiss = 0;   // v3.60.0: 1 = tear down immediately (no zoom) - set for re-host/foreign/disconnect
 static int gCBRDismissing = 0;    // v3.68.0: 1 = a soft (home-button) close zoom is in flight; drop duplicate soft dismisses
+static int gCBRTruthWait = 0;     // v3.69.0: truth-wait retries THIS host session (was a process-lifetime static - once 4 were burned, every later open blind-bounced instantly)
 static id gCBRAppVC = nil;
 static id gCBRActiveTxns = nil;
 static id gCBRTxn = nil;         // v3.19.5: strong-hold txn for safe completion
@@ -1332,7 +1333,7 @@ static void cbrSBHostDismiss(void) {
                 // watchdog: if the completion is ever dropped, force teardown at +0.75s so the window
                 // is never orphaned. Identity-guarded: a re-host that repointed gCBRRootWindow is skipped.
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.75*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
-                    @try { if (gCBRRootWindow == _win) { ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); cbrSBFinalizeTeardown(_win); } } @catch(...) {}
+                    @try { if (gCBRRootWindow == _win) { ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); cbrSBFinalizeTeardown(_win); } else { gCBRDismissing = 0; } } @catch(...) {}   // v3.69.0: repointed by a re-host - globals are the new host's, but the stuck flag must still clear
                 });
             }
         } @catch(...) { @try { if (_win) ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); } @catch(...) {} cbrSBFinalizeTeardown(_win); }
@@ -2797,8 +2798,7 @@ static void cbrSBBounceCheck(void) {
           if (_enc != _le || (_bc2++ % 12) == 0) BB("BOUNCE-CHECK clientIfo=%ld truth=%llu (ifo=%ld winLandscape=%d vio=%ld cp=%d) bounces=%d\n", cifo, (unsigned long long)_enc, tifo, tland, tvio, contentPortrait, gCBRBounceCount);
           _le = _enc; }
         if (_enc == 0) {
-            static int _nt = 0;
-            if (_nt++ < 4) { BB("no truth published yet - re-check in 3s (%d/4)\n", _nt); if(fd>=0)close(fd);
+            if (gCBRTruthWait++ < 4) { BB("no truth published yet - re-check in 3s (%d/4)\n", gCBRTruthWait); if(fd>=0)close(fd);
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBBounceCheck(); });
                 return; }
             // v3.51.0 BLIND-BOUNCE: an armed app publishes truth every second, so sustained
@@ -2940,6 +2940,7 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
     @try {
         if (bid[0]) gCBRPendingHostBid = [NSString stringWithUTF8String:bid];
         gCBRBounceCount = 0; gCBRBlindBounce = 0; gCBRScaleAnimated = 0;   // v3.51.0/v3.52.0: fresh blind budget + grow-in per host session
+        gCBRDismissing = 0; gCBRTruthWait = 0;   // v3.69.0: new host = any in-flight soft close is moot (stuck flag swallowed every exit) + fresh truth-wait budget
         if (!gCBRHostStateToken) notify_register_check("com.cbr.orient.landscape", &gCBRHostStateToken);
         // v3.45.0: publish hash(hostedBid) so ONLY the hosted app matches - the override can no longer
         // leak to phone apps (Photos went landscape because every app read the old constant state=3).
