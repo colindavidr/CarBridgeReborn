@@ -1430,9 +1430,17 @@ static void cbrAnimHeartbeat(int n) {
         NSUInteger nsub = subs ? ((NSUInteger(*)(id,SEL))objc_msgSend)(subs, sel_registerName("count")) : 0;
         CGAffineTransform ct = CGAffineTransformIdentity;
         if (cont) { id l = ((id(*)(id,SEL))objc_msgSend)(cont, sel_registerName("layer")); if (l) ct = ((CGAffineTransform(*)(id,SEL))objc_msgSend)(l, sel_registerName("affineTransform")); }
+        // v3.65.0: also inspect the mounted appVC.view (some apps render there, not on the scene
+        // view) + tag the bid, so a WORKING app (TrollStore/Dropbox) can be diffed against an abrupt one.
+        const char *_bid = gCBRLastBidStr ? ((const char*(*)(id,SEL))objc_msgSend)(gCBRLastBidStr, sel_registerName("UTF8String")) : "?";
+        id _vcv = gCBRAppVC ? ((id(*)(id,SEL))objc_msgSend)(gCBRAppVC, sel_registerName("view")) : nil;
+        CGRect _vcb = _vcv ? ((CGRect(*)(id,SEL))objc_msgSend)(_vcv, sel_registerName("bounds")) : CGRectZero;
+        id _vcl = _vcv ? ((id(*)(id,SEL))objc_msgSend)(_vcv, sel_registerName("layer")) : nil;
+        id _vsubs = _vcl ? ((id(*)(id,SEL))objc_msgSend)(_vcl, sel_registerName("sublayers")) : nil;
+        NSUInteger _vnsub = _vsubs ? ((NSUInteger(*)(id,SEL))objc_msgSend)(_vsubs, sel_registerName("count")) : 0;
         int fd = open("/var/mobile/CBR_anim_heartbeat.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
-        if (fd >= 0) { char _b[240]; int _l = snprintf(_b,sizeof(_b),"hb[%d] zoomDone=%d contScale=%.2f sceneView=%s %.0fx%.0f sublayers=%lu\n", n, gCBRZoomDone, ct.a, sv?object_getClassName(sv):"nil", svb.size.width, svb.size.height, (unsigned long)nsub); if(_l>0) write(fd,_b,(size_t)_l); close(fd); }
-        int _ready = (nsub > 0 || svb.size.width > 100.0);
+        if (fd >= 0) { char _b[340]; int _l = snprintf(_b,sizeof(_b),"hb[%d] bid=%s zoomDone=%d contScale=%.2f sv=%s %.0fx%.0f svSub=%lu vcView=%s %.0fx%.0f vcSub=%lu\n", n, _bid, gCBRZoomDone, ct.a, sv?object_getClassName(sv):"nil", svb.size.width, svb.size.height, (unsigned long)nsub, _vcv?object_getClassName(_vcv):"nil", _vcb.size.width, _vcb.size.height, (unsigned long)_vnsub); if(_l>0) write(fd,_b,(size_t)_l); close(fd); }
+        int _ready = (nsub > 0 || _vnsub > 0 || svb.size.width > 100.0 || _vcb.size.width > 100.0);
         if (!gCBRZoomDone && cont && (_ready || n >= 16)) {
             gCBRZoomDone = 1;
             void (^_anim)(void) = ^{
@@ -1596,7 +1604,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 // EMPTY box. Hold at 0.30 (small, at the icon) and let the heartbeat fire the zoom-in
                 // once the scene view has real content, so the LIVE app grows out of the icon.
                 gCBRZoomDone = 0;
-                unlink("/var/mobile/CBR_anim_heartbeat.txt");
+                { int _hf=open("/var/mobile/CBR_anim_heartbeat.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_hf>=0){ char _hb2[160]; int _hn=snprintf(_hb2,sizeof(_hb2),"==== OPEN bid=%s ====\n", bid_cstr?bid_cstr:"?"); if(_hn>0)write(_hf,_hb2,(size_t)_hn); close(_hf);} }   // v3.65.0: per-open header, accumulate so working vs abrupt apps can be compared
                 cbrAnimHeartbeat(0);
             } @catch(...) {}
         } @catch (NSException *e) { HHF("mount EXC: %s\n", [[e reason] UTF8String]?:"?"); }
