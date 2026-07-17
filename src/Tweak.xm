@@ -1416,6 +1416,7 @@ static void cbrReferenceProbe(void) {
 
 static int gCBRZoomDone = 0;   // v3.64.0: 1 once the open zoom has fired for this host
 static int gCBRAnimTicks = 0;  // v3.66.0: ticks since the current host began (0 while idle)
+static int gCBRHbSeq = 0;      // v3.67.0: monotonic tick counter (proof the loop is alive)
 // v3.66.0 CONTINUOUS OPEN-ANIM HEARTBEAT: modelled on cbrCPRotationSchedule - a self-rescheduling
 // loop STARTED AT SPRINGBOARD INIT, so it's already ticking before you tap and captures the open
 // from the moment the container appears. While a host is up it logs the container / scene view /
@@ -1426,8 +1427,13 @@ static void cbrAnimHeartbeat(void) {
     double _next = 0.20;   // idle cadence
     @try {
         id cont = gCBRContainerView;
+        gCBRHbSeq++;
         if (!cont) {
             gCBRAnimTicks = 0;   // idle: reset so the next open starts at tick 0
+            if (gCBRHbSeq <= 5 || (gCBRHbSeq % 20) == 0) {   // v3.67.0: sparse proof-of-life so idle ticks are visible
+                int _if=open("/var/mobile/CBR_anim_heartbeat.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
+                if(_if>=0){ char _ib[64]; int _in=snprintf(_ib,sizeof(_ib),"t=%d idle (loop alive)\n", gCBRHbSeq); if(_in>0)write(_if,_ib,(size_t)_in); close(_if); }
+            }
         } else {
             gCBRAnimTicks++;
             _next = (gCBRAnimTicks <= 40) ? 0.05 : 0.20;   // fast during the ~2s open window, then relax
@@ -5091,7 +5097,7 @@ static inline int cbrIsHostedLandscapeWindow(id win) {
         cbrSBRegisterListener();
         // v3.66.0: start the continuous open-anim heartbeat here (like cbrCPRotationSchedule) so it is
         // already ticking before any app is tapped. O_TRUNC marker clears stale logs + proves writes work.
-        { int _hf=open("/var/mobile/CBR_anim_heartbeat.txt",O_WRONLY|O_CREAT|O_TRUNC,0644); if(_hf>=0){ const char*_m="==== SB heartbeat started (v3.66.0) ====\n"; write(_hf,_m,strlen(_m)); close(_hf);} }
+        { int _hf=open("/var/mobile/CBR_anim_heartbeat.txt",O_WRONLY|O_CREAT|O_TRUNC,0644); if(_hf>=0){ char _mb[80]; int _mn=snprintf(_mb,sizeof(_mb),"==== SB heartbeat started (v3.67.0) pid=%d ====\n",(int)getpid()); if(_mn>0)write(_hf,_mb,(size_t)_mn); close(_hf);} }
         cbrAnimHeartbeatStart();
         // v3.42.0: clear stale host state after a respring (otherwise every app launched on the
         // phone would read state=3 and go landscape-only).
