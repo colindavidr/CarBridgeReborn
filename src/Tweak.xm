@@ -1414,6 +1414,39 @@ static void cbrReferenceProbe(void) {
 }
 
 
+static int gCBRZoomDone = 0;   // v3.64.0: 1 once the open zoom has fired for this host
+// v3.64.0 OPEN-ANIM HEARTBEAT: the grafted scene renders async, so we can't zoom at mount (empty
+// box). Poll the scene view every 50ms; when it has real content, fire the zoom-in of the LIVE app
+// out of the icon (0.8s fallback so it never sticks tiny). Logs the timing for tuning.
+static void cbrAnimHeartbeat(int n) {
+    if (n > 40) return;   // ~2s cap
+    @try {
+        id cont = gCBRContainerView;
+        id dvc = gCBRAppVC ? getIvar(gCBRAppVC, "_deviceAppViewController") : nil;
+        id sv  = dvc ? getIvar(dvc, "_sceneView") : nil;
+        CGRect svb = sv ? ((CGRect(*)(id,SEL))objc_msgSend)(sv, sel_registerName("bounds")) : CGRectZero;
+        id svl = sv ? ((id(*)(id,SEL))objc_msgSend)(sv, sel_registerName("layer")) : nil;
+        id subs = svl ? ((id(*)(id,SEL))objc_msgSend)(svl, sel_registerName("sublayers")) : nil;
+        NSUInteger nsub = subs ? ((NSUInteger(*)(id,SEL))objc_msgSend)(subs, sel_registerName("count")) : 0;
+        CGAffineTransform ct = CGAffineTransformIdentity;
+        if (cont) { id l = ((id(*)(id,SEL))objc_msgSend)(cont, sel_registerName("layer")); if (l) ct = ((CGAffineTransform(*)(id,SEL))objc_msgSend)(l, sel_registerName("affineTransform")); }
+        int fd = open("/var/mobile/CBR_anim_heartbeat.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+        if (fd >= 0) { char _b[240]; int _l = snprintf(_b,sizeof(_b),"hb[%d] zoomDone=%d contScale=%.2f sceneView=%s %.0fx%.0f sublayers=%lu\n", n, gCBRZoomDone, ct.a, sv?object_getClassName(sv):"nil", svb.size.width, svb.size.height, (unsigned long)nsub); if(_l>0) write(fd,_b,(size_t)_l); close(fd); }
+        int _ready = (nsub > 0 || svb.size.width > 100.0);
+        if (!gCBRZoomDone && cont && (_ready || n >= 16)) {
+            gCBRZoomDone = 1;
+            void (^_anim)(void) = ^{
+                ((void(*)(id,SEL,CGFloat))objc_msgSend)(cont, sel_registerName("setAlpha:"), (CGFloat)1.0);
+                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(cont, sel_registerName("setTransform:"), CGAffineTransformIdentity);
+            };
+            ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
+                objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
+                0.40, 0.0, (NSUInteger)(2UL<<16), _anim, (void(^)(BOOL))nil);
+            return;   // zoom fired - stop the heartbeat
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.05*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrAnimHeartbeat(n+1); });
+    } @catch(...) {}
+}
 static void cbrSBHostScene(const char *bid_cstr, id handle) {
     int fd = open("/var/mobile/CBR_sb_host.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
     #define HH(s)  do{ if(fd>=0) write(fd,(s),strlen(s)); }while(0)
@@ -1559,13 +1592,12 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)0.35);
                 CGAffineTransform _start = CGAffineTransformMakeScale(0.30, 0.30);
                 ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), _start);
-                void (^_anim)(void) = ^{
-                    ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
-                    ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity);
-                };
-                ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
-                    objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
-                    0.40, 0.0, (NSUInteger)(2UL<<16) /*EaseOut - v3.63.0 slower zoom-in from the icon*/, _anim, (void(^)(BOOL))nil);
+                // v3.64.0: DON'T animate now - the grafted scene renders async so this would zoom an
+                // EMPTY box. Hold at 0.30 (small, at the icon) and let the heartbeat fire the zoom-in
+                // once the scene view has real content, so the LIVE app grows out of the icon.
+                gCBRZoomDone = 0;
+                unlink("/var/mobile/CBR_anim_heartbeat.txt");
+                cbrAnimHeartbeat(0);
             } @catch(...) {}
         } @catch (NSException *e) { HHF("mount EXC: %s\n", [[e reason] UTF8String]?:"?"); }
         // --- v3.18.3: drive the transaction EXACTLY like the source ---
