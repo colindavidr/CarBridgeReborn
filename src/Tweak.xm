@@ -3250,20 +3250,22 @@ static double gCBRHomeDownMs = 0;   // v3.58.0: DBStatusBarHomeButton press-star
         double _now; { struct timespec _t; clock_gettime(CLOCK_MONOTONIC,&_t); _now = _t.tv_sec*1000.0 + _t.tv_nsec/1000000.0; }
         _dur = (gCBRHomeDownMs > 0) ? (_now - gCBRHomeDownMs) : 99999.0;
     } @catch(...) {}
-    // v3.60.0 SIRI FIX: let the button COMPLETE natively. Swallowing homeButtonUp: (v3.58/v3.59) left
-    // the touch hanging, so the button thought it was HELD and fired Siri on every tap. Native
-    // completion cancels Siri on a short press and still triggers it on a long hold.
-    %orig;
+    // v3.62.0 HOME EXIT (from the class dump): on a SHORT press while hosting, CANCEL the native
+    // home press so the Siri hold-timer dies (homeButtonCancel: + invalidate homeButtonTimer - Siri
+    // fired because swallowing left the timer running), post our dismiss (return to the dashboard),
+    // and SWALLOW the native go-to-grid nav (no abrupt zoom-left). Long press / not hosting -> %orig.
+    if (_hs != 0 && _dur < 500.0) {
+        @try { ((void(*)(id,SEL,id))objc_msgSend)(self, sel_registerName("homeButtonCancel:"), arg1); } @catch(...) {}
+        @try { id _tm = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("homeButtonTimer")); if (_tm && [_tm respondsToSelector:sel_registerName("invalidate")]) ((void(*)(id,SEL))objc_msgSend)(_tm, sel_registerName("invalidate")); } @catch(...) {}
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.host.dismiss"), NULL, NULL, YES);
+        @try { int _hf = open("/var/mobile/CBR_home_probe.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+               if (_hf >= 0) { char _b[180]; int _n = snprintf(_b,sizeof(_b),"[HOME-UP] SHORT hosting dur=%.0fms -> homeButtonCancel + invalidate timer + dismiss + swallow (no Siri, dashboard)\n", _dur); if(_n>0) write(_hf,_b,(size_t)_n); close(_hf); } } @catch(...) {}
+        return;   // swallow - no grid nav
+    }
+    %orig;   // not hosting, or long press -> native (Siri on a long hold)
     @try {
         int _hf = open("/var/mobile/CBR_home_probe.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
-        if (_hf >= 0) { char _b[160]; int _n = snprintf(_b,sizeof(_b),"[HOME-UP] dur=%.0fms hosting=%d\n", _dur, _hs!=0?1:0); if(_n>0) write(_hf,_b,(size_t)_n); close(_hf); }
-        if (_hs != 0 && _dur < 500.0) {
-            // short press while hosting -> ALSO tear our host down. %orig above already handled Siri
-            // (and its own nav); we just add the teardown so the app closes.
-            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.host.dismiss"), NULL, NULL, YES);
-            int _hf2 = open("/var/mobile/CBR_home_probe.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
-            if (_hf2 >= 0) { const char *_m = "  -> SHORT press hosting: %orig (native, no Siri) + posted dismiss\n"; write(_hf2,_m,strlen(_m)); close(_hf2); }
-        }
+        if (_hf >= 0) { char _b[120]; int _n = snprintf(_b,sizeof(_b),"[HOME-UP] dur=%.0fms hosting=%d -> %%orig (native)\n", _dur, _hs!=0?1:0); if(_n>0) write(_hf,_b,(size_t)_n); close(_hf); }
     } @catch(...) {}
 }
 %end
