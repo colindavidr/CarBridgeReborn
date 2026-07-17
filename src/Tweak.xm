@@ -1163,6 +1163,7 @@ static id cbrGetCarplayCADisplay(void) {
 }
 static id gCBRRootWindow = nil;
 static int gCBRHardDismiss = 0;   // v3.60.0: 1 = tear down immediately (no zoom) - set for re-host/foreign/disconnect
+static int gCBRDismissing = 0;    // v3.68.0: 1 = a soft (home-button) close zoom is in flight; drop duplicate soft dismisses
 static id gCBRAppVC = nil;
 static id gCBRActiveTxns = nil;
 static id gCBRTxn = nil;         // v3.19.5: strong-hold txn for safe completion
@@ -1202,8 +1203,24 @@ static uint64_t cbrReadHostState(void) {
         return st;
     } @catch(...) { return 0; }
 }
+// v3.68.0: single teardown finalizer. Clears the host globals ONLY if they still point at the
+// window this teardown owns - a re-host that started during the soft close zoom will have repointed
+// gCBRRootWindow at the NEW window, and must never be clobbered by the old teardown's completion or
+// watchdog. Always clears the dismissing flag so a fresh soft close can start.
+static void cbrSBFinalizeTeardown(id win) {
+    if (gCBRRootWindow == win) {
+        @try { if (gCBROverlayWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBROverlayWindow, sel_registerName("setHidden:"), YES); } } @catch(...) {}
+        gCBRRootWindow = nil; gCBRAppVC = nil; gCBRActiveTxns = nil; gCBRSceneHandle = nil; gCBRContainerView = nil; gCBRHomeButton = nil; gCBROverlayWindow = nil;
+        @try { if (gCBRKeepAlive) [gCBRKeepAlive removeAllObjects]; } @catch(...) {}   // v3.20.32: release keep-alive so the app suspends cleanly
+    }
+    gCBRDismissing = 0;
+}
 static void cbrSBHostDismiss(void) {
     { int _f=open("/var/mobile/CBR_home.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_f>=0){ const char*m="HOST-DISMISS entered (our exit path running)\n"; write(_f,m,strlen(m)); close(_f);} }   // v3.53.0: proves whether our teardown actually runs on a home tap
+    // v3.68.0: a soft close is a 0.40s async zoom; a duplicate soft dismiss during that window (double
+    // home tap, stray notification) must not re-run teardown or stack a second zoom. A HARD dismiss
+    // (re-host/foreign/disconnect) always proceeds and finalizes synchronously below.
+    { int _he = gCBRHardDismiss; if (gCBRDismissing && !_he) { int _f2=open("/var/mobile/CBR_home.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_f2>=0){ const char*m="HOST-DISMISS ignored (soft close already in flight)\n"; write(_f2,m,strlen(m)); close(_f2);} return; } }
     @try { CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.unlock"), NULL, NULL, YES); } @catch(...) {}
     // v3.42.0: stop advertising "hosting" to launching apps + drop the pending create-match + container.
     @try { if (gCBRHostStateToken) notify_set_state(gCBRHostStateToken, 0); gCBRPendingHostBid = nil; gCBRBounceCount = 0; gCBRBounceBypass = 0; } @catch(...) {}   // v3.51.0: container must SURVIVE until the close zoom reads it
@@ -1286,32 +1303,39 @@ static void cbrSBHostDismiss(void) {
         // (0.25) and fades, then the CAPTURED window hides in the completion (a re-host started
         // mid-animation gets a fresh window and is never touched). Instant-hide on throw.
         int _hard = gCBRHardDismiss; gCBRHardDismiss = 0;   // v3.60.0: consume the hard-dismiss flag
+        id _win = gCBRRootWindow;
+        id _cont = gCBRContainerView;
+        // v3.68.0 TEARDOWN-ORDER FIX: the old code niled gCBRRootWindow (+ scene/container/button)
+        // SYNCHRONOUSLY while the soft close zoom was still animating the window for 0.40s. That
+        // blinded the re-host overlap guard (it reads gCBRRootWindow) and, if the completion was ever
+        // dropped, orphaned a still-visible window that ate every car-screen touch (the won't-open /
+        // dead-chrome / dead-home lockup). Now the window is only released once it is actually hidden.
         @try {
-            id _cont = gCBRContainerView;
-            id _win = gCBRRootWindow;
-            if (_hard) {
-                // v3.60.0: re-host / foreign-launch / disconnect -> tear down IMMEDIATELY (no zoom) so
-                // the new host never overlaps a lingering old window (the won't-open / double-foreground
-                // / sideways failure). The zoom below is only for the user's home-button exit.
-                if (_win) ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES);
-            } else if (_cont && _win) {
+            if (_hard || !(_cont && _win)) {
+                // re-host / foreign-launch / disconnect / no-container fallback -> hide + finalize NOW,
+                // synchronously, so a new host can never overlap a lingering old window.
+                @try { if (_win) ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); } @catch(...) {}
+                cbrSBFinalizeTeardown(_win);
+            } else {
+                // user's home-button exit -> keep gCBRRootWindow VALID during the zoom (so the overlap
+                // guard can force it down if a re-host starts), then finalize in the completion,
+                // identity-guarded so a re-host is never clobbered.
+                gCBRDismissing = 1;
                 void (^_out)(void) = ^{
                     ((void(*)(id,SEL,CGFloat))objc_msgSend)(_cont, sel_registerName("setAlpha:"), (CGFloat)0.0);
                     ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(_cont, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.25, 0.25));
                 };
-                void (^_done)(BOOL) = ^(BOOL fin){ @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); } @catch(...) {} };
+                void (^_done)(BOOL) = ^(BOOL fin){ @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); } @catch(...) {} cbrSBFinalizeTeardown(_win); };
                 ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
                     objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
                     0.40, 0.0, (NSUInteger)(1UL<<16) /*EaseIn - v3.63.0 slower, zooms the live snapshot into the icon*/, _out, _done);
-            } else if (_win) {
-                ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES);
+                // watchdog: if the completion is ever dropped, force teardown at +0.75s so the window
+                // is never orphaned. Identity-guarded: a re-host that repointed gCBRRootWindow is skipped.
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.75*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+                    @try { if (gCBRRootWindow == _win) { ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); cbrSBFinalizeTeardown(_win); } } @catch(...) {}
+                });
             }
-        } @catch(...) { if (gCBRRootWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRRootWindow, sel_registerName("setHidden:"), YES); } }
-        @try { if (gCBROverlayWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBROverlayWindow, sel_registerName("setHidden:"), YES); gCBROverlayWindow = nil; } } @catch(...) {}
-        gCBRRootWindow = nil; gCBRAppVC = nil; gCBRActiveTxns = nil; gCBRSceneHandle = nil; gCBRContainerView = nil; gCBRHomeButton = nil;   // v3.51.0: release the grafted scene handle (leak = CarPlay content still composited after disconnect -> phone screenshot duplication) + container + button
-        // v3.20.32: NOW release keep-alive (the .25 retain kept the app running -> audio continued +
-        // left it in a half-state that black-screened on reopen). Releasing lets it suspend cleanly.
-        @try { if (gCBRKeepAlive) [gCBRKeepAlive removeAllObjects]; } @catch(...) {}
+        } @catch(...) { @try { if (_win) ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); } @catch(...) {} cbrSBFinalizeTeardown(_win); }
         DD("[host] dismissed (backgrounded + keep-alive released)\n");
         { int _lf=open("/var/mobile/CBR_lifecycle.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_lf>=0){ char _lb[80]; int _ln=snprintf(_lb,sizeof(_lb),"[HOST-END] hard=%d\n", _hard); if(_ln>0)write(_lf,_lb,(size_t)_ln); close(_lf);} }   // v3.60.0
         if(fd>=0)close(fd);
