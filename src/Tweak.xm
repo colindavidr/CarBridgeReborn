@@ -1206,7 +1206,21 @@ static void cbrSBHostDismiss(void) {
     { int _f=open("/var/mobile/CBR_home.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_f>=0){ const char*m="HOST-DISMISS entered (our exit path running)\n"; write(_f,m,strlen(m)); close(_f);} }   // v3.53.0: proves whether our teardown actually runs on a home tap
     @try { CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.unlock"), NULL, NULL, YES); } @catch(...) {}
     // v3.42.0: stop advertising "hosting" to launching apps + drop the pending create-match + container.
-    @try { if (gCBRHostStateToken) notify_set_state(gCBRHostStateToken, 0); gCBRPendingHostBid = nil; gCBRBounceCount = 0; gCBRBounceBypass = 0; } @catch(...) {}   // v3.51.0: container must SURVIVE until the close zoom reads it - v3.50 nil'd it right here, so the close animation always saw nil and instant-hid (the "abrupt close")
+    @try { if (gCBRHostStateToken) notify_set_state(gCBRHostStateToken, 0); gCBRPendingHostBid = nil; gCBRBounceCount = 0; gCBRBounceBypass = 0; } @catch(...) {}   // v3.51.0: container must SURVIVE until the close zoom reads it
+    // v3.63.0: snapshot the LIVE app content NOW (before the restore-to-mode-0 + SIGKILL below blank
+    // it) and overlay it on the container. The close zoom then animates this real frame - not a dead
+    // black one - into the tapped icon (the container's anchor). @try-guarded: if the grafted surface
+    // can't be snapshotted, the plain container zoom still runs.
+    @try {
+        if (gCBRContainerView) {
+            id _snapClose = ((id(*)(id,SEL,BOOL))objc_msgSend)(gCBRContainerView, sel_registerName("snapshotViewAfterScreenUpdates:"), NO);
+            if (_snapClose) {
+                CGRect _cbnd = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRContainerView, sel_registerName("bounds"));
+                ((void(*)(id,SEL,CGRect))objc_msgSend)(_snapClose, sel_registerName("setFrame:"), _cbnd);
+                ((void(*)(id,SEL,id))objc_msgSend)(gCBRContainerView, sel_registerName("addSubview:"), _snapClose);
+            }
+        }
+    } @catch(...) {}
     @try {
         int fd=open("/var/mobile/CBR_sb_host.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
         #define DD(m) do{ if(fd>=0){const char*_m=(m);write(fd,_m,strlen(_m));} }while(0)
@@ -1288,7 +1302,7 @@ static void cbrSBHostDismiss(void) {
                 void (^_done)(BOOL) = ^(BOOL fin){ @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); } @catch(...) {} };
                 ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
                     objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
-                    0.26, 0.0, (NSUInteger)(1UL<<16) /*EaseIn*/, _out, _done);
+                    0.40, 0.0, (NSUInteger)(1UL<<16) /*EaseIn - v3.63.0 slower, zooms the live snapshot into the icon*/, _out, _done);
             } else if (_win) {
                 ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES);
             }
@@ -1551,7 +1565,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 };
                 ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
                     objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
-                    0.32, 0.0, (NSUInteger)(2UL<<16) /*EaseOut*/, _anim, (void(^)(BOOL))nil);
+                    0.40, 0.0, (NSUInteger)(2UL<<16) /*EaseOut - v3.63.0 slower zoom-in from the icon*/, _anim, (void(^)(BOOL))nil);
             } @catch(...) {}
         } @catch (NSException *e) { HHF("mount EXC: %s\n", [[e reason] UTF8String]?:"?"); }
         // --- v3.18.3: drive the transaction EXACTLY like the source ---
