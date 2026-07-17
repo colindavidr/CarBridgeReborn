@@ -3373,6 +3373,18 @@ static double gCBRHomeDownMs = 0;   // v3.58.0: DBStatusBarHomeButton press-star
 // (all windows were sameScreen=0 / phone display). CarPlay's chrome is rendered in THIS process
 // (CarPlayApp). This probe enumerates CarPlayApp's own scenes/windows/view hierarchy to find the
 // sidebar/dock/home-button chrome - the make-or-break for genuine stock-chrome coordination.
+// v3.61.0 HOME-INTERNALS PROBE: dump a class's method names so we can find the Siri-cancel +
+// show-dashboard selectors the home button uses (to exit to the dashboard, not the home grid).
+static void cbrDumpClassMethods(const char *clsname, int fd) {
+    @try {
+        Class c = objc_getClass(clsname);
+        if (!c) { char _b[110]; int _n=snprintf(_b,sizeof(_b),"==== %s NOT FOUND ====\n", clsname); if(_n>0)write(fd,_b,(size_t)_n); return; }
+        { char _b[110]; int _n=snprintf(_b,sizeof(_b),"==== %s methods ====\n", clsname); if(_n>0)write(fd,_b,(size_t)_n); }
+        unsigned int cnt=0; Method *ms = class_copyMethodList(c, &cnt);
+        for (unsigned int i=0;i<cnt;i++){ const char *sn = sel_getName(method_getName(ms[i])); char _b[240]; int _l=snprintf(_b,sizeof(_b),"  %s\n", sn); if(_l>0)write(fd,_b,(size_t)_l); }
+        if(ms) free(ms);
+    } @catch(...) {}
+}
 static void cbrCPProbeChrome(void) {
     int cf = open("/var/mobile/CBR_cpchrome.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
     #define PC(...) do{ char _b[320]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(cf>=0)write(cf,_b,_n);}while(0)
@@ -3516,6 +3528,7 @@ static void cbrCPProbeChromeGeom(void) {
 - (void)_setupIconModel {
     cbrCPProbeScenes();
     cbrCPProbeChromeGeom();
+    { static int _mi=0; if(!_mi){ _mi=1; int _f=open("/var/mobile/CBR_home_internals.txt",O_WRONLY|O_CREAT|O_TRUNC,0644); if(_f>=0){ cbrDumpClassMethods("DBRootStatusBarViewController",_f); cbrDumpClassMethods("DBStatusBarHomeButton",_f); cbrDumpClassMethods("DBDashboardHomeViewController",_f); cbrDumpClassMethods("DashBoard",_f); close(_f);} } }   // v3.61.0 home-internals probe
     cbrCPProbeCarSceneGuts();
     cbrCPProbeChrome();
     CBLog("[CBR] _setupIconModel called");
@@ -4366,6 +4379,46 @@ static void cbrOrient3(const char *trig, int force) {
         if(n>0){ @try { NSString *p=[NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_orient3.txt"]; int fd=open([p fileSystemRepresentation],O_WRONLY|O_CREAT|O_APPEND,0644); if(fd>=0){write(fd,line,(size_t)n); close(fd);} } @catch(...) {} }
     } @catch(...) {}
 }
+// v3.61.0 ORIENT-DETAIL PROBE: full VC-tree dump so a SIDEWAYS app (Messenger) can be diffed vs an
+// UPRIGHT one to find the exact VC/mask that differs. tf b/c != 0 == the view is rotated 90.
+static void cbrOrientDetailVC(id vc, int fd, int depth) {
+    if (!vc || depth > 12) return;
+    @try {
+        NSUInteger supp = ((NSUInteger(*)(id,SEL))objc_msgSend)(vc, sel_registerName("supportedInterfaceOrientations"));
+        SEL _pv = sel_registerName("__supportedInterfaceOrientations");
+        NSUInteger psupp = [vc respondsToSelector:_pv] ? ((NSUInteger(*)(id,SEL))objc_msgSend)(vc, _pv) : 0;
+        long vio = ((long(*)(id,SEL))objc_msgSend)(vc, sel_registerName("interfaceOrientation"));
+        id v = ((id(*)(id,SEL))objc_msgSend)(vc, sel_registerName("view"));
+        CGAffineTransform tf = v ? ((CGAffineTransform(*)(id,SEL))objc_msgSend)(v, sel_registerName("transform")) : CGAffineTransformIdentity;
+        CGRect vb = v ? ((CGRect(*)(id,SEL))objc_msgSend)(v, sel_registerName("bounds")) : CGRectZero;
+        char _ind[28]; int _i; for(_i=0;_i<depth&&_i<12;_i++) _ind[_i]=' '; _ind[_i]=0;
+        char _b[440]; int _n=snprintf(_b,sizeof(_b),"%s%s supp=0x%lx __supp=0x%lx vio=%ld vb=%.0fx%.0f tf=[%.2f %.2f %.2f %.2f]\n", _ind, object_getClassName(vc), (unsigned long)supp, (unsigned long)psupp, vio, vb.size.width, vb.size.height, tf.a,tf.b,tf.c,tf.d);
+        if(_n>0) write(fd,_b,(size_t)_n);
+        id kids = ((id(*)(id,SEL))objc_msgSend)(vc, sel_registerName("childViewControllers"));
+        NSUInteger kc = kids ? ((NSUInteger(*)(id,SEL))objc_msgSend)(kids, sel_registerName("count")) : 0;
+        for (NSUInteger k=0;k<kc && k<20;k++) cbrOrientDetailVC(((id(*)(id,SEL,NSUInteger))objc_msgSend)(kids,sel_registerName("objectAtIndex:"),k), fd, depth+1);
+        id pres = ((id(*)(id,SEL))objc_msgSend)(vc, sel_registerName("presentedViewController"));
+        if (pres && pres != vc) cbrOrientDetailVC(pres, fd, depth+1);
+    } @catch(...) {}
+}
+static void cbrOrientDetail(id win, id scene) {
+    @try {
+        NSString *p = [NSTemporaryDirectory() stringByAppendingPathComponent:@"CBR_orient_detail.txt"];
+        int fd = open([p fileSystemRepresentation], O_WRONLY|O_CREAT|O_APPEND, 0644);
+        if (fd < 0) return;
+        id mb = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("NSBundle"), sel_registerName("mainBundle"));
+        id bo = mb ? ((id(*)(id,SEL))objc_msgSend)(mb, sel_registerName("bundleIdentifier")) : nil;
+        const char *bid = bo ? ((const char*(*)(id,SEL))objc_msgSend)(bo, sel_registerName("UTF8String")) : "?";
+        long sIfo = ((long(*)(id,SEL))objc_msgSend)(scene, sel_registerName("interfaceOrientation"));
+        CGRect wb = ((CGRect(*)(id,SEL))objc_msgSend)(win, sel_registerName("bounds"));
+        char _hb[320]; int _hn=snprintf(_hb,sizeof(_hb),"==== ORIENT-DETAIL bid=%s ovr=%d sceneIfo=%ld win=%s %.0fx%.0f ====\n", bid, gCBROrientOverride, sIfo, object_getClassName(win), wb.size.width, wb.size.height);
+        if(_hn>0) write(fd,_hb,(size_t)_hn);
+        id rvc = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("rootViewController"));
+        cbrOrientDetailVC(rvc, fd, 0);
+        const char *_e="==== END ====\n"; write(fd,_e,strlen(_e));
+        close(fd);
+    } @catch(...) {}
+}
 static void cbrProbeTick(void) {
     // v3.22.2: NO early bail. v3.22.1 returned here whenever the gate was shut, so "no file"
     // was ambiguous between "probe never ran" and "never hosted". Always write; the dump
@@ -4521,6 +4574,7 @@ static void cbrProbeTick(void) {
                     (unsigned long)w, object_getClassName(win), wb.size.width, wb.size.height,
                     rvc ? object_getClassName(rvc) : "nil", vio,
                     _wtf.a,_wtf.b,_wtf.c,_wtf.d, _vtf.a,_vtf.b,_vtf.c,_vtf.d];
+                { static int _od=0; if (rvc && _od++ < 16) cbrOrientDetail(win, scene); }   // v3.61.0 ORIENT-DETAIL: full VC-tree dump (Messenger vs upright)
                 // v3.57.0 PILL PROBE: walk the childViewControllerForHomeIndicatorAutoHidden chain -
                 // the VCs UIKit resolves the pill from. The LEAF is what to hook (like CBR hooks
                 // YTAppViewControllerImpl for orientation). leafHidden=0 means the leaf overrides
