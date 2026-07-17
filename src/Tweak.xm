@@ -1415,45 +1415,60 @@ static void cbrReferenceProbe(void) {
 
 
 static int gCBRZoomDone = 0;   // v3.64.0: 1 once the open zoom has fired for this host
-// v3.64.0 OPEN-ANIM HEARTBEAT: the grafted scene renders async, so we can't zoom at mount (empty
-// box). Poll the scene view every 50ms; when it has real content, fire the zoom-in of the LIVE app
-// out of the icon (0.8s fallback so it never sticks tiny). Logs the timing for tuning.
-static void cbrAnimHeartbeat(int n) {
-    if (n > 40) return;   // ~2s cap
+static int gCBRAnimTicks = 0;  // v3.66.0: ticks since the current host began (0 while idle)
+// v3.66.0 CONTINUOUS OPEN-ANIM HEARTBEAT: modelled on cbrCPRotationSchedule - a self-rescheduling
+// loop STARTED AT SPRINGBOARD INIT, so it's already ticking before you tap and captures the open
+// from the moment the container appears. While a host is up it logs the container / scene view /
+// appVC.view state for the first ~2s (per bid) so a WORKING app (TrollStore/Dropbox) can be diffed
+// against an abrupt one, and fires the zoom-in of the LIVE app out of the icon once content is
+// present (0.8s fallback). It never stops - when idle it ticks slowly and writes nothing.
+static void cbrAnimHeartbeat(void) {
+    double _next = 0.20;   // idle cadence
     @try {
         id cont = gCBRContainerView;
-        id dvc = gCBRAppVC ? getIvar(gCBRAppVC, "_deviceAppViewController") : nil;
-        id sv  = dvc ? getIvar(dvc, "_sceneView") : nil;
-        CGRect svb = sv ? ((CGRect(*)(id,SEL))objc_msgSend)(sv, sel_registerName("bounds")) : CGRectZero;
-        id svl = sv ? ((id(*)(id,SEL))objc_msgSend)(sv, sel_registerName("layer")) : nil;
-        id subs = svl ? ((id(*)(id,SEL))objc_msgSend)(svl, sel_registerName("sublayers")) : nil;
-        NSUInteger nsub = subs ? ((NSUInteger(*)(id,SEL))objc_msgSend)(subs, sel_registerName("count")) : 0;
-        CGAffineTransform ct = CGAffineTransformIdentity;
-        if (cont) { id l = ((id(*)(id,SEL))objc_msgSend)(cont, sel_registerName("layer")); if (l) ct = ((CGAffineTransform(*)(id,SEL))objc_msgSend)(l, sel_registerName("affineTransform")); }
-        // v3.65.0: also inspect the mounted appVC.view (some apps render there, not on the scene
-        // view) + tag the bid, so a WORKING app (TrollStore/Dropbox) can be diffed against an abrupt one.
-        const char *_bid = gCBRLastBidStr ? ((const char*(*)(id,SEL))objc_msgSend)(gCBRLastBidStr, sel_registerName("UTF8String")) : "?";
-        id _vcv = gCBRAppVC ? ((id(*)(id,SEL))objc_msgSend)(gCBRAppVC, sel_registerName("view")) : nil;
-        CGRect _vcb = _vcv ? ((CGRect(*)(id,SEL))objc_msgSend)(_vcv, sel_registerName("bounds")) : CGRectZero;
-        id _vcl = _vcv ? ((id(*)(id,SEL))objc_msgSend)(_vcv, sel_registerName("layer")) : nil;
-        id _vsubs = _vcl ? ((id(*)(id,SEL))objc_msgSend)(_vcl, sel_registerName("sublayers")) : nil;
-        NSUInteger _vnsub = _vsubs ? ((NSUInteger(*)(id,SEL))objc_msgSend)(_vsubs, sel_registerName("count")) : 0;
-        int fd = open("/var/mobile/CBR_anim_heartbeat.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
-        if (fd >= 0) { char _b[340]; int _l = snprintf(_b,sizeof(_b),"hb[%d] bid=%s zoomDone=%d contScale=%.2f sv=%s %.0fx%.0f svSub=%lu vcView=%s %.0fx%.0f vcSub=%lu\n", n, _bid, gCBRZoomDone, ct.a, sv?object_getClassName(sv):"nil", svb.size.width, svb.size.height, (unsigned long)nsub, _vcv?object_getClassName(_vcv):"nil", _vcb.size.width, _vcb.size.height, (unsigned long)_vnsub); if(_l>0) write(fd,_b,(size_t)_l); close(fd); }
-        int _ready = (nsub > 0 || _vnsub > 0 || svb.size.width > 100.0 || _vcb.size.width > 100.0);
-        if (!gCBRZoomDone && cont && (_ready || n >= 16)) {
-            gCBRZoomDone = 1;
-            void (^_anim)(void) = ^{
-                ((void(*)(id,SEL,CGFloat))objc_msgSend)(cont, sel_registerName("setAlpha:"), (CGFloat)1.0);
-                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(cont, sel_registerName("setTransform:"), CGAffineTransformIdentity);
-            };
-            ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
-                objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
-                0.40, 0.0, (NSUInteger)(2UL<<16), _anim, (void(^)(BOOL))nil);
-            return;   // zoom fired - stop the heartbeat
+        if (!cont) {
+            gCBRAnimTicks = 0;   // idle: reset so the next open starts at tick 0
+        } else {
+            gCBRAnimTicks++;
+            _next = (gCBRAnimTicks <= 40) ? 0.05 : 0.20;   // fast during the ~2s open window, then relax
+            id dvc = gCBRAppVC ? getIvar(gCBRAppVC, "_deviceAppViewController") : nil;
+            id sv  = dvc ? getIvar(dvc, "_sceneView") : nil;
+            CGRect svb = sv ? ((CGRect(*)(id,SEL))objc_msgSend)(sv, sel_registerName("bounds")) : CGRectZero;
+            id svl = sv ? ((id(*)(id,SEL))objc_msgSend)(sv, sel_registerName("layer")) : nil;
+            id subs = svl ? ((id(*)(id,SEL))objc_msgSend)(svl, sel_registerName("sublayers")) : nil;
+            NSUInteger nsub = subs ? ((NSUInteger(*)(id,SEL))objc_msgSend)(subs, sel_registerName("count")) : 0;
+            CGAffineTransform ct = CGAffineTransformIdentity;
+            { id l = ((id(*)(id,SEL))objc_msgSend)(cont, sel_registerName("layer")); if (l) ct = ((CGAffineTransform(*)(id,SEL))objc_msgSend)(l, sel_registerName("affineTransform")); }
+            const char *_bid = gCBRLastBidStr ? ((const char*(*)(id,SEL))objc_msgSend)(gCBRLastBidStr, sel_registerName("UTF8String")) : "?";
+            id _vcv = gCBRAppVC ? ((id(*)(id,SEL))objc_msgSend)(gCBRAppVC, sel_registerName("view")) : nil;
+            CGRect _vcb = _vcv ? ((CGRect(*)(id,SEL))objc_msgSend)(_vcv, sel_registerName("bounds")) : CGRectZero;
+            id _vcl = _vcv ? ((id(*)(id,SEL))objc_msgSend)(_vcv, sel_registerName("layer")) : nil;
+            id _vsubs = _vcl ? ((id(*)(id,SEL))objc_msgSend)(_vcl, sel_registerName("sublayers")) : nil;
+            NSUInteger _vnsub = _vsubs ? ((NSUInteger(*)(id,SEL))objc_msgSend)(_vsubs, sel_registerName("count")) : 0;
+            if (gCBRAnimTicks <= 40) {   // log only the first ~2s of each open (the animation window)
+                int fd = open("/var/mobile/CBR_anim_heartbeat.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+                if (fd >= 0) { char _b[340]; int _l = snprintf(_b,sizeof(_b),"hb[%d] bid=%s zoomDone=%d contScale=%.2f sv=%s %.0fx%.0f svSub=%lu vcView=%s %.0fx%.0f vcSub=%lu\n", gCBRAnimTicks, _bid, gCBRZoomDone, ct.a, sv?object_getClassName(sv):"nil", svb.size.width, svb.size.height, (unsigned long)nsub, _vcv?object_getClassName(_vcv):"nil", _vcb.size.width, _vcb.size.height, (unsigned long)_vnsub); if(_l>0) write(fd,_b,(size_t)_l); close(fd); }
+            }
+            int _ready = (nsub > 0 || _vnsub > 0 || svb.size.width > 100.0 || _vcb.size.width > 100.0);
+            if (!gCBRZoomDone && (_ready || gCBRAnimTicks >= 16)) {
+                gCBRZoomDone = 1;
+                void (^_anim)(void) = ^{
+                    ((void(*)(id,SEL,CGFloat))objc_msgSend)(cont, sel_registerName("setAlpha:"), (CGFloat)1.0);
+                    ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(cont, sel_registerName("setTransform:"), CGAffineTransformIdentity);
+                };
+                ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
+                    objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
+                    0.40, 0.0, (NSUInteger)(2UL<<16), _anim, (void(^)(BOOL))nil);
+            }
         }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.05*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrAnimHeartbeat(n+1); });
     } @catch(...) {}
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(_next*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrAnimHeartbeat(); });
+}
+static void cbrAnimHeartbeatStart(void) {
+    static int _started = 0;
+    if (_started) return;   // v3.66.0: exactly one loop, ever
+    _started = 1;
+    cbrAnimHeartbeat();
 }
 static void cbrSBHostScene(const char *bid_cstr, id handle) {
     int fd = open("/var/mobile/CBR_sb_host.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
@@ -1604,8 +1619,8 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 // EMPTY box. Hold at 0.30 (small, at the icon) and let the heartbeat fire the zoom-in
                 // once the scene view has real content, so the LIVE app grows out of the icon.
                 gCBRZoomDone = 0;
+                gCBRAnimTicks = 0;   // v3.66.0: fresh open; the continuous heartbeat (started at SB init) takes it from here
                 { int _hf=open("/var/mobile/CBR_anim_heartbeat.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_hf>=0){ char _hb2[160]; int _hn=snprintf(_hb2,sizeof(_hb2),"==== OPEN bid=%s ====\n", bid_cstr?bid_cstr:"?"); if(_hn>0)write(_hf,_hb2,(size_t)_hn); close(_hf);} }   // v3.65.0: per-open header, accumulate so working vs abrupt apps can be compared
-                cbrAnimHeartbeat(0);
             } @catch(...) {}
         } @catch (NSException *e) { HHF("mount EXC: %s\n", [[e reason] UTF8String]?:"?"); }
         // --- v3.18.3: drive the transaction EXACTLY like the source ---
@@ -5074,6 +5089,10 @@ static inline int cbrIsHostedLandscapeWindow(id win) {
     else if (strcmp(__progname, "SpringBoard") == 0) {
         %init(SPRINGBOARD);
         cbrSBRegisterListener();
+        // v3.66.0: start the continuous open-anim heartbeat here (like cbrCPRotationSchedule) so it is
+        // already ticking before any app is tapped. O_TRUNC marker clears stale logs + proves writes work.
+        { int _hf=open("/var/mobile/CBR_anim_heartbeat.txt",O_WRONLY|O_CREAT|O_TRUNC,0644); if(_hf>=0){ const char*_m="==== SB heartbeat started (v3.66.0) ====\n"; write(_hf,_m,strlen(_m)); close(_hf);} }
+        cbrAnimHeartbeatStart();
         // v3.42.0: clear stale host state after a respring (otherwise every app launched on the
         // phone would read state=3 and go landscape-only).
         @try {
