@@ -1162,6 +1162,7 @@ static id cbrGetCarplayCADisplay(void) {
     return nil;
 }
 static id gCBRRootWindow = nil;
+static int gCBRHardDismiss = 0;   // v3.60.0: 1 = tear down immediately (no zoom) - set for re-host/foreign/disconnect
 static id gCBRAppVC = nil;
 static id gCBRActiveTxns = nil;
 static id gCBRTxn = nil;         // v3.19.5: strong-hold txn for safe completion
@@ -1270,10 +1271,16 @@ static void cbrSBHostDismiss(void) {
         // v3.51.0 CLOSE ANIMATION: ZOOM-OUT - the last rendered frame shrinks to the center
         // (0.25) and fades, then the CAPTURED window hides in the completion (a re-host started
         // mid-animation gets a fresh window and is never touched). Instant-hide on throw.
+        int _hard = gCBRHardDismiss; gCBRHardDismiss = 0;   // v3.60.0: consume the hard-dismiss flag
         @try {
             id _cont = gCBRContainerView;
             id _win = gCBRRootWindow;
-            if (_cont && _win) {
+            if (_hard) {
+                // v3.60.0: re-host / foreign-launch / disconnect -> tear down IMMEDIATELY (no zoom) so
+                // the new host never overlaps a lingering old window (the won't-open / double-foreground
+                // / sideways failure). The zoom below is only for the user's home-button exit.
+                if (_win) ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES);
+            } else if (_cont && _win) {
                 void (^_out)(void) = ^{
                     ((void(*)(id,SEL,CGFloat))objc_msgSend)(_cont, sel_registerName("setAlpha:"), (CGFloat)0.0);
                     ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(_cont, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.25, 0.25));
@@ -1292,6 +1299,7 @@ static void cbrSBHostDismiss(void) {
         // left it in a half-state that black-screened on reopen). Releasing lets it suspend cleanly.
         @try { if (gCBRKeepAlive) [gCBRKeepAlive removeAllObjects]; } @catch(...) {}
         DD("[host] dismissed (backgrounded + keep-alive released)\n");
+        { int _lf=open("/var/mobile/CBR_lifecycle.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_lf>=0){ char _lb[80]; int _ln=snprintf(_lb,sizeof(_lb),"[HOST-END] hard=%d\n", _hard); if(_ln>0)write(_lf,_lb,(size_t)_ln); close(_lf);} }   // v3.60.0
         if(fd>=0)close(fd);
         #undef DD
     } @catch(...) {}
@@ -1399,9 +1407,10 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
     HH("==== HOST SCENE v3.18.0 (port) ====\n");
     if (!bid_cstr || !bid_cstr[0]) { HH("no bid\n"); if(fd>=0)close(fd); return; }
     if (!handle) { HH("no handle -> abort\n"); if(fd>=0)close(fd); return; }
+    { int _lf=open("/var/mobile/CBR_lifecycle.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_lf>=0){ char _lb[240]; int _ln=snprintf(_lb,sizeof(_lb),"[HOST-START] bid=%s prevRootWin=%d prevScene=%d keepAlive=%lu\n", bid_cstr, gCBRRootWindow?1:0, gCBRSceneHandle?1:0, (unsigned long)(gCBRKeepAlive?[gCBRKeepAlive count]:0)); if(_ln>0)write(_lf,_lb,(size_t)_ln); close(_lf);} }   // v3.60.0 lifecycle probe
     // v3.20.3: don't blind-toggle on a possibly-stale global. Tear down old window and
     // continue hosting the freshly-tapped app. Fixes "worked once, black after".
-    if (gCBRRootWindow) { HH("was hosting -> dismiss old, re-host fresh\n"); cbrSBHostDismiss(); }
+    if (gCBRRootWindow) { HH("was hosting -> dismiss old, re-host fresh\n"); gCBRHardDismiss = 1; cbrSBHostDismiss(); }
     HHF("bid: %s\n", bid_cstr);
         @try { gCBRLastBidStr = [NSString stringWithUTF8String:bid_cstr]; } @catch(...) {}
     @try {
@@ -2880,7 +2889,7 @@ static void cbrSBLaunchCallback(CFNotificationCenterRef center, void *observer,
 // we are hosting, so we tear our window down and hand the car display back instead of leaving two apps
 // foregrounded (YouTube on top, Maps peeking through the sidebar gap).
 static void cbrSBDismissCallback(CFNotificationCenterRef c, void *obs, CFStringRef name, const void *o, CFDictionaryRef ui) {
-    dispatch_async(dispatch_get_main_queue(), ^{ @try { if (gCBRRootWindow) { cbrSBLog("[CBR-SB] host.dismiss received - tearing down for native app"); cbrSBHostDismiss(); } } @catch(...) {} });
+    dispatch_async(dispatch_get_main_queue(), ^{ @try { if (gCBRRootWindow) { cbrSBLog("[CBR-SB] host.dismiss received - tearing down for native app"); gCBRHardDismiss = 1; cbrSBHostDismiss(); } } @catch(...) {} });
 }
 static void cbrSBRegisterListener(void) {
     cbrSBLog("[CBR-SB] v3.14.0 listener registering in SpringBoard");
@@ -2906,7 +2915,7 @@ static void cbrSBRegisterListener(void) {
                     if (!_car) return;
                 } @catch(...) {}
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    @try { if (gCBRRootWindow) { cbrSBLog("[CBR-SB] v3.51.0 car screen disconnected while hosting -> teardown"); cbrSBHostDismiss(); } } @catch(...) {}
+                    @try { if (gCBRRootWindow) { cbrSBLog("[CBR-SB] v3.51.0 car screen disconnected while hosting -> teardown"); gCBRHardDismiss = 1; cbrSBHostDismiss(); } } @catch(...) {}
                 });
             };
             ((id(*)(id,SEL,id,id,id,void(^)(id)))objc_msgSend)(_nc,
@@ -3235,23 +3244,27 @@ static double gCBRHomeDownMs = 0;   // v3.58.0: DBStatusBarHomeButton press-star
     %orig;
 }
 - (void)homeButtonUp:(id)arg1 {
+    uint64_t _hs = 0; double _dur = 99999.0;
     @try {
-        uint64_t _hs = cbrReadHostState();
+        _hs = cbrReadHostState();
         double _now; { struct timespec _t; clock_gettime(CLOCK_MONOTONIC,&_t); _now = _t.tv_sec*1000.0 + _t.tv_nsec/1000000.0; }
-        double _dur = (gCBRHomeDownMs > 0) ? (_now - gCBRHomeDownMs) : 99999.0;
+        _dur = (gCBRHomeDownMs > 0) ? (_now - gCBRHomeDownMs) : 99999.0;
+    } @catch(...) {}
+    // v3.60.0 SIRI FIX: let the button COMPLETE natively. Swallowing homeButtonUp: (v3.58/v3.59) left
+    // the touch hanging, so the button thought it was HELD and fired Siri on every tap. Native
+    // completion cancels Siri on a short press and still triggers it on a long hold.
+    %orig;
+    @try {
         int _hf = open("/var/mobile/CBR_home_probe.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
         if (_hf >= 0) { char _b[160]; int _n = snprintf(_b,sizeof(_b),"[HOME-UP] dur=%.0fms hosting=%d\n", _dur, _hs!=0?1:0); if(_n>0) write(_hf,_b,(size_t)_n); close(_hf); }
         if (_hs != 0 && _dur < 500.0) {
-            // short press while hosting -> return to the dashboard: post dismiss (tear our host down)
-            // + SWALLOW the native go-homescreen action. Long press (>=500ms) falls through so Siri
-            // stays intact.
+            // short press while hosting -> ALSO tear our host down. %orig above already handled Siri
+            // (and its own nav); we just add the teardown so the app closes.
             CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.host.dismiss"), NULL, NULL, YES);
             int _hf2 = open("/var/mobile/CBR_home_probe.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
-            if (_hf2 >= 0) { const char *_m = "  -> SHORT press while hosting: posted dismiss + swallowed (return to dashboard)\n"; write(_hf2,_m,strlen(_m)); close(_hf2); }
-            return;   // swallow - do NOT navigate to the homescreen
+            if (_hf2 >= 0) { const char *_m = "  -> SHORT press hosting: %orig (native, no Siri) + posted dismiss\n"; write(_hf2,_m,strlen(_m)); close(_hf2); }
         }
     } @catch(...) {}
-    %orig;
 }
 %end
 
