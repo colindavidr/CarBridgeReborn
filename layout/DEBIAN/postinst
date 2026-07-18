@@ -1,45 +1,6 @@
 #!/bin/sh
-# CarBridgeReborn postinst
+# CarBridgeReborn postinst - minimal + non-blocking (v3.74.0).
+# NOTE: never call NathanLR injection from here - it blocks headless and wedges dpkg.
 /var/jb/usr/bin/cbr-refresh-prefs 2>/dev/null || /usr/bin/cbr-refresh-prefs 2>/dev/null || true
-
-# ---------------------------------------------------------------------------
-# v3.70.0 AUTO-INJECT. NathanLR only loads tweaks into apps it has statically
-# injected (appstorehelper.dylib in the bundle); an un-injected app never loads
-# CBR and boots SIDEWAYS on the CarPlay dash. Do that injection here, as root,
-# at install time, by calling NathanLR's own --appinject CLI - the same call its
-# toggle makes - so no app has to be toggled by hand. Idempotent (only injects
-# apps missing the bootstrapper), never fails the install, logs everything.
-# To cover a new app, add its bundle id to APPS below.
-# ---------------------------------------------------------------------------
-LOG=/var/mobile/CBR_autoinject.log
-APPS="com.google.ios.youtube com.google.ios.youtubeunplugged com.amazon.Amazon com.netflix.Netflix com.facebook.Facebook com.facebook.Messenger com.reddit.Reddit com.getdropbox.Dropbox"
-{
-  echo "==== cbr auto-inject $(date) ===="
-  NLR=$(ls -d /var/containers/Bundle/Application/*/NathanLR.app/NathanLR 2>/dev/null | head -1)
-  if [ -z "$NLR" ] || [ ! -x "$NLR" ]; then
-    echo "  NathanLR binary not found - open NathanLR once, reinstall CBR; skipped"
-  else
-    echo "  NathanLR: $NLR"
-    for bid in $APPS; do
-      dir=""
-      for info in /var/containers/Bundle/Application/*/*.app/Info.plist; do
-        [ -f "$info" ] || continue
-        if grep -qaF "$bid" "$info" 2>/dev/null; then dir=$(dirname "$info"); break; fi
-      done
-      if [ -z "$dir" ]; then echo "  [--] $bid : not installed"; continue; fi
-      # REAL-injection check: the app's main binary must reference appstorehelper (the load
-      # command), not merely have the dylib file - a headless inject copies the file but often
-      # cannot complete the signed patch, which is why "file present" was a false positive.
-      _patched() { for _f in "$dir"/*; do case "$_f" in */appstorehelper.dylib) continue;; esac; [ -f "$_f" ] || continue; grep -qaF appstorehelper "$_f" 2>/dev/null && return 0; done; return 1; }
-      if _patched; then echo "  [ok] $bid : already injected (binary patched)"; continue; fi
-      echo "  [>>] $bid : injecting (NathanLR output follows)"
-      "$NLR" --appinject "$bid" 2>&1 | sed 's/^/      NLR| /'
-      if _patched; then echo "  [OK] $bid : INJECTED (binary patched)"; else echo "  [!!] $bid : FAILED - dylib copied but main binary NOT patched. Headless inject cannot complete the signed-patch step (needs the jailbreak exploit context). Enable this app ONCE in the NathanLR UI - it then persists across resprings and CBR updates."; fi
-    done
-  fi
-  echo "==== done ===="
-} >> "$LOG" 2>&1
-
-echo "[CBR] Installed. Auto-inject ran for hosted apps; see /var/mobile/CBR_autoinject.log"
-echo "[CBR] Relaunch any newly injected apps once so they load the tweak."
+echo "[CBR] Installed. Enable your bridged apps once in NathanLR (Inject into Apps) - injection persists across resprings and CBR updates."
 exit 0
