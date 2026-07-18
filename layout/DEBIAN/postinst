@@ -1,6 +1,30 @@
 #!/bin/sh
-# CarBridgeReborn postinst - minimal + non-blocking (v3.74.0).
-# NOTE: never call NathanLR injection from here - it blocks headless and wedges dpkg.
+# CarBridgeReborn postinst - minimal + NON-BLOCKING (v3.77.0).
+#
+# CRITICAL: never run injection SYNCHRONOUSLY from here. dpkg waits on this script, and that wait
+# is what wedged the package manager in v3.70-3.74 ("dpkg interrupted", survived reboot). The
+# auto-injector below is spawned FULLY DETACHED - setsid + background + stdin/stdout/stderr all
+# redirected - so dpkg does not wait on it and this script always returns immediately.
 /var/jb/usr/bin/cbr-refresh-prefs 2>/dev/null || /usr/bin/cbr-refresh-prefs 2>/dev/null || true
-echo "[CBR] Installed. Enable your bridged apps once in NathanLR (Inject into Apps) - injection persists across resprings and CBR updates."
+
+INJ=/var/jb/usr/libexec/cbr-autoinject
+[ -x "$INJ" ] || INJ=/usr/libexec/cbr-autoinject
+if [ -x "$INJ" ]; then
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$INJ" --delay 20 </dev/null >/dev/null 2>&1 &
+  else
+    "$INJ" --delay 20 </dev/null >/dev/null 2>&1 &
+  fi
+fi
+
+# Opportunistic only: NathanLR is a semi-jailbreak with no launchd hook, so it may never load
+# daemons. Harmless if ignored - the detached spawn above is the path that always runs.
+LCTL=/var/jb/bin/launchctl; [ -x "$LCTL" ] || LCTL=/bin/launchctl
+PL=/var/jb/Library/LaunchDaemons/com.carbridgereborn.autoinject.plist
+if [ -f "$PL" ] && [ -x "$LCTL" ]; then
+  ( "$LCTL" load -w "$PL" </dev/null >/dev/null 2>&1 & ) 2>/dev/null || true
+fi
+
+echo "[CBR] Installed. Enabled apps auto-inject in the background (~20s)."
+echo "[CBR] Progress: /var/mobile/CBR_autoinject.log   Disable: touch /var/mobile/.cbr_noautoinject"
 exit 0

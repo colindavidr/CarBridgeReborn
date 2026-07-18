@@ -308,6 +308,17 @@ static NSArray *cbrEnabledBundleIDs(void) {
         id v = d[k];
         if ([v isKindOfClass:[NSNumber class]] && [v boolValue]) [out addObject:k];
     }
+    // v3.77.0: mirror the enabled bundle ids to a plain-text file so the ROOT auto-injector
+    // (/usr/libexec/cbr-autoinject, POSIX sh - it cannot parse a binary plist) injects exactly
+    // the apps enabled in Settings -> CarBridge Reborn. Written only when the prefs plist
+    // actually read, so a sandboxed process can never clobber it with an empty list.
+    if (d) {
+        @try {
+            NSMutableString *_ms = [NSMutableString string];
+            for (NSString *_b in out) [_ms appendFormat:@"%@\n", _b];
+            [_ms writeToFile:@"/var/mobile/CBR_enabled_apps.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        } @catch(...) {}
+    }
     return out;
 }
 
@@ -1571,7 +1582,16 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                           if (!_mt) notify_register_check("com.cbr.sidebar.w", &_mt);
                           if (_mt) notify_get_state(_mt, &_mw);
                           if (_mw > 0) { gCBRSidebarW = (CGFloat)_mw; HHF("[v3.50.0] sidebar width MEASURED = %.0fpt\n", gCBRSidebarW); }
-                          else { gCBRSidebarW = (CGFloat)((int)(_lw * 0.10 + 0.5)); HHF("[v3.50.0] sidebar width fallback (no measurement) = %.0fpt\n", gCBRSidebarW); } }
+                          else { gCBRSidebarW = (CGFloat)((int)(_lw * 0.10 + 0.5)); HHF("[v3.50.0] sidebar width fallback (no measurement) = %.0fpt\n", gCBRSidebarW); }
+                          // v3.77.0: live per-install scale so the scene edge can be dialed flush to the
+                          // chrome with NO rebuild. The measured strip lands slightly inside the true chrome
+                          // edge by a head-unit-dependent amount, so a proportional scale corrects every
+                          // vehicle at once. com.cbr.sidebar.scale holds scale*100 (absent/default 100 =
+                          // 1.0x = no change), clamped 0.5x..2.0x:  notifyutil -s com.cbr.sidebar.scale 108
+                          { uint64_t _sc = 0; static int _st = 0;
+                            if (!_st) notify_register_check("com.cbr.sidebar.scale", &_st);
+                            if (_st) notify_get_state(_st, &_sc);
+                            if (_sc >= 50 && _sc <= 200) { gCBRSidebarW = (CGFloat)((int)(gCBRSidebarW * (CGFloat)_sc / 100.0 + 0.5)); HHF("[v3.77.0] sidebar scaled x%.2f -> %.0fpt\n", (double)_sc/100.0, gCBRSidebarW); } } }
                         HHF("[GAMBLE] window car landscape %.0fx%.0f sidebar=%.0f\n",_lw,_lh,gCBRSidebarW); }
                     break; } }
         } @catch(...) { HH("[GAMBLE] window resize threw\n"); }

@@ -1,0 +1,86 @@
+#!/bin/sh
+# cbr-autoinject - CarBridgeReborn's root auto-injector (v3.77.0).
+#
+# Injects every CBR-enabled app using NathanLR's own --appinject, so bridged apps load the tweak
+# without ever opening the NathanLR UI. An un-injected app never runs CBR's code and boots
+# sideways on the dash - this is the fix for that at the source.
+#
+# SAFETY - READ BEFORE CHANGING: this must NEVER be run synchronously from the dpkg postinst.
+# That is exactly what wedged the package manager in v3.70-3.74 (dpkg waits on postinst; the
+# inject held it while doing bundle I/O + killall). The postinst spawns this FULLY DETACHED
+# (setsid + background + every fd to /dev/null) so dpkg never waits on it.
+#
+# Which apps: /var/mobile/CBR_enabled_apps.txt, written by the tweak from CBR's own prefs plist
+# (Settings -> CarBridge Reborn). Falls back to the built-in bridged list if that file is absent.
+#
+# Disable entirely:   touch /var/mobile/.cbr_noautoinject
+# Run by hand:        /var/jb/usr/libexec/cbr-autoinject
+# Log:                /var/mobile/CBR_autoinject.log
+
+LOG=/var/mobile/CBR_autoinject.log
+LOCK=/tmp/cbr-autoinject.lock
+LIST=/var/mobile/CBR_enabled_apps.txt
+FALLBACK="com.google.ios.youtube com.google.ios.youtubeunplugged com.amazon.Amazon com.netflix.Netflix com.facebook.Facebook com.facebook.Messenger com.reddit.Reddit com.getdropbox.Dropbox com.microsoft.Office.Outlook"
+
+DELAY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --delay) DELAY="${2:-0}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+[ -f /var/mobile/.cbr_noautoinject ] && exit 0
+
+log() { echo "$*" >> "$LOG" 2>/dev/null; }
+
+# keep the log bounded
+if [ -f "$LOG" ]; then
+  _sz=$(wc -c < "$LOG" 2>/dev/null || echo 0)
+  if [ "$_sz" -gt 65536 ] 2>/dev/null; then : > "$LOG"; fi
+fi
+
+# single instance - mkdir is atomic; clear a stale lock (>10 min) first
+if [ -d "$LOCK" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin -10 2>/dev/null)" ]; then rmdir "$LOCK" 2>/dev/null; fi
+mkdir "$LOCK" 2>/dev/null || exit 0
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
+
+if [ "$DELAY" -gt 0 ] 2>/dev/null; then sleep "$DELAY"; fi
+
+log "==== cbr auto-inject $(date 2>/dev/null) ===="
+
+# wait for the JB environment (semi-JB: the bootstrap appears only once the JB is applied)
+NLR=""; _i=0
+while [ $_i -lt 24 ]; do
+  NLR=$(ls -d /var/containers/Bundle/Application/*/NathanLR.app/NathanLR 2>/dev/null | head -1)
+  if [ -n "$NLR" ] && [ -f /var/jb/basebins/appstorehelper.dylib ]; then break; fi
+  NLR=""; _i=$((_i+1)); sleep 5
+done
+if [ -z "$NLR" ]; then log "  NathanLR/bootstrap not ready - nothing done"; exit 0; fi
+log "  NathanLR: $NLR"
+
+APPS=""
+if [ -s "$LIST" ]; then APPS=$(tr -d '\r' < "$LIST" 2>/dev/null); fi
+if [ -n "$APPS" ]; then log "  app list: CBR prefs (Settings -> CarBridge Reborn)"; else APPS="$FALLBACK"; log "  app list: built-in fallback"; fi
+
+DID=0; SKIP=0; FAIL=0; MISS=0
+for bid in $APPS; do
+  [ -n "$bid" ] || continue
+  app=""
+  for info in /var/containers/Bundle/Application/*/*.app/Info.plist; do
+    [ -f "$info" ] || continue
+    if grep -qa "$bid" "$info" 2>/dev/null; then app=$(dirname "$info"); break; fi
+  done
+  if [ -z "$app" ]; then log "  [--] $bid : not installed"; MISS=$((MISS+1)); continue; fi
+  dy="$app/appstorehelper.dylib"
+  # NathanLR's own marker: dylib present AND non-executable == injected
+  if [ -f "$dy" ] && [ ! -x "$dy" ]; then log "  [ok] $bid : already injected"; SKIP=$((SKIP+1)); continue; fi
+  log "  [>>] $bid : injecting"
+  if command -v timeout >/dev/null 2>&1; then timeout 120 "$NLR" --appinject "$bid" >/dev/null 2>&1
+  else "$NLR" --appinject "$bid" >/dev/null 2>&1; fi
+  if [ -f "$dy" ] && [ ! -x "$dy" ]; then log "  [OK] $bid : INJECTED"; DID=$((DID+1))
+  else log "  [!!] $bid : FAILED"; FAIL=$((FAIL+1)); fi
+done
+
+log "==== done: injected=$DID already=$SKIP failed=$FAIL not-installed=$MISS ===="
+exit 0
