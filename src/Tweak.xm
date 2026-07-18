@@ -5005,12 +5005,10 @@ static int cbrShouldHidePill(id v) {
     }
 }
 - (void)setHidden:(BOOL)h {
-    if (cbrShouldHidePill(self)) { %orig(YES); return; }
-    %orig;
+    %orig(cbrShouldHidePill(self) ? YES : h);
 }
 - (void)setAlpha:(CGFloat)a {
-    if (cbrShouldHidePill(self)) { %orig((CGFloat)0.0); return; }
-    %orig;
+    %orig(cbrShouldHidePill(self) ? (CGFloat)0.0 : a);
 }
 - (void)layoutSubviews {
     %orig;
