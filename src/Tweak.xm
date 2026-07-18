@@ -3861,43 +3861,6 @@ static void cbrKLLog(const char *fmt, ...) {
     return %orig;
 }
 %end
-// v3.71.0 PILL KILL (SpringBoard): our grafted scene lives in a SpringBoard window on the car's
-// EXTERNAL display, so the pill most likely composites HERE. Hide any MTLumaDodgePillView whose
-// window is on a non-main (car) screen - the phone's own pill (mainScreen) is never touched, and
-// no arm-gating is needed since we never want a home grabber on the car display.
-%hook MTLumaDodgePillView
-- (void)didMoveToWindow {
-    %orig;
-    @try {
-        id _w = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("window"));
-        id _sc = _w ? ((id(*)(id,SEL))objc_msgSend)(_w, sel_registerName("screen")) : nil;
-        id _mn = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
-        if (_sc && _sc != _mn) {
-            ((void(*)(id,SEL,BOOL))objc_msgSend)(self, sel_registerName("setHidden:"), YES);
-            ((void(*)(id,SEL,CGFloat))objc_msgSend)(self, sel_registerName("setAlpha:"), (CGFloat)0.0);
-            { static int _pk=0; if(_pk++<4){ int _pf=open("/var/mobile/CBR_pill.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_pf>=0){const char*_pm="PILL-KILL-SB external-display pill hidden\n"; write(_pf,_pm,strlen(_pm)); close(_pf);} } }
-        }
-    } @catch(...) {}
-}
-- (void)setHidden:(BOOL)h {
-    @try {
-        id _w = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("window"));
-        id _sc = _w ? ((id(*)(id,SEL))objc_msgSend)(_w, sel_registerName("screen")) : nil;
-        id _mn = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
-        if (_sc && _sc != _mn) { %orig(YES); return; }
-    } @catch(...) {}
-    %orig;
-}
-- (void)setAlpha:(CGFloat)a {
-    @try {
-        id _w = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("window"));
-        id _sc = _w ? ((id(*)(id,SEL))objc_msgSend)(_w, sel_registerName("screen")) : nil;
-        id _mn = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
-        if (_sc && _sc != _mn) { %orig((CGFloat)0.0); return; }
-    } @catch(...) {}
-    %orig;
-}
-%end
 %hook FBScene
 - (void)updateSettings:(id)arg1 withTransitionContext:(id)arg2 completion:(void *)arg3 {
     if (gCBRBounceBypass) {
@@ -5017,25 +4980,41 @@ static inline int cbrIsHostedLandscapeWindow(id win) {
     return %orig;
 }
 %end
-// v3.71.0 PILL KILL (app-side): the fade hooks above only auto-HIDE the pill a beat after render,
-// so it flashes first (Colin: "loads and disappears"). If THIS app process draws MTLumaDodgePillView
-// inside the grafted scene, force it hidden the instant it enters a window while armed - never a frame.
+// v3.72.0 PILL KILL (app-side, single group - the v3.71 SpringBoard duplicate broke the build):
+// the pill stayed through the whole render then faded because this only fired once ARMED (arming
+// lands ~1s later via the probe tick). Trigger on ARMED *or* the pill's window being on a non-main
+// (car) screen - that is known at didMoveToWindow, before arming, so the pill never gets a frame.
+// Phone pill (mainScreen, disarmed) is untouched.
+static int cbrShouldHidePill(id v) {
+    if (gCBROrientOverride > 0) return 1;
+    @try {
+        id w = ((id(*)(id,SEL))objc_msgSend)(v, sel_registerName("window"));
+        id sc = w ? ((id(*)(id,SEL))objc_msgSend)(w, sel_registerName("screen")) : nil;
+        id mn = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
+        if (sc && sc != mn) return 1;
+    } @catch(...) {}
+    return 0;
+}
 %hook MTLumaDodgePillView
 - (void)didMoveToWindow {
     %orig;
-    if (gCBROrientOverride > 0) {
+    if (cbrShouldHidePill(self)) {
         @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(self, sel_registerName("setHidden:"), YES);
                ((void(*)(id,SEL,CGFloat))objc_msgSend)(self, sel_registerName("setAlpha:"), (CGFloat)0.0); } @catch(...) {}
-        { static int _pk=0; if(_pk++<4) cbrEvent("PILL-KILL-APP MTLumaDodgePillView suppressed (armed)"); }
+        { static int _pk=0; if(_pk++<4) cbrEvent("PILL-KILL-APP MTLumaDodgePillView hidden (armed/car-screen)"); }
     }
 }
 - (void)setHidden:(BOOL)h {
-    if (gCBROrientOverride > 0) { %orig(YES); return; }
+    if (cbrShouldHidePill(self)) { %orig(YES); return; }
     %orig;
 }
 - (void)setAlpha:(CGFloat)a {
-    if (gCBROrientOverride > 0) { %orig((CGFloat)0.0); return; }
+    if (cbrShouldHidePill(self)) { %orig((CGFloat)0.0); return; }
     %orig;
+}
+- (void)layoutSubviews {
+    %orig;
+    if (cbrShouldHidePill(self)) { @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(self, sel_registerName("setHidden:"), YES); } @catch(...) {} }
 }
 %end
 // v3.49.0 GEO-REWRITE (see patch header).

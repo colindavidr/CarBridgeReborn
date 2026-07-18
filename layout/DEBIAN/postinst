@@ -27,10 +27,14 @@ APPS="com.google.ios.youtube com.google.ios.youtubeunplugged com.amazon.Amazon c
         if grep -qaF "$bid" "$info" 2>/dev/null; then dir=$(dirname "$info"); break; fi
       done
       if [ -z "$dir" ]; then echo "  [--] $bid : not installed"; continue; fi
-      if [ -f "$dir/appstorehelper.dylib" ]; then echo "  [ok] $bid : already injected"; continue; fi
-      echo "  [>>] $bid : injecting"
-      "$NLR" --appinject "$bid" >/dev/null 2>&1
-      if [ -f "$dir/appstorehelper.dylib" ]; then echo "  [ok] $bid : injected"; else echo "  [!!] $bid : inject did not take - toggle it once in the NathanLR UI"; fi
+      # REAL-injection check: the app's main binary must reference appstorehelper (the load
+      # command), not merely have the dylib file - a headless inject copies the file but often
+      # cannot complete the signed patch, which is why "file present" was a false positive.
+      _patched() { for _f in "$dir"/*; do case "$_f" in */appstorehelper.dylib) continue;; esac; [ -f "$_f" ] || continue; grep -qaF appstorehelper "$_f" 2>/dev/null && return 0; done; return 1; }
+      if _patched; then echo "  [ok] $bid : already injected (binary patched)"; continue; fi
+      echo "  [>>] $bid : injecting (NathanLR output follows)"
+      "$NLR" --appinject "$bid" 2>&1 | sed 's/^/      NLR| /'
+      if _patched; then echo "  [OK] $bid : INJECTED (binary patched)"; else echo "  [!!] $bid : FAILED - dylib copied but main binary NOT patched. Headless inject cannot complete the signed-patch step (needs the jailbreak exploit context). Enable this app ONCE in the NathanLR UI - it then persists across resprings and CBR updates."; fi
     done
   fi
   echo "==== done ===="
