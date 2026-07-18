@@ -3861,6 +3861,41 @@ static void cbrKLLog(const char *fmt, ...) {
     return %orig;
 }
 %end
+// v3.75.0 PILL KILL (SpringBoard): the pill is composited HERE on the car's EXTERNAL display, so the
+// app-side hook alone never reached it (that is why it stayed visible). Hide any MTLumaDodgePillView
+// whose window is on a non-main (car) screen; the phone's own pill (mainScreen) is untouched. Every
+// %orig is on its own line - a single-line %orig(...) is what broke the v3.71/v3.72 builds.
+static int cbrPillCarScreen(id v) {
+    @try {
+        id w = ((id(*)(id,SEL))objc_msgSend)(v, sel_registerName("window"));
+        id sc = w ? ((id(*)(id,SEL))objc_msgSend)(w, sel_registerName("screen")) : nil;
+        id mn = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"), sel_registerName("mainScreen"));
+        if (sc && sc != mn) return 1;
+    } @catch(...) {}
+    return 0;
+}
+%hook MTLumaDodgePillView
+- (void)didMoveToWindow {
+    %orig;
+    if (cbrPillCarScreen(self)) {
+        @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(self, sel_registerName("setHidden:"), YES);
+               ((void(*)(id,SEL,CGFloat))objc_msgSend)(self, sel_registerName("setAlpha:"), (CGFloat)0.0); } @catch(...) {}
+        { static int _pk=0; if(_pk++<4){ int _pf=open("/var/mobile/CBR_pill.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_pf>=0){const char*_pm="PILL-KILL-SB car-display pill hidden\n"; write(_pf,_pm,strlen(_pm)); close(_pf);} } }
+    }
+}
+- (void)setHidden:(BOOL)h {
+    %orig(cbrPillCarScreen(self) ? YES : h);
+}
+- (void)setAlpha:(CGFloat)a {
+    %orig(cbrPillCarScreen(self) ? (CGFloat)0.0 : a);
+}
+- (void)layoutSubviews {
+    %orig;
+    if (cbrPillCarScreen(self)) {
+        @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(self, sel_registerName("setHidden:"), YES); } @catch(...) {}
+    }
+}
+%end
 %hook FBScene
 - (void)updateSettings:(id)arg1 withTransitionContext:(id)arg2 completion:(void *)arg3 {
     if (gCBRBounceBypass) {
