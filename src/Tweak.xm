@@ -1227,90 +1227,71 @@ static void cbrSBFinalizeTeardown(id win) {
     }
     gCBRDismissing = 0;
 }
+// v3.78.0 EXIT ANIMATION FIX. The app used to be restored to mode 0 and SIGKILLed BEFORE the close
+// zoom ran, so the zoom animated a dead frame - that is the "quick animationless exit". iOS and
+// CarPlay animate the LIVE app and tear it down afterwards, so this holds both steps and is called
+// from the animation completion (and from the watchdog / hard-dismiss paths). Idempotent per dismiss:
+// gCBRTornDown is reset at the top of each dismiss, so a dropped completion can never double-kill,
+// and the pid MUST still resolve here - so it always runs before cbrSBFinalizeTeardown clears it.
+static int gCBRTornDown = 0;
+static void cbrSBRestoreAndTerminate(void) {
+    if (gCBRTornDown) return;
+    gCBRTornDown = 1;
+    int fd = open("/var/mobile/CBR_sb_host.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+    #define TD(m) do{ if(fd>=0){const char*_m=(m);write(fd,_m,strlen(_m));} }while(0)
+    // Put the app's scene view back to normal LiveContent mode (0). Without this the app's real scene
+    // is left stuck in the grafted display mode 4 -> reopening shows black until respring.
+    @try {
+        if (gCBRAppVC) {
+            id dvc = getIvar(gCBRAppVC, "_deviceAppViewController");
+            id sv  = dvc ? getIvar(dvc, "_sceneView") : nil;
+            if (!sv && [gCBRAppVC respondsToSelector:sel_registerName("appView")])
+                sv = ((id(*)(id,SEL))objc_msgSend)(gCBRAppVC, sel_registerName("appView"));
+            if (sv) {
+                id animF = nil; Class savc = objc_getClass("SBApplicationSceneView");
+                SEL af = sel_registerName("defaultDisplayModeAnimationFactory");
+                if (savc && [(id)savc respondsToSelector:af]) animF = ((id(*)(id,SEL))objc_msgSend)((id)savc, af);
+                SEL sdm = sel_registerName("setDisplayMode:animationFactory:completion:");
+                if ([sv respondsToSelector:sdm]) {
+                    ((void(*)(id,SEL,int,id,void*))objc_msgSend)(sv, sdm, 0, animF, NULL);
+                    TD("[restore] app scene view -> mode 0 (LiveContent)\n");
+                } else { TD("[restore] no setDisplayMode on scene view\n"); }
+            } else { TD("[restore] no scene view to restore\n"); }
+        } else { TD("[restore] no gCBRAppVC\n"); }
+    } @catch(NSException *e) { TD("[restore] EXC\n"); }
+    // TERMINATE so the next open is a FRESH launch: re-hosting a backgrounded app produced a perfect
+    // host log but a BLACK screen (the render server never re-bound), and a killed app can't keep
+    // playing audio after exit.
+    @try {
+        id sc = gCBRSceneHandle ? ((id(*)(id,SEL))objc_msgSend)(gCBRSceneHandle, sel_registerName("sceneIfExists")) : nil;
+        id cp = (sc && [sc respondsToSelector:sel_registerName("clientProcess")]) ? ((id(*)(id,SEL))objc_msgSend)(sc, sel_registerName("clientProcess")) : nil;
+        if (cp && [cp respondsToSelector:sel_registerName("pid")]) {
+            int pid = ((int(*)(id,SEL))objc_msgSend)(cp, sel_registerName("pid"));
+            if (pid > 0) { kill(pid, 9); TD("[exit] terminated app via SIGKILL to clientProcess pid\n"); }
+            else { TD("[exit] bad pid\n"); }
+        } else { TD("[exit] could not resolve pid to terminate\n"); }
+    } @catch(NSException *e) { TD("[exit] terminate EXC\n"); }
+    if(fd>=0)close(fd);
+    #undef TD
+}
 static void cbrSBHostDismiss(void) {
     { int _f=open("/var/mobile/CBR_home.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_f>=0){ const char*m="HOST-DISMISS entered (our exit path running)\n"; write(_f,m,strlen(m)); close(_f);} }   // v3.53.0: proves whether our teardown actually runs on a home tap
     // v3.68.0: a soft close is a 0.40s async zoom; a duplicate soft dismiss during that window (double
     // home tap, stray notification) must not re-run teardown or stack a second zoom. A HARD dismiss
     // (re-host/foreign/disconnect) always proceeds and finalizes synchronously below.
     { int _he = gCBRHardDismiss; if (gCBRDismissing && !_he) { int _f2=open("/var/mobile/CBR_home.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_f2>=0){ const char*m="HOST-DISMISS ignored (soft close already in flight)\n"; write(_f2,m,strlen(m)); close(_f2);} return; } }
+    gCBRTornDown = 0;   // v3.78.0: one restore+terminate per dismiss
     @try { CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.unlock"), NULL, NULL, YES); } @catch(...) {}
     // v3.42.0: stop advertising "hosting" to launching apps + drop the pending create-match + container.
     @try { if (gCBRHostStateToken) notify_set_state(gCBRHostStateToken, 0); gCBRPendingHostBid = nil; gCBRBounceCount = 0; gCBRBounceBypass = 0; } @catch(...) {}   // v3.51.0: container must SURVIVE until the close zoom reads it
-    // v3.63.0: snapshot the LIVE app content NOW (before the restore-to-mode-0 + SIGKILL below blank
-    // it) and overlay it on the container. The close zoom then animates this real frame - not a dead
-    // black one - into the tapped icon (the container's anchor). @try-guarded: if the grafted surface
-    // can't be snapshotted, the plain container zoom still runs.
-    @try {
-        if (gCBRContainerView) {
-            id _snapClose = ((id(*)(id,SEL,BOOL))objc_msgSend)(gCBRContainerView, sel_registerName("snapshotViewAfterScreenUpdates:"), NO);
-            if (_snapClose) {
-                CGRect _cbnd = ((CGRect(*)(id,SEL))objc_msgSend)(gCBRContainerView, sel_registerName("bounds"));
-                ((void(*)(id,SEL,CGRect))objc_msgSend)(_snapClose, sel_registerName("setFrame:"), _cbnd);
-                ((void(*)(id,SEL,id))objc_msgSend)(gCBRContainerView, sel_registerName("addSubview:"), _snapClose);
-            }
-        }
-    } @catch(...) {}
+    // v3.78.0: the v3.63 snapshot overlay is GONE. snapshotViewAfterScreenUpdates: cannot capture a
+    // REMOTE hosted scene (the pixels live in the app's process, not SpringBoard's layer tree), so it
+    // returned a BLANK view that got added on top of the container - covering the live app for the
+    // whole close zoom. Nothing to snapshot around now: the app stays alive and rendering THROUGH the
+    // zoom, and is torn down in the completion instead (cbrSBRestoreAndTerminate).
     @try {
         int fd=open("/var/mobile/CBR_sb_host.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
         #define DD(m) do{ if(fd>=0){const char*_m=(m);write(fd,_m,strlen(_m));} }while(0)
-        // v3.20.24: teardown-restore. Before we drop our window, put the app's scene view
-        // back to normal LiveContent mode (0). Without this, the app's real scene is left
-        // stuck in the grafted display mode 4 -> reopening shows a black screen until respring.
-        // (Mirrors carplay-cast cleanupAfterCarplay, which CBR's dismiss previously omitted.)
-        @try {
-            if (gCBRAppVC) {
-                id dvc = getIvar(gCBRAppVC, "_deviceAppViewController");
-                id sv  = dvc ? getIvar(dvc, "_sceneView") : nil;
-                if (!sv && [gCBRAppVC respondsToSelector:sel_registerName("appView")])
-                    sv = ((id(*)(id,SEL))objc_msgSend)(gCBRAppVC, sel_registerName("appView"));
-                if (sv) {
-                    id animF = nil; Class savc = objc_getClass("SBApplicationSceneView");
-                    SEL af = sel_registerName("defaultDisplayModeAnimationFactory");
-                    if (savc && [(id)savc respondsToSelector:af]) animF = ((id(*)(id,SEL))objc_msgSend)((id)savc, af);
-                    SEL sdm = sel_registerName("setDisplayMode:animationFactory:completion:");
-                    if ([sv respondsToSelector:sdm]) {
-                        ((void(*)(id,SEL,int,id,void*))objc_msgSend)(sv, sdm, 0, animF, NULL);  // 0 = normal LiveContent
-                        DD("[restore] app scene view -> mode 0 (LiveContent)\n");
-                    } else { DD("[restore] no setDisplayMode on scene view\n"); }
-                } else { DD("[restore] no scene view to restore\n"); }
-            } else { DD("[restore] no gCBRAppVC\n"); }
-        } @catch(NSException *e) { DD("[restore] EXC\n"); }
-
-        // v3.20.33: TERMINATE the app on exit instead of backgrounding it. Reopen then does a
-        // FRESH LAUNCH, which renders reliably (proven on first-open) - re-hosting a backgrounded
-        // app produced a perfect host log but BLACK screen (render server never re-bound). A killed
-        // app also can't keep playing audio. So: exit = kill, reopen = fresh launch = renders + silent.
-        @try {
-            NSString *_bidStr = gCBRLastBidStr;  // stored at host time
-            if (_bidStr) {
-                Class acCls = objc_getClass("SBApplicationController");
-                id ac = acCls ? ((id(*)(id,SEL))objc_msgSend)(acCls, sel_registerName("sharedInstance")) : nil;
-                id app = ac ? ((id(*)(id,SEL,id))objc_msgSend)(ac, sel_registerName("applicationWithBundleIdentifier:"), _bidStr) : nil;
-                if (app) {
-                    // Prefer SBMainWorkspace/RunningBoard-style termination via the app process.
-                    id proc = [app respondsToSelector:sel_registerName("process")] ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("process")) : nil;
-                    BOOL killed = NO;
-                    if (proc) {
-                        for (const char *sel : (const char*[]){"terminateForReason:andReport:withDescription:", NULL}) { (void)sel; }
-                        SEL tk = sel_registerName("terminateForReasonAndReportWithDescription:");
-                        // Simpler: use the scene handle's application to request termination.
-                    }
-                    // Most reliable on 17: ask SBMainWorkspace to deactivate+terminate.
-                    Class wsCls = objc_getClass("SBMainWorkspace");
-                    id ws = wsCls ? ((id(*)(id,SEL))objc_msgSend)(wsCls, sel_registerName("sharedInstance")) : nil;
-                    if (!ws && wsCls) ws = ((id(*)(id,SEL))objc_msgSend)(wsCls, sel_registerName("mainWorkspace"));
-                    // Fallback path: kill the process by pid via the scene's clientProcess.
-                    id sc = gCBRSceneHandle ? ((id(*)(id,SEL))objc_msgSend)(gCBRSceneHandle, sel_registerName("sceneIfExists")) : nil;
-                    id cp = sc && [sc respondsToSelector:sel_registerName("clientProcess")] ? ((id(*)(id,SEL))objc_msgSend)(sc, sel_registerName("clientProcess")) : nil;
-                    if (cp && [cp respondsToSelector:sel_registerName("pid")]) {
-                        int pid = ((int(*)(id,SEL))objc_msgSend)(cp, sel_registerName("pid"));
-                        if (pid > 0) { kill(pid, 9); killed = YES; DD("[exit] terminated app via SIGKILL to clientProcess pid\n"); }
-                    }
-                    if (!killed) DD("[exit] could not resolve pid to terminate\n");
-                } else { DD("[exit] no SBApplication to terminate\n"); }
-            } else { DD("[exit] no stored bid to terminate\n"); }
-        } @catch(NSException *e) { DD("[exit] terminate EXC\n"); }
-
         // v3.51.0 CLOSE ANIMATION: ZOOM-OUT - the last rendered frame shrinks to the center
         // (0.25) and fades, then the CAPTURED window hides in the completion (a re-host started
         // mid-animation gets a fresh window and is never touched). Instant-hide on throw.
@@ -1326,6 +1307,7 @@ static void cbrSBHostDismiss(void) {
             if (_hard || !(_cont && _win)) {
                 // re-host / foreign-launch / disconnect / no-container fallback -> hide + finalize NOW,
                 // synchronously, so a new host can never overlap a lingering old window.
+                cbrSBRestoreAndTerminate();   // v3.78.0: no zoom on this path, so tear down immediately
                 @try { if (_win) ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); } @catch(...) {}
                 cbrSBFinalizeTeardown(_win);
             } else {
@@ -1335,19 +1317,19 @@ static void cbrSBHostDismiss(void) {
                 gCBRDismissing = 1;
                 void (^_out)(void) = ^{
                     ((void(*)(id,SEL,CGFloat))objc_msgSend)(_cont, sel_registerName("setAlpha:"), (CGFloat)0.0);
-                    ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(_cont, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.25, 0.25));
+                    ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(_cont, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.18, 0.18));   // v3.78.0: shrink further into the icon
                 };
-                void (^_done)(BOOL) = ^(BOOL fin){ @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); } @catch(...) {} cbrSBFinalizeTeardown(_win); };
+                void (^_done)(BOOL) = ^(BOOL fin){ @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); } @catch(...) {} cbrSBRestoreAndTerminate(); cbrSBFinalizeTeardown(_win); };   // v3.78.0: the app stayed ALIVE for the whole zoom - tear it down only now
                 ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
                     objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
-                    0.40, 0.0, (NSUInteger)(1UL<<16) /*EaseIn - v3.63.0 slower, zooms the live snapshot into the icon*/, _out, _done);
+                    0.42, 0.0, (NSUInteger)(0UL) /*v3.78.0 EaseInOut - iOS/CarPlay's close curve; EaseIn front-loaded the fade so it read as a pop*/, _out, _done);
                 // watchdog: if the completion is ever dropped, force teardown at +0.75s so the window
                 // is never orphaned. Identity-guarded: a re-host that repointed gCBRRootWindow is skipped.
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.75*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
-                    @try { if (gCBRRootWindow == _win) { ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); cbrSBFinalizeTeardown(_win); } else { gCBRDismissing = 0; } } @catch(...) {}   // v3.69.0: repointed by a re-host - globals are the new host's, but the stuck flag must still clear
+                    @try { if (gCBRRootWindow == _win) { ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); cbrSBRestoreAndTerminate(); cbrSBFinalizeTeardown(_win); } else { cbrSBRestoreAndTerminate(); gCBRDismissing = 0; } } @catch(...) {}   // v3.69.0: repointed by a re-host - globals are the new host's, but the stuck flag must still clear
                 });
             }
-        } @catch(...) { @try { if (_win) ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); } @catch(...) {} cbrSBFinalizeTeardown(_win); }
+        } @catch(...) { @try { if (_win) ((void(*)(id,SEL,BOOL))objc_msgSend)(_win, sel_registerName("setHidden:"), YES); } @catch(...) {} cbrSBRestoreAndTerminate(); cbrSBFinalizeTeardown(_win); }
         DD("[host] dismissed (backgrounded + keep-alive released)\n");
         { int _lf=open("/var/mobile/CBR_lifecycle.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_lf>=0){ char _lb[80]; int _ln=snprintf(_lb,sizeof(_lb),"[HOST-END] hard=%d\n", _hard); if(_ln>0)write(_lf,_lb,(size_t)_ln); close(_lf);} }   // v3.60.0
         if(fd>=0)close(fd);
@@ -1492,7 +1474,12 @@ static void cbrAnimHeartbeat(void) {
                 if (fd >= 0) { char _b[340]; int _l = snprintf(_b,sizeof(_b),"hb[%d] bid=%s zoomDone=%d contScale=%.2f sv=%s %.0fx%.0f svSub=%lu vcView=%s %.0fx%.0f vcSub=%lu\n", gCBRAnimTicks, _bid, gCBRZoomDone, ct.a, sv?object_getClassName(sv):"nil", svb.size.width, svb.size.height, (unsigned long)nsub, _vcv?object_getClassName(_vcv):"nil", _vcb.size.width, _vcb.size.height, (unsigned long)_vnsub); if(_l>0) write(fd,_b,(size_t)_l); close(fd); }
             }
             int _ready = (nsub > 0 || _vnsub > 0 || svb.size.width > 100.0 || _vcb.size.width > 100.0);
-            if (!gCBRZoomDone && (_ready || gCBRAnimTicks >= 16)) {
+            // v3.78.0: fire on the FIRST tick (~50ms after mount, so the window is on screen) instead
+            // of waiting for content. Gating on content meant the container sat small at the icon for
+            // up to 0.8s after the tap and then popped - fine for fast apps, ugly for slow ones. iOS
+            // never waits for the app either; it zooms immediately and content fills in. _ready is
+            // kept for the heartbeat log so render timing is still visible.
+            if (!gCBRZoomDone && gCBRAnimTicks >= 1) {
                 gCBRZoomDone = 1;
                 void (^_anim)(void) = ^{
                     ((void(*)(id,SEL,CGFloat))objc_msgSend)(cont, sel_registerName("setAlpha:"), (CGFloat)1.0);
@@ -1500,7 +1487,7 @@ static void cbrAnimHeartbeat(void) {
                 };
                 ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
                     objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
-                    0.40, 0.0, (NSUInteger)(2UL<<16), _anim, (void(^)(BOOL))nil);
+                    0.42, 0.0, (NSUInteger)(2UL<<16) /*v3.78.0 EaseOut - decelerates into place like a launch*/, _anim, (void(^)(BOOL))nil);
             }
         }
     } @catch(...) {}
@@ -1680,7 +1667,13 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                         HHF("[v3.51.0] zoom origin %s ax=%.2f ay=%.2f\n", _icv ? "ICON" : "center(fallback)", _ax, _ay);
                     }
                 } @catch(...) {}
-                ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)0.35);
+                // v3.78.0: an opaque, full-strength window so a still-rendering app reads as a
+                // LAUNCHING window growing out of the icon (what iOS shows) rather than a ghosted
+                // empty box. Content appears inside it as the grafted scene renders.
+                @try { Class _uc = objc_getClass("UIColor");
+                       id _blk = _uc ? ((id(*)(Class,SEL))objc_msgSend)(_uc, sel_registerName("blackColor")) : nil;
+                       if (_blk) ((void(*)(id,SEL,id))objc_msgSend)(container, sel_registerName("setBackgroundColor:"), _blk); } @catch(...) {}
+                ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
                 CGAffineTransform _start = CGAffineTransformMakeScale(0.30, 0.30);
                 ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), _start);
                 // v3.64.0: DON'T animate now - the grafted scene renders async so this would zoom an
@@ -3598,6 +3591,7 @@ static void cbrCPPublishSidebarW(CGFloat w) {
 static void cbrCPProbeChromeGeom(void) {
     int cf = open("/var/mobile/CBR_chromegeom.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
     CGFloat _sbEdge = 0; CGFloat _winW = 0, _winH = 0;   // v3.50.0 sidebar measurement
+    CGFloat _iconEdge = 0, _safeEdge = 0;   // v3.78.0: independent per-vehicle candidates
     #define CG(...) do{ char _b[360]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(cf>=0)write(cf,_b,_n);}while(0)
     CG("==== CHROME GEOMETRY PROBE ====\n");
     @try {
@@ -3613,6 +3607,15 @@ static void cbrCPProbeChromeGeom(void) {
                 id w=[wins objectAtIndex:j];
                 CGRect wf=((CGRect(*)(id,SEL))objc_msgSend)(w,sel_registerName("frame"));
                 CG("WINDOW %s frame=%.0f,%.0f %.0fx%.0f\n", class_getName(object_getClass(w)), wf.origin.x,wf.origin.y,wf.size.width,wf.size.height);
+                // v3.78.0: CarPlay's own safe-area left inset is what CarPlay lays supported apps out
+                // against, so when it is exposed it is the most authoritative per-vehicle candidate.
+                @try {
+                    if ([w respondsToSelector:sel_registerName("safeAreaInsets")]) {
+                        UIEdgeInsets _si = ((UIEdgeInsets(*)(id,SEL))objc_msgSend)(w, sel_registerName("safeAreaInsets"));
+                        if (_si.left > _safeEdge) _safeEdge = _si.left;
+                        CG("  safeAreaInsets.left=%.0f\n", _si.left);
+                    }
+                } @catch(...) {}
                 if (wf.size.width > _winW) { _winW = wf.size.width; _winH = wf.size.height; }   // v3.50.0: car window size
                 // recursively walk the view tree, logging class+frame, depth-limited
                 id rvc=[w respondsToSelector:sel_registerName("rootViewController")]?((id(*)(id,SEL))objc_msgSend)(w,sel_registerName("rootViewController")):nil;
@@ -3641,6 +3644,23 @@ static void cbrCPProbeChromeGeom(void) {
                                 CGFloat _edge = vf.origin.x + vf.size.width;
                                 if (_edge > _sbEdge) _sbEdge = _edge;   // widest qualifying strip wins
                             }
+                            // v3.78.0 DYNAMIC CHROME: measure the chrome's REAL content, not just its
+                            // container. frame is parent-relative, so convert to WINDOW coordinates -
+                            // that is what makes nested icons usable. True edge = rightmost icon's right
+                            // edge + its own left padding (CarPlay pads the strip symmetrically).
+                            @try {
+                                if (_winW > 0 && vn && (strcasestr(vn,"icon")||strcasestr(vn,"button")||strcasestr(vn,"dock")||strcasestr(vn,"recent")||strcasestr(vn,"dashboard"))
+                                    && vf.size.width >= 18.0 && vf.size.height >= 18.0) {
+                                    CGRect _vb = ((CGRect(*)(id,SEL))objc_msgSend)(v, sel_registerName("bounds"));
+                                    CGRect _wr = ((CGRect(*)(id,SEL,CGRect,id))objc_msgSend)(v, sel_registerName("convertRect:toView:"), _vb, nil);
+                                    CGFloat _r = _wr.origin.x + _wr.size.width;
+                                    if (_wr.origin.x >= 0.0 && _r > 0.0 && _r < _winW * 0.30) {
+                                        CGFloat _cand = _r + _wr.origin.x;
+                                        if (_cand > _iconEdge) _iconEdge = _cand;
+                                        CG("    icon-cand %s win=%.0f,%.0f %.0fx%.0f -> %.0f\n", vn, _wr.origin.x,_wr.origin.y,_wr.size.width,_wr.size.height, _cand);
+                                    }
+                                }
+                            } @catch(...) {}
                             if (d < 4) {
                                 id subs=((id(*)(id,SEL))objc_msgSend)(v,sel_registerName("subviews"));
                                 NSUInteger sn=subs?[subs count]:0;
@@ -3654,8 +3674,19 @@ static void cbrCPProbeChromeGeom(void) {
     } @catch(NSException *e){ CG("PROBE EXC: %s\n", [[e reason] UTF8String]?:"?"); }
     // v3.50.0: publish the measured sidebar edge; if nothing qualified, publish 10% so SB still
     // gets a concrete value rather than falling to its internal guess.
-    if (_sbEdge <= 0 && _winW > 0) { _sbEdge = (CGFloat)((int)(_winW * 0.10 + 0.5)); CG("no sidebar view matched - publishing 10%% fallback = %.0f\n", _sbEdge); }
-    else CG("measured sidebar edge = %.0f (win %.0fx%.0f)\n", _sbEdge, _winW, _winH);
+    // v3.78.0: largest credible candidate wins, then clamp to a sane band. Whichever signal a given
+    // head unit exposes, the scene lands ON the true chrome edge instead of inside it - correct per
+    // vehicle with no manual dialing. All candidates logged so a bad unit is one dump from explained.
+    { CGFloat _best = _sbEdge;
+      if (_iconEdge > _best) _best = _iconEdge;
+      if (_safeEdge > _best) _best = _safeEdge;
+      CG("candidates: strip=%.0f icons=%.0f safeArea=%.0f -> best=%.0f (win %.0fx%.0f)\n", _sbEdge, _iconEdge, _safeEdge, _best, _winW, _winH);
+      if (_winW > 0) {
+          CGFloat _lo = _winW * 0.04, _hi = _winW * 0.22;
+          if (_best < _lo) { _best = (CGFloat)((int)(_winW * 0.10 + 0.5)); CG("nothing credible - 10%% fallback = %.0f\n", _best); }
+          else if (_best > _hi) { CG("above ceiling %.0f - clamped\n", _hi); _best = _hi; }
+      }
+      _sbEdge = _best; }
     cbrCPPublishSidebarW(_sbEdge);
     CG("==== END ====\n");
     if(cf>=0)close(cf);
