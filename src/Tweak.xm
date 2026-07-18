@@ -1537,6 +1537,23 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
         HHF("rootWindow: %s\n", rootWindow ? class_getName(object_getClass(rootWindow)) : "nil");
         if (!rootWindow) { HH("no rootWindow -> abort\n"); HH("==== END ====\n"); if(fd>=0)close(fd); return; }
         gCBRRootWindow = rootWindow;
+        // v3.76.0 ARMING WATCHDOG: reset truth so we measure THIS host, then recover the chrome
+        // if the app never arms - instead of looping sideways and poisoning downstream.
+        @try { if (!gCBRTruthTokenSB) notify_register_check("com.cbr.app.truth", &gCBRTruthTokenSB);
+               if (gCBRTruthTokenSB) notify_set_state(gCBRTruthTokenSB, 0); } @catch(...) {}
+        { id _wdwin = rootWindow;
+          dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(12.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            @try {
+                if (gCBRRootWindow == _wdwin) {
+                    uint64_t _wt = 0;
+                    if (gCBRTruthTokenSB) notify_get_state(gCBRTruthTokenSB, &_wt);
+                    if (_wt == 0) {
+                        { int _lf=open("/var/mobile/CBR_lifecycle.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_lf>=0){ const char*_m="[WATCHDOG] host never armed (truth=0 at +12s) - force clean teardown\n"; write(_lf,_m,strlen(_m)); close(_lf);} }
+                        gCBRHardDismiss = 1; cbrSBHostDismiss();
+                    }
+                }
+            } @catch(...) {}
+          }); }
         // v3.20.77 GAMBLE: host at the car screen's TRUE landscape size instead of portrait 281x472.
         @try {
             id _scr=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("screens"));
