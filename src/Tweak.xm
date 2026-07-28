@@ -1175,6 +1175,25 @@ static id cbrGetCarplayCADisplay(void) {
 static id gCBRRootWindow = nil;
 static int gCBRHardDismiss = 0;   // v3.60.0: 1 = tear down immediately (no zoom) - set for re-host/foreign/disconnect
 static int gCBRDismissing = 0;    // v3.68.0: 1 = a soft (home-button) close zoom is in flight; drop duplicate soft dismisses
+// v3.79.0 LAUNCH COVER: opaque view over the hosted scene until the app reports real content.
+static id gCBRCoverView = nil;
+static const double kCBRCoverFade = 0.55, kCBRCoverHold = 8.5, kCBRCoverHardCap = 10.0;
+static void cbrSBLiftCover(id cover, int hard) {
+    @try {
+        if (!cover || cover != gCBRCoverView) return;
+        gCBRCoverView = nil;
+        { int _cf=open("/var/mobile/CBR_cover.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_cf>=0){ char _cb[80]; int _cn=snprintf(_cb,sizeof(_cb),"COVER lift (%s)\n", hard?"hard cap":"ready/hold"); if(_cn>0)write(_cf,_cb,(size_t)_cn); close(_cf);} }
+        if (hard) { ((void(*)(id,SEL))objc_msgSend)(cover, sel_registerName("removeFromSuperview")); return; }
+        void (^_fade)(void) = ^{ ((void(*)(id,SEL,CGFloat))objc_msgSend)(cover, sel_registerName("setAlpha:"), (CGFloat)0.0); };
+        void (^_gone)(BOOL) = ^(BOOL fin){ @try { ((void(*)(id,SEL))objc_msgSend)(cover, sel_registerName("removeFromSuperview")); } @catch(...) {} };
+        ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
+            objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
+            kCBRCoverFade, 0.0, (NSUInteger)(2UL<<16), _fade, _gone);
+    } @catch(...) {}
+}
+static void cbrSBCoverReadyCallback(CFNotificationCenterRef c, void *obs, CFStringRef name, const void *o, CFDictionaryRef ui) {
+    dispatch_async(dispatch_get_main_queue(), ^{ @try { cbrSBLiftCover(gCBRCoverView, 0); } @catch(...) {} });
+}
 static int gCBRTruthWait = 0;     // v3.69.0: truth-wait retries THIS host session (was a process-lifetime static - once 4 were burned, every later open blind-bounced instantly)
 static id gCBRAppVC = nil;
 static id gCBRActiveTxns = nil;
@@ -1223,6 +1242,7 @@ static void cbrSBFinalizeTeardown(id win) {
     if (gCBRRootWindow == win) {
         @try { if (gCBROverlayWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBROverlayWindow, sel_registerName("setHidden:"), YES); } } @catch(...) {}
         gCBRRootWindow = nil; gCBRAppVC = nil; gCBRActiveTxns = nil; gCBRSceneHandle = nil; gCBRContainerView = nil; gCBRHomeButton = nil; gCBROverlayWindow = nil;
+        gCBRCoverView = nil;   // v3.79.0: cover dies with the container it sits in
         @try { if (gCBRKeepAlive) [gCBRKeepAlive removeAllObjects]; } @catch(...) {}   // v3.20.32: release keep-alive so the app suspends cleanly
     }
     gCBRDismissing = 0;
@@ -1479,16 +1499,8 @@ static void cbrAnimHeartbeat(void) {
             // up to 0.8s after the tap and then popped - fine for fast apps, ugly for slow ones. iOS
             // never waits for the app either; it zooms immediately and content fills in. _ready is
             // kept for the heartbeat log so render timing is still visible.
-            if (!gCBRZoomDone && gCBRAnimTicks >= 1) {
-                gCBRZoomDone = 1;
-                void (^_anim)(void) = ^{
-                    ((void(*)(id,SEL,CGFloat))objc_msgSend)(cont, sel_registerName("setAlpha:"), (CGFloat)1.0);
-                    ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(cont, sel_registerName("setTransform:"), CGAffineTransformIdentity);
-                };
-                ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
-                    objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
-                    0.42, 0.0, (NSUInteger)(2UL<<16) /*v3.78.0 EaseOut - decelerates into place like a launch*/, _anim, (void(^)(BOOL))nil);
-            }
+            // v3.79.0: the open zoom is GONE - the launch cover owns the open now (cbrSBLiftCover).
+            // The heartbeat stays purely as the render-timing log.
         }
     } @catch(...) {}
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(_next*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrAnimHeartbeat(); });
@@ -1674,13 +1686,29 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                        id _blk = _uc ? ((id(*)(Class,SEL))objc_msgSend)(_uc, sel_registerName("blackColor")) : nil;
                        if (_blk) ((void(*)(id,SEL,id))objc_msgSend)(container, sel_registerName("setBackgroundColor:"), _blk); } @catch(...) {}
                 ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
-                CGAffineTransform _start = CGAffineTransformMakeScale(0.30, 0.30);
-                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), _start);
-                // v3.64.0: DON'T animate now - the grafted scene renders async so this would zoom an
-                // EMPTY box. Hold at 0.30 (small, at the icon) and let the heartbeat fire the zoom-in
-                // once the scene view has real content, so the LIVE app grows out of the icon.
-                gCBRZoomDone = 0;
-                gCBRAnimTicks = 0;   // v3.66.0: fresh open; the continuous heartbeat (started at SB init) takes it from here
+                // v3.79.0 LAUNCH COVER (replaces the zoom): no transform - the container mounts at
+                // full size and an opaque cover sits ON TOP, hiding the blank/half-rendered grafted
+                // scene like a launch screen. Lifts on com.cbr.app.ready; hold + hard cap so it can
+                // NEVER stick.
+                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity);
+                gCBRZoomDone = 1;
+                gCBRAnimTicks = 0;
+                @try {
+                    CGRect _covb = ((CGRect(*)(id,SEL))objc_msgSend)(container, sel_registerName("bounds"));
+                    id _cov = ((id(*)(id,SEL,CGRect))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(UIViewCls, sel_registerName("alloc")), sel_registerName("initWithFrame:"), _covb);
+                    if (_cov) {
+                        Class _ucc = objc_getClass("UIColor");
+                        id _cblk = _ucc ? ((id(*)(Class,SEL))objc_msgSend)(_ucc, sel_registerName("blackColor")) : nil;
+                        if (_cblk) ((void(*)(id,SEL,id))objc_msgSend)(_cov, sel_registerName("setBackgroundColor:"), _cblk);
+                        ((void(*)(id,SEL,CGFloat))objc_msgSend)(_cov, sel_registerName("setAlpha:"), (CGFloat)1.0);
+                        ((void(*)(id,SEL,NSUInteger))objc_msgSend)(_cov, sel_registerName("setAutoresizingMask:"), (NSUInteger)((1UL<<1)|(1UL<<4)));
+                        ((void(*)(id,SEL,id))objc_msgSend)(container, sel_registerName("addSubview:"), _cov);
+                        gCBRCoverView = _cov;
+                        { int _cf2=open("/var/mobile/CBR_cover.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_cf2>=0){ char _cb3[140]; int _cn3=snprintf(_cb3,sizeof(_cb3),"==== COVER up bid=%s ====\n", bid_cstr?bid_cstr:"?"); if(_cn3>0)write(_cf2,_cb3,(size_t)_cn3); close(_cf2);} }
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(kCBRCoverHold*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBLiftCover(_cov, 0); });
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(kCBRCoverHardCap*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBLiftCover(_cov, 1); });
+                    }
+                } @catch(...) {}
                 { int _hf=open("/var/mobile/CBR_anim_heartbeat.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_hf>=0){ char _hb2[160]; int _hn=snprintf(_hb2,sizeof(_hb2),"==== OPEN bid=%s ====\n", bid_cstr?bid_cstr:"?"); if(_hn>0)write(_hf,_hb2,(size_t)_hn); close(_hf);} }   // v3.65.0: per-open header, accumulate so working vs abrupt apps can be compared
             } @catch(...) {}
         } @catch (NSException *e) { HHF("mount EXC: %s\n", [[e reason] UTF8String]?:"?"); }
@@ -4631,6 +4659,15 @@ static void cbrProbeTick(void) {
     // v3.49.0 HOST-STATE ARM: see patch header. Runs BEFORE the main probe body so an
     // exception anywhere in the dump can never starve the arming path.
     if (gCBROrientOverride > 0) gCBRWasArmed = 1;   // v3.54.0: remember we were hosted this process
+    // v3.79.0 COVER DEADLINE: post ready by ~7s even if content never reads as real, so the SB hold
+    // (8.5s) can never pre-empt the signal. Strictly increasing: 7 < 8.5 < 10.
+    if (gCBROrientOverride > 0) {
+        static int _rdyTicks = 0, _rdyForced = 0;
+        if (!_rdyForced && ++_rdyTicks >= 7) {
+            _rdyForced = 1;
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.app.ready"), NULL, NULL, YES);
+        }
+    }
     @try {
         if (gCBROrientOverride <= 0) {
             if (gCBROwnBidHash == 0) {
@@ -4901,6 +4938,11 @@ static void cbrProbeTick(void) {
                 uint64_t _enc = (uint64_t)_truthIfo + ((_truthW > _truthH) ? 10 : 0) + ((uint64_t)_truthVio * 100);
                 static int _tt = 0; if (!_tt) notify_register_check("com.cbr.app.truth", &_tt);
                 if (_tt) notify_set_state(_tt, _enc);
+                // v3.79.0: content is REAL here (armed + a real window) - tell SpringBoard to lift the cover.
+                { static int _rdy = 0;
+                  if (!_rdy) { _rdy = 1;
+                      CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.app.ready"), NULL, NULL, YES);
+                      cbrEvent("READY posted (content real) - cover lifts"); } }
                 static uint64_t _lastEnc = 999; static int _tlog = 0;
                 if (_enc != _lastEnc || _tlog < 3) {
                     cbrEvent("TRUTH sceneIfo=%ld vio=%ld win=%.0fx%.0f enc=%llu (published)", _truthIfo, _truthVio, _truthW, _truthH, (unsigned long long)_enc);
@@ -5271,6 +5313,7 @@ static int cbrShouldHidePill(id v) {
         unlink("/var/mobile/CBR_appside_sb.txt");
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.loaded"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBCoverReadyCallback, CFSTR("com.cbr.app.ready"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);   // v3.79.0 launch cover
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
         if(_sf>=0){const char*m="[CBR-SB] v3.26.5 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
