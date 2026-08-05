@@ -1198,9 +1198,15 @@ static void cbrSBAnimateOpenTransition(id win);   // v3.85.0: defined below (nee
 // On the app's content-ready signal, play ONE clean Placeholder(1)->LiveContent(4) transition WITH the
 // factory - carplay-cast's exact mechanism, timed so nothing interrupts it.
 static void cbrSBCoverReadyCallback(CFNotificationCenterRef c, void *obs, CFStringRef name, const void *o, CFDictionaryRef ui) {
-    // v3.87.0: the display-mode transition is a FADE; Colin wants the zoom-from-icon (done at mount).
-    // Keep the observer but no longer drive the fade. Reference the helper so it isn't flagged unused.
-    (void)c; (void)obs; (void)name; (void)o; (void)ui; (void)cbrSBAnimateOpenTransition;
+    // v3.88.0: restore the display-mode transition - it is what actually drives the app to LiveContent
+    // and renders it (removing it in v3.87 stopped apps opening). The icon zoom (mount) is the motion;
+    // this is the content going live.
+    dispatch_async(dispatch_get_main_queue(), ^{ @try {
+        if (gCBROpenAnimDone) return;
+        gCBROpenAnimDone = 1;
+        id _w = gCBRRootWindow;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.06*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBAnimateOpenTransition(_w); });
+    } @catch(...) {} });
 }
 static int gCBRTruthWait = 0;     // v3.69.0: truth-wait retries THIS host session (was a process-lifetime static - once 4 were burned, every later open blind-bounced instantly)
 static id gCBRAppVC = nil;
@@ -1776,7 +1782,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.20, 0.20));
                 gCBRZoomDone = 1;
                 gCBRAnimTicks = 0;
-                gCBROpenAnimDone = 1;   // v3.87.0: fade retired; the zoom below owns the open
+                gCBROpenAnimDone = 0;   // v3.88.0: re-arm the display-mode transition (it renders the app); zoom is separate
                 { void (^_zoom)(void) = ^{ ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity); };
                   ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
                       objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
@@ -3531,6 +3537,22 @@ static double gCBRHomeDownMs = 0;   // v3.58.0: DBStatusBarHomeButton press-star
     %orig;
 }
 
+%end
+
+// v3.88.0 DBDASHBOARD EVENT PROBE: the real dashboard on iOS 17 is DBDashboard (CBR only hooked
+// DashBoard, which never fired). Log the CLASS + type of every event it handles - that class is the
+// iOS 17 replacement for CAREvent, which we must construct to background the foregrounded app (the fix
+// for apps being unopenable until a stock app is tapped). Log-only, always %orig - cannot change nav.
+%hook DBDashboard
+- (void)handleEvent:(id)event {
+    @try {
+        long _et = (event && [event respondsToSelector:sel_registerName("type")]) ? ((long(*)(id,SEL))objc_msgSend)(event, sel_registerName("type")) : -1;
+        uint64_t _hs = cbrReadHostState();
+        int _f = open("/var/mobile/CBR_dbevent.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+        if (_f >= 0) { char _b[240]; int _n = snprintf(_b,sizeof(_b),"[DBDashboard handleEvent] type=%ld hosting=%d event=%s\n", _et, _hs!=0?1:0, event?object_getClassName(event):"nil"); if(_n>0) write(_f,_b,(size_t)_n); close(_f); }
+    } @catch(...) {}
+    %orig;
+}
 %end
 
 
