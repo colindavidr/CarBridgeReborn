@@ -3331,7 +3331,9 @@ static void cbrCPProbeCarSceneGuts(void) {
 // the rotation is decided in THIS process - never instrumented. Dump what the car scene ACTUALLY
 // has applied (effective angle/mode), not what we asked for. Repeats, so boots can be diffed.
 static void cbrCPRotationSchedule(void);
+static void cbrCPChromeRetry(void);   // v3.82.0: defined later (next to the chrome probe) - declare before use
 static void cbrCPRotationTick(void) {
+    @try { cbrCPChromeRetry(); } @catch(...) {}   // v3.82.0: keep measuring until the real chrome edge is known
     @try {
         int fd = open("/var/mobile/CBR_cp_rotation.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
         if (fd < 0) return;
@@ -3689,10 +3691,22 @@ static void cbrCPPublishSidebarW(CGFloat w) {
         if (lf >= 0) { char _b[80]; int _n = snprintf(_b, sizeof(_b), "measured sidebar right-edge = %.0fpt\n", w); if (_n>0) write(lf,_b,(size_t)_n); close(lf); }
     } @catch(...) {}
 }
+static int gCBRChromeMeasured = 0;   // v3.82.0: 1 once a REAL (non-fallback) chrome edge was measured
+static void cbrCPProbeChromeGeom(void);
+static void cbrCPChromeRetry(void) {
+    // v3.82.0: the one-shot probe at _setupIconModel runs before the chrome/content is laid out, so
+    // every candidate read 0 and we published a percentage. Retry on the 1s tick until the real edge
+    // is found (then never again) - this is what makes it dynamic per vehicle with no dialing.
+    if (gCBRChromeMeasured) return;
+    static int _tries = 0;
+    if (_tries++ > 90) return;
+    cbrCPProbeChromeGeom();
+}
 static void cbrCPProbeChromeGeom(void) {
     int cf = open("/var/mobile/CBR_chromegeom.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
     CGFloat _sbEdge = 0; CGFloat _winW = 0, _winH = 0;   // v3.50.0 sidebar measurement
     CGFloat _iconEdge = 0, _safeEdge = 0;   // v3.78.0: independent per-vehicle candidates
+    CGFloat _contentEdge = 0;   // v3.82.0: where CarPlay itself lays out app content = ground truth
     #define CG(...) do{ char _b[360]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(cf>=0)write(cf,_b,_n);}while(0)
     CG("==== CHROME GEOMETRY PROBE ====\n");
     @try {
@@ -3739,6 +3753,23 @@ static void cbrCPProbeChromeGeom(void) {
                             const char *_mk = "";
                             if (vn && (strcasestr(vn,"button")||strcasestr(vn,"home")||strcasestr(vn,"dashboard")||strcasestr(vn,"dock"))) _mk = "   <== BTN/HOME/DASH?";   // v3.52.0: greppable for the supported-vs-unsupported home/chrome comparison
                             CG("  %s%s frame=%.0f,%.0f %.0fx%.0f%s\n", ind, vn, vf.origin.x,vf.origin.y,vf.size.width,vf.size.height, _mk);
+                            // v3.82.0 CONTENT-EDGE (authoritative): a view that is tall (>=70% of the
+                            // window), starts 4..25% in from the left, and runs to the window's right
+                            // edge IS the app content area CarPlay lays supported apps out in. Its left
+                            // edge is precisely where our scene must start. Frames are parent-relative,
+                            // so convert to window coordinates first.
+                            @try {
+                                if (_winW > 0 && _winH > 0 && vf.size.height >= _winH * 0.70) {
+                                    CGRect _cvb = ((CGRect(*)(id,SEL))objc_msgSend)(v, sel_registerName("bounds"));
+                                    CGRect _cwr = ((CGRect(*)(id,SEL,CGRect,id))objc_msgSend)(v, sel_registerName("convertRect:toView:"), _cvb, nil);
+                                    CGFloat _cx = _cwr.origin.x, _cr = _cwr.origin.x + _cwr.size.width;
+                                    if (_cx >= _winW * 0.04 && _cx <= _winW * 0.25 && _cr >= _winW - 2.0
+                                        && _cwr.size.height >= _winH * 0.70) {
+                                        if (_contentEdge == 0 || _cx < _contentEdge) _contentEdge = _cx;
+                                        CG("    content-cand %s win=%.0f,%.0f %.0fx%.0f -> edge %.0f\n", vn, _cwr.origin.x,_cwr.origin.y,_cwr.size.width,_cwr.size.height, _cx);
+                                    }
+                                }
+                            } @catch(...) {}
                             // v3.50.0 sidebar test: left-anchored (x<=2), narrow (20..140), tall (>=70% of window height).
                             if (_winH > 0 && vf.origin.x <= 2.0 && vf.size.width >= 20.0 && vf.size.width <= 140.0
                                 && vf.size.height >= _winH * 0.70) {
@@ -3778,15 +3809,21 @@ static void cbrCPProbeChromeGeom(void) {
     // v3.78.0: largest credible candidate wins, then clamp to a sane band. Whichever signal a given
     // head unit exposes, the scene lands ON the true chrome edge instead of inside it - correct per
     // vehicle with no manual dialing. All candidates logged so a bad unit is one dump from explained.
-    { CGFloat _best = _sbEdge;
-      if (_iconEdge > _best) _best = _iconEdge;
-      if (_safeEdge > _best) _best = _safeEdge;
-      CG("candidates: strip=%.0f icons=%.0f safeArea=%.0f -> best=%.0f (win %.0fx%.0f)\n", _sbEdge, _iconEdge, _safeEdge, _best, _winW, _winH);
+    { CGFloat _best = 0; const char *_src = "none";
+      // v3.82.0: contentOrigin is ground truth (the boundary CarPlay lays stock apps out against), so
+      // it wins outright when found. The old heuristics remain as backstops.
+      if (_winW > 0 && _contentEdge >= _winW * 0.04 && _contentEdge <= _winW * 0.25) { _best = _contentEdge; _src = "contentOrigin"; }
+      else { _best = _sbEdge; _src = "strip";
+             if (_iconEdge > _best) { _best = _iconEdge; _src = "icons"; }
+             if (_safeEdge > _best) { _best = _safeEdge; _src = "safeArea"; } }
+      CG("candidates: content=%.0f strip=%.0f icons=%.0f safeArea=%.0f -> best=%.0f via %s (win %.0fx%.0f)\n", _contentEdge, _sbEdge, _iconEdge, _safeEdge, _best, _src, _winW, _winH);
       if (_winW > 0) {
-          CGFloat _lo = _winW * 0.04, _hi = _winW * 0.22;
-          if (_best < _lo) { _best = (CGFloat)((int)(_winW * 0.1125 + 0.5)); CG("nothing credible - 11.25%% fallback = %.0f\n", _best); }   // v3.81.0: measured truth, was 10%
+          CGFloat _lo = _winW * 0.04, _hi = _winW * 0.25;
+          if (_best < _lo) { _best = (CGFloat)((int)(_winW * 0.1125 + 0.5)); _src = "fallback%"; CG("nothing credible - %%-fallback = %.0f (will retry)\n", _best); }
           else if (_best > _hi) { CG("above ceiling %.0f - clamped\n", _hi); _best = _hi; }
       }
+      gCBRChromeMeasured = (strcmp(_src, "fallback%") != 0 && strcmp(_src, "none") != 0) ? 1 : 0;
+      CG("MEASURED=%d via %s -> publishing %.0f\n", gCBRChromeMeasured, _src, _best);
       _sbEdge = _best; }
     cbrCPPublishSidebarW(_sbEdge);
     CG("==== END ====\n");
