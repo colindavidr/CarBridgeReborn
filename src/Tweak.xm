@@ -3922,14 +3922,26 @@ static void cbrCPCloseForegroundApp(void) {
         int _rf = open("/var/mobile/CBR_recents.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
         if (n == 0) { if(_rf>=0){ const char*_m="CLOSE-FG: nothing foregrounded (clean)\n"; write(_rf,_m,strlen(_m)); close(_rf);} return; }
         int _did = 0;
-        Class evc = objc_getClass("CAREvent");
-        SEL mk = sel_registerName("eventWithType:context:");
+        // v3.89.0: iOS 17 = DBEvent (captured live), type 1 = close-to-dashboard. Construct it and
+        // hand it to the dashboard to background the current native app before we graft ours.
+        Class evc = objc_getClass("DBEvent");
         SEL he = sel_registerName("handleEvent:");
-        if (evc && [evc respondsToSelector:mk] && [dash respondsToSelector:he]) {
-            id ev = ((id(*)(Class,SEL,long,id))objc_msgSend)(evc, mk, (long)1, @"CBR: close before host");
-            if (ev) { ((void(*)(id,SEL,id))objc_msgSend)(dash, he, ev); _did = 1; }
+        id ev = nil; const char *_ctor = "none";
+        if (evc) {
+            SEL s1 = sel_registerName("eventWithType:context:");
+            SEL s2 = sel_registerName("eventWithType:");
+            if ([evc respondsToSelector:s1]) { ev = ((id(*)(Class,SEL,long,id))objc_msgSend)(evc, s1, (long)1, @"CBR close"); _ctor = "eventWithType:context:"; }
+            else if ([evc respondsToSelector:s2]) { ev = ((id(*)(Class,SEL,long))objc_msgSend)(evc, s2, (long)1); _ctor = "eventWithType:"; }
+            else {
+                id inst = ((id(*)(Class,SEL))objc_msgSend)(evc, sel_registerName("alloc"));
+                SEL i1 = sel_registerName("initWithType:context:");
+                SEL i2 = sel_registerName("initWithType:");
+                if (inst && [inst respondsToSelector:i1]) { ev = ((id(*)(id,SEL,long,id))objc_msgSend)(inst, i1, (long)1, @"CBR close"); _ctor = "initWithType:context:"; }
+                else if (inst && [inst respondsToSelector:i2]) { ev = ((id(*)(id,SEL,long))objc_msgSend)(inst, i2, (long)1); _ctor = "initWithType:"; }
+            }
         }
-        if(_rf>=0){ char _b[300]; int _bn=snprintf(_b,sizeof(_b),"CLOSE-FG: %lu fg app(s) sent=%d | dash=%s CAREvent=%d eventWithType:context:=%d handleEvent:=%d\n",(unsigned long)n,_did, dash?class_getName(object_getClass(dash)):"nil", evc?1:0, (evc&&[evc respondsToSelector:mk])?1:0, [dash respondsToSelector:he]?1:0); if(_bn>0)write(_rf,_b,(size_t)_bn); close(_rf);}
+        if (ev && [dash respondsToSelector:he]) { ((void(*)(id,SEL,id))objc_msgSend)(dash, he, ev); _did = 1; }
+        if(_rf>=0){ char _b[300]; int _bn=snprintf(_b,sizeof(_b),"CLOSE-FG: %lu fg app(s) sent=%d via DBEvent(%d) ctor=%s handleEvent:=%d\n",(unsigned long)n,_did, evc?1:0, _ctor, [dash respondsToSelector:he]?1:0); if(_bn>0)write(_rf,_b,(size_t)_bn); close(_rf);}
     } @catch(...) {}
 }
 static void cbrCPAddToRecents(id bidObj) {
