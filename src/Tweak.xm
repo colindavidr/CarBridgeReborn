@@ -1729,33 +1729,17 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 // reports real content.
                 // v3.81.0: a 0.24 grow-out-of-the-icon is the iOS PHONE launch. CarPlay does not do
                 // that - it cross-fades the app in with only a slight scale.
-                ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)0.0);
-                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.94, 0.94));
-                gCBRZoomDone = 1;   // the heartbeat no longer drives any zoom
+                // v3.84.0: strip the hand-rolled cross-fade AND the opaque cover - both masked the
+                // REAL open animation, which is CarPlay's own scene-view display-mode transition
+                // (setDisplayMode:4 with defaultDisplayModeAnimationFactory, driven in the render path
+                // below the carplay-cast way). Show the container immediately at full alpha; its black
+                // background is a stock-style placeholder during the brief async render, and the native
+                // factory then animates the app content in - so you see CarPlay's transition, not a
+                // black box fading in.
+                ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
+                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity);
+                gCBRZoomDone = 1;
                 gCBRAnimTicks = 0;
-                { void (^_grow)(void) = ^{
-                      ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
-                      ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity);
-                  };
-                  ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
-                      objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
-                      0.30, 0.0, (NSUInteger)(2UL<<16) /*EaseOut - CarPlay cross-fade, not an iOS launch*/, _grow, (void(^)(BOOL))nil); }
-                @try {
-                    CGRect _covb = ((CGRect(*)(id,SEL))objc_msgSend)(container, sel_registerName("bounds"));
-                    id _cov = ((id(*)(id,SEL,CGRect))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(UIViewCls, sel_registerName("alloc")), sel_registerName("initWithFrame:"), _covb);
-                    if (_cov) {
-                        Class _ucc = objc_getClass("UIColor");
-                        id _cblk = _ucc ? ((id(*)(Class,SEL))objc_msgSend)(_ucc, sel_registerName("blackColor")) : nil;
-                        if (_cblk) ((void(*)(id,SEL,id))objc_msgSend)(_cov, sel_registerName("setBackgroundColor:"), _cblk);
-                        ((void(*)(id,SEL,CGFloat))objc_msgSend)(_cov, sel_registerName("setAlpha:"), (CGFloat)1.0);
-                        ((void(*)(id,SEL,NSUInteger))objc_msgSend)(_cov, sel_registerName("setAutoresizingMask:"), (NSUInteger)((1UL<<1)|(1UL<<4)));
-                        ((void(*)(id,SEL,id))objc_msgSend)(container, sel_registerName("addSubview:"), _cov);
-                        gCBRCoverView = _cov;
-                        { int _cf2=open("/var/mobile/CBR_cover.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_cf2>=0){ char _cb3[140]; int _cn3=snprintf(_cb3,sizeof(_cb3),"==== COVER up bid=%s ====\n", bid_cstr?bid_cstr:"?"); if(_cn3>0)write(_cf2,_cb3,(size_t)_cn3); close(_cf2);} }
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(kCBRCoverHold*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBLiftCover(_cov, 0); });
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(kCBRCoverHardCap*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBLiftCover(_cov, 1); });
-                    }
-                } @catch(...) {}
                 { int _hf=open("/var/mobile/CBR_anim_heartbeat.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_hf>=0){ char _hb2[160]; int _hn=snprintf(_hb2,sizeof(_hb2),"==== OPEN bid=%s ====\n", bid_cstr?bid_cstr:"?"); if(_hn>0)write(_hf,_hb2,(size_t)_hn); close(_hf);} }   // v3.65.0: per-open header, accumulate so working vs abrupt apps can be compared
             } @catch(...) {}
         } @catch (NSException *e) { HHF("mount EXC: %s\n", [[e reason] UTF8String]?:"?"); }
