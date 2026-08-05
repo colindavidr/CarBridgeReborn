@@ -1468,6 +1468,26 @@ static void cbrAnimHeartbeat(void) {
         gCBRHbSeq++;
         if (!cont) {
             gCBRAnimTicks = 0;   // idle: reset so the next open starts at tick 0
+            // v3.80.0 PHONE-SAFETY (gated): not hosting => the host flag MUST be 0, or the next PHONE
+            // launch of that app arms off a stale read and black-screens. Requires a sustained ~6s
+            // anomaly (0.2s idle cadence) AND no pending host, so launch->mount never trips it.
+            @try {
+                static int _staleTicks = 0;
+                if (!gCBRRootWindow && !gCBRSceneHandle && !gCBRPendingHostBid) {
+                    if (!gCBRHostStateToken) notify_register_check("com.cbr.orient.landscape", &gCBRHostStateToken);
+                    uint64_t _hs = 0;
+                    if (gCBRHostStateToken) notify_get_state(gCBRHostStateToken, &_hs);
+                    if (_hs != 0) {
+                        if (++_staleTicks >= 30) {
+                            _staleTicks = 0;
+                            notify_set_state(gCBRHostStateToken, 0);
+                            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.orient.unlock"), NULL, NULL, YES);
+                            int _psf=open("/var/mobile/CBR_phonesafe.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
+                            if(_psf>=0){ char _psb[140]; int _psn=snprintf(_psb,sizeof(_psb),"STALE host flag %llu cleared while idle - phone protected (unlock posted)\n",(unsigned long long)_hs); if(_psn>0)write(_psf,_psb,(size_t)_psn); close(_psf); }
+                        }
+                    } else { _staleTicks = 0; }
+                } else { _staleTicks = 0; }
+            } @catch(...) {}
             if (gCBRHbSeq <= 5 || (gCBRHbSeq % 20) == 0) {   // v3.67.0: sparse proof-of-life so idle ticks are visible
                 int _if=open("/var/mobile/CBR_anim_heartbeat.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
                 if(_if>=0){ char _ib[64]; int _in=snprintf(_ib,sizeof(_ib),"t=%d idle (loop alive)\n", gCBRHbSeq); if(_in>0)write(_if,_ib,(size_t)_in); close(_if); }
@@ -1637,13 +1657,26 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
             // v3.52.0 CHROME-OVERLAP: inset the app ~10pt LESS than the chrome width so its opaque
             // left edge extends UNDER the chrome and covers the dashboard sliver that showed in the
             // seam. 47pt landed the edge in the gap on every prior build; overlapping kills it. If
-            // the chrome glyph ever looks clipped, lower _overlap; if a sliver returns, raise it.
+            // v3.80.0 PER-VEHICLE TRIM (replaces the old negative overlap):
             CGFloat _chromeW = gCBRSidebarW > 0 ? gCBRSidebarW : wf.size.width * 0.11;
-            // v3.53.0: 10pt reached into the sidebar and covered the recents icons (couldn't tap
-            // them). 4pt still swallows the thin dashboard sliver without intruding on the icons.
-            CGFloat _overlap = 4.0;
-            CGFloat sbW = _chromeW - _overlap; if (sbW < 0) sbW = 0;
-            HHF("[v3.53.0] chrome overlap: chromeW=%.0f overlap=%.0f -> app inset=%.0f\n", _chromeW, _overlap, sbW);
+            // The old -4.0 pulled the scene 4pt LEFT so it always sat ON the chrome, and one constant
+            // cannot serve two head units. Default to zero overlap plus a per-vehicle trim in points,
+            // keyed by THIS car's window width:   echo 8 > /var/mobile/CBR_trim_<carWidth>.txt
+            // positive = push the scene RIGHT (reveal more chrome), negative = pull LEFT. Persists
+            // across reboots, per vehicle, no rebuild. Filename is written to CBR_chrome_trim.txt.
+            CGFloat _trim = 0.0;
+            @try {
+                char _tp[72]; snprintf(_tp,sizeof(_tp),"/var/mobile/CBR_trim_%d.txt",(int)(wf.size.width+0.5));
+                int _tfd = open(_tp, O_RDONLY);
+                if (_tfd >= 0) {
+                    char _tb[32]; ssize_t _tn = read(_tfd, _tb, sizeof(_tb)-1); close(_tfd);
+                    if (_tn > 0) { _tb[_tn] = 0; double _tv = 0; if (sscanf(_tb, "%lf", &_tv) == 1 && _tv > -200.0 && _tv < 200.0) _trim = (CGFloat)_tv; }
+                }
+            } @catch(...) {}
+            CGFloat sbW = _chromeW + _trim; if (sbW < 0) sbW = 0;
+            HHF("[v3.80.0] chrome inset: chromeW=%.0f trim=%.0f carW=%.0f -> app inset=%.0f\n", _chromeW, _trim, wf.size.width, sbW);
+            { int _twf=open("/var/mobile/CBR_chrome_trim.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
+              if(_twf>=0){ char _twb[260]; int _twn=snprintf(_twb,sizeof(_twb),"carW=%.0f measuredChrome=%.0f trim=%.0f -> inset=%.0f\nDial this vehicle:  echo <points> > /var/mobile/CBR_trim_%d.txt   (+ = reveal more chrome)\n", wf.size.width, _chromeW, _trim, sbW, (int)(wf.size.width+0.5)); if(_twn>0)write(_twf,_twb,(size_t)_twn); close(_twf);} }
             Class UIViewCls = objc_getClass("UIView");
             id container = ((id(*)(id,SEL,CGRect))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(UIViewCls, sel_registerName("alloc")), sel_registerName("initWithFrame:"), CGRectMake(sbW, 0, wf.size.width - sbW, wf.size.height));
             id clear = ((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIColor"), sel_registerName("clearColor"));
@@ -1686,13 +1719,21 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                        id _blk = _uc ? ((id(*)(Class,SEL))objc_msgSend)(_uc, sel_registerName("blackColor")) : nil;
                        if (_blk) ((void(*)(id,SEL,id))objc_msgSend)(container, sel_registerName("setBackgroundColor:"), _blk); } @catch(...) {}
                 ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
-                // v3.79.0 LAUNCH COVER (replaces the zoom): no transform - the container mounts at
-                // full size and an opaque cover sits ON TOP, hiding the blank/half-rendered grafted
-                // scene like a launch screen. Lifts on com.cbr.app.ready; hold + hard cap so it can
-                // NEVER stick.
-                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity);
-                gCBRZoomDone = 1;
+                // v3.80.0 LAUNCH GROW + COVER. v3.79 removed the zoom entirely so the window simply
+                // appeared (abrupt). The cover below keeps the tile OPAQUE - so a blank grafted scene
+                // never shows - and this grows that opaque tile out of the TAPPED ICON (anchorPoint
+                // set above), which is what iOS does when an app launches. Fired synchronously at
+                // mount so not one frame of the motion is missed; the cover fades off when the app
+                // reports real content.
+                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.24, 0.24));
+                gCBRZoomDone = 1;   // the heartbeat no longer drives any zoom
                 gCBRAnimTicks = 0;
+                { void (^_grow)(void) = ^{
+                      ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity);
+                  };
+                  ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
+                      objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
+                      0.50, 0.0, (NSUInteger)(2UL<<16) /*EaseOut - decelerates into place like a launch*/, _grow, (void(^)(BOOL))nil); }
                 @try {
                     CGRect _covb = ((CGRect(*)(id,SEL))objc_msgSend)(container, sel_registerName("bounds"));
                     id _cov = ((id(*)(id,SEL,CGRect))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(UIViewCls, sel_registerName("alloc")), sel_registerName("initWithFrame:"), _covb);
@@ -4939,10 +4980,11 @@ static void cbrProbeTick(void) {
                 static int _tt = 0; if (!_tt) notify_register_check("com.cbr.app.truth", &_tt);
                 if (_tt) notify_set_state(_tt, _enc);
                 // v3.79.0: content is REAL here (armed + a real window) - tell SpringBoard to lift the cover.
-                { static int _rdy = 0;
-                  if (!_rdy) { _rdy = 1;
-                      CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.app.ready"), NULL, NULL, YES);
-                      cbrEvent("READY posted (content real) - cover lifts"); } }
+                // v3.80.0: post on EVERY truth publish, not once per process. The one-shot meant a
+                // kept-alive app re-hosted later never signalled again and its cover sat until the
+                // hold. SpringBoard's lift is identity-guarded, so extra posts are free no-ops.
+                { CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.app.ready"), NULL, NULL, YES);
+                  static int _rdyLog = 0; if (_rdyLog++ < 3) cbrEvent("READY posted (content real) - cover lifts"); }
                 static uint64_t _lastEnc = 999; static int _tlog = 0;
                 if (_enc != _lastEnc || _tlog < 3) {
                     cbrEvent("TRUTH sceneIfo=%ld vio=%ld win=%.0fx%.0f enc=%llu (published)", _truthIfo, _truthVio, _truthW, _truthH, (unsigned long long)_enc);
