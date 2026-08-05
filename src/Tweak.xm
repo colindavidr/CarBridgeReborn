@@ -1191,8 +1191,19 @@ static void cbrSBLiftCover(id cover, int hard) {
             kCBRCoverFade, 0.0, (NSUInteger)(2UL<<16), _fade, _gone);
     } @catch(...) {}
 }
+static int gCBROpenAnimDone = 0;   // v3.85.0: 1 once the open transition has played for this host
+static void cbrSBAnimateOpenTransition(id win);   // v3.85.0: defined below (needs gCBRAppVC); declared here for the callback
+// v3.85.0 NATIVE OPEN TRANSITION: the render path forces LiveContent(4) via back-to-back 0->4
+// REDRIVEs, so the BSUIAnimationFactory never gets an uninterrupted mode change to animate (it snaps).
+// On the app's content-ready signal, play ONE clean Placeholder(1)->LiveContent(4) transition WITH the
+// factory - carplay-cast's exact mechanism, timed so nothing interrupts it.
 static void cbrSBCoverReadyCallback(CFNotificationCenterRef c, void *obs, CFStringRef name, const void *o, CFDictionaryRef ui) {
-    dispatch_async(dispatch_get_main_queue(), ^{ @try { cbrSBLiftCover(gCBRCoverView, 0); } @catch(...) {} });
+    dispatch_async(dispatch_get_main_queue(), ^{ @try {
+        if (gCBROpenAnimDone) return;
+        gCBROpenAnimDone = 1;
+        id _w = gCBRRootWindow;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.06*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBAnimateOpenTransition(_w); });
+    } @catch(...) {} });
 }
 static int gCBRTruthWait = 0;     // v3.69.0: truth-wait retries THIS host session (was a process-lifetime static - once 4 were burned, every later open blind-bounced instantly)
 static id gCBRAppVC = nil;
@@ -1207,6 +1218,29 @@ static int gCBRBounceCount = 0;             // tap-replay attempts this host ses
 static int gCBRBlindBounce = 0;             // v3.51.0: no-truth blind edges this host session (max 2)
 static int gCBRBounceBypass = 0;            // lets our own deactivate edge through the keep-alive hook
 static id gCBRContainerView = nil;          // inset app container (right of the dock strip)
+// v3.85.0: play one clean, uninterrupted Placeholder(1) -> LiveContent(4) display-mode transition on
+// the hosted app's SBApplicationSceneView, driven by CarPlay's own BSUIAnimationFactory - the native
+// open animation. Snap to Placeholder instantly (nil factory), then next runloop animate to Live WITH
+// the factory. Guarded on the same host window throughout so a re-host never animates the wrong scene.
+static void cbrSBAnimateOpenTransition(id win) {
+    @try {
+        if (gCBRRootWindow != win || !gCBRAppVC) return;
+        id appView = [gCBRAppVC respondsToSelector:sel_registerName("appView")] ? ((id(*)(id,SEL))objc_msgSend)(gCBRAppVC, sel_registerName("appView")) : nil;
+        SEL sdm = sel_registerName("setDisplayMode:animationFactory:completion:");
+        if (!appView || ![appView respondsToSelector:sdm]) return;
+        Class savc = objc_getClass("SBApplicationSceneView");
+        SEL afSel = sel_registerName("defaultDisplayModeAnimationFactory");
+        id factory = (savc && [savc respondsToSelector:afSel]) ? ((id(*)(id,SEL))objc_msgSend)(savc, afSel) : nil;
+        ((void(*)(id,SEL,int,id,void*))objc_msgSend)(appView, sdm, 1, nil, NULL);   // snap to Placeholder, instant
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.03*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            @try {
+                if (gCBRRootWindow != win) return;
+                ((void(*)(id,SEL,int,id,void*))objc_msgSend)(appView, sdm, 4, factory, NULL);   // ANIMATE 1 -> 4 with the factory
+                { int _af=open("/var/mobile/CBR_anim.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_af>=0){ const char*_m="OPEN-ANIM Placeholder(1)->LiveContent(4) with BSUIAnimationFactory\n"; write(_af,_m,strlen(_m)); close(_af);} }
+            } @catch(...) {}
+        });
+    } @catch(...) {}
+}
 static CGFloat gCBRSidebarW = 0;            // v3.44.0 native-chrome reveal: left strip we leave uncovered
 static uint64_t gCBROwnBidHash = 0;         // v3.45.0 app-side: hash of THIS app's bundle id
 static CGFloat gCBRHomeZoneH = 0;           // v3.46.0: bottom sidebar strip that dismisses (native home button lives here)
@@ -1740,6 +1774,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity);
                 gCBRZoomDone = 1;
                 gCBRAnimTicks = 0;
+                gCBROpenAnimDone = 0;   // v3.85.0: arm the native open transition for this host
                 { int _hf=open("/var/mobile/CBR_anim_heartbeat.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_hf>=0){ char _hb2[160]; int _hn=snprintf(_hb2,sizeof(_hb2),"==== OPEN bid=%s ====\n", bid_cstr?bid_cstr:"?"); if(_hn>0)write(_hf,_hb2,(size_t)_hn); close(_hf);} }   // v3.65.0: per-open header, accumulate so working vs abrupt apps can be compared
             } @catch(...) {}
         } @catch (NSException *e) { HHF("mount EXC: %s\n", [[e reason] UTF8String]?:"?"); }
