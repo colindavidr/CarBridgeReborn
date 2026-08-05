@@ -3860,6 +3860,34 @@ static void cbrCPProbeChromeGeom(void) {
 
 
 // ── DBApplicationLaunchInfo — tap interception ────────────────────────────────
+// v3.83.0 RECENTS: register a hosted app in CarPlay's app history so it appears in the chrome dock,
+// then refresh the dock. Mirrors carplay-cast; every call guarded + logged (iOS 17 may rename these).
+static void cbrCPAddToRecents(id bidObj) {
+    @try {
+        if (!bidObj) return;
+        id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+        if (!app || ![app respondsToSelector:sel_registerName("_currentAppHistory")]) { int _rf=open("/var/mobile/CBR_recents.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_rf>=0){ const char*_m="no _currentAppHistory - run the recents PROBE for the iOS17 name\n"; write(_rf,_m,strlen(_m)); close(_rf);} return; }
+        id hist = ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("_currentAppHistory"));
+        id prevBid = nil;
+        if (hist && [hist respondsToSelector:sel_registerName("orderedAppHistory")]) {
+            id ordered = ((id(*)(id,SEL))objc_msgSend)(hist, sel_registerName("orderedAppHistory"));
+            if (ordered && ((NSUInteger(*)(id,SEL))objc_msgSend)(ordered, sel_registerName("count")) > 0) {
+                id first = ((id(*)(id,SEL))objc_msgSend)(ordered, sel_registerName("firstObject"));
+                if (first && [first respondsToSelector:sel_registerName("bundleIdentifier")]) prevBid = ((id(*)(id,SEL))objc_msgSend)(first, sel_registerName("bundleIdentifier"));
+            }
+        }
+        SEL vis = sel_registerName("_bundleIdentifierDidBecomeVisible:previousBundleIdentifier:");
+        int _didVis = 0;
+        if (hist && [hist respondsToSelector:vis]) { ((void(*)(id,SEL,id,id))objc_msgSend)(hist, vis, bidObj, prevBid); _didVis = 1; }
+        id dash = [app respondsToSelector:sel_registerName("_currentDashboard")] ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("_currentDashboard")) : nil;
+        id root = dash && [dash respondsToSelector:sel_registerName("rootViewController")] ? ((id(*)(id,SEL))objc_msgSend)(dash, sel_registerName("rootViewController")) : nil;
+        id dock = root && [root respondsToSelector:sel_registerName("appDockViewController")] ? ((id(*)(id,SEL))objc_msgSend)(root, sel_registerName("appDockViewController")) : nil;
+        int _didRefresh = 0;
+        if (dock && [dock respondsToSelector:sel_registerName("_refreshAppDock")]) { ((void(*)(id,SEL))objc_msgSend)(dock, sel_registerName("_refreshAppDock")); _didRefresh = 1; }
+        { int _rf=open("/var/mobile/CBR_recents.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_rf>=0){ const char*_bc=((const char*(*)(id,SEL))objc_msgSend)(bidObj,sel_registerName("UTF8String")); char _rb[220]; int _rn=snprintf(_rb,sizeof(_rb),"RECENTS %s: didBecomeVisible=%d dock=%s refreshed=%d\n", _bc?_bc:"?", _didVis, dock?class_getName(object_getClass(dock)):"nil", _didRefresh); if(_rn>0)write(_rf,_rb,(size_t)_rn); close(_rf);} }
+    } @catch(...) {}
+}
+
 %hook DBApplicationLaunchInfo
 
 + (id)launchInfoForApplication:(id)appInfo withActivationSettings:(id)settings {
@@ -3882,6 +3910,7 @@ static void cbrCPProbeChromeGeom(void) {
                     sel_registerName("UTF8String"));
                 CBCarLogFmt("[CBR-CP] tap(launchInfo) -> %s", bid ?: "?");
                 CBPostLaunch(bid);   // writes pending bid file (cbrCPRenderTest reads it)
+                cbrCPAddToRecents(bidObj);   // v3.83.0: put it in the chrome's recent-apps dock
                 CBLogFmt("[CBR] Tapped bridged app: %s", bid ?: "?");
                 // cbrCPRenderTest(); // v3.20.2 disabled for stability isolation - in-process car-scene window test
                 handled = YES;
