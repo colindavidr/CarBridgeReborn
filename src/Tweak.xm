@@ -1752,7 +1752,10 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 // LAUNCHING window growing out of the icon (what iOS shows) rather than a ghosted
                 // empty box. Content appears inside it as the grafted scene renders.
                 @try { Class _uc = objc_getClass("UIColor");
-                       id _blk = _uc ? ((id(*)(Class,SEL))objc_msgSend)(_uc, sel_registerName("blackColor")) : nil;
+                       // v3.86.0: CLEAR, not black - the black box flashed the whole screen before
+                       // the scene rendered. Transparent shows the dashboard during the brief render
+                       // gap (stock-like), then the app animates in over it.
+                       id _blk = _uc ? ((id(*)(Class,SEL))objc_msgSend)(_uc, sel_registerName("clearColor")) : nil;
                        if (_blk) ((void(*)(id,SEL,id))objc_msgSend)(container, sel_registerName("setBackgroundColor:"), _blk); } @catch(...) {}
                 ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
                 // v3.80.0 LAUNCH GROW + COVER. v3.79 removed the zoom entirely so the window simply
@@ -3881,6 +3884,29 @@ static void cbrCPProbeChromeGeom(void) {
 // ── DBApplicationLaunchInfo — tap interception ────────────────────────────────
 // v3.83.0 RECENTS: register a hosted app in CarPlay's app history so it appears in the chrome dock,
 // then refresh the dock. Mirrors carplay-cast; every call guarded + logged (iOS 17 may rename these).
+// v3.86.0: before we graft, background any native CarPlay app that is currently foregrounded, so our
+// scene takes over cleanly instead of layering on top of a still-foregrounded stock app. carplay-cast
+// method: send the dashboard a home-button CAREvent (type 1). Guarded + logged; inert if nothing is up.
+static void cbrCPCloseForegroundApp(void) {
+    @try {
+        id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+        id dash = (app && [app respondsToSelector:sel_registerName("_currentDashboard")]) ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("_currentDashboard")) : nil;
+        if (!dash) return;
+        id fg = [dash respondsToSelector:sel_registerName("identifierToForegroundAppScenesMap")] ? ((id(*)(id,SEL))objc_msgSend)(dash, sel_registerName("identifierToForegroundAppScenesMap")) : nil;
+        NSUInteger n = fg ? ((NSUInteger(*)(id,SEL))objc_msgSend)(fg, sel_registerName("count")) : 0;
+        int _rf = open("/var/mobile/CBR_recents.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
+        if (n == 0) { if(_rf>=0){ const char*_m="CLOSE-FG: nothing foregrounded (clean)\n"; write(_rf,_m,strlen(_m)); close(_rf);} return; }
+        int _did = 0;
+        Class evc = objc_getClass("CAREvent");
+        SEL mk = sel_registerName("eventWithType:context:");
+        SEL he = sel_registerName("handleEvent:");
+        if (evc && [evc respondsToSelector:mk] && [dash respondsToSelector:he]) {
+            id ev = ((id(*)(Class,SEL,long,id))objc_msgSend)(evc, mk, (long)1, @"CBR: close before host");
+            if (ev) { ((void(*)(id,SEL,id))objc_msgSend)(dash, he, ev); _did = 1; }
+        }
+        if(_rf>=0){ char _b[160]; int _bn=snprintf(_b,sizeof(_b),"CLOSE-FG: %lu foregrounded app(s) - home CAREvent sent=%d\n",(unsigned long)n,_did); if(_bn>0)write(_rf,_b,(size_t)_bn); close(_rf);}
+    } @catch(...) {}
+}
 static void cbrCPAddToRecents(id bidObj) {
     @try {
         if (!bidObj) return;
@@ -3928,6 +3954,7 @@ static void cbrCPAddToRecents(id bidObj) {
                 const char *bid = ((const char*(*)(id,SEL))objc_msgSend)(bidObj,
                     sel_registerName("UTF8String"));
                 CBCarLogFmt("[CBR-CP] tap(launchInfo) -> %s", bid ?: "?");
+                cbrCPCloseForegroundApp();   // v3.86.0: background any foregrounded native app first, so our scene isn't layered on top
                 CBPostLaunch(bid);   // writes pending bid file (cbrCPRenderTest reads it)
                 cbrCPAddToRecents(bidObj);   // v3.83.0: put it in the chrome's recent-apps dock
                 CBLogFmt("[CBR] Tapped bridged app: %s", bid ?: "?");
