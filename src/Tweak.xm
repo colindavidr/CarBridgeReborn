@@ -1173,6 +1173,7 @@ static id cbrGetCarplayCADisplay(void) {
     return nil;
 }
 static id gCBRRootWindow = nil;
+static int cbrGate(const char *name, int def);   // v3.90.0: notify toggle (1=on,2=off,unset=default)
 static int gCBRHardDismiss = 0;   // v3.60.0: 1 = tear down immediately (no zoom) - set for re-host/foreign/disconnect
 static int gCBRDismissing = 0;    // v3.68.0: 1 = a soft (home-button) close zoom is in flight; drop duplicate soft dismisses
 // v3.79.0 LAUNCH COVER: opaque view over the hosted scene until the app reports real content.
@@ -1775,18 +1776,14 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 // background is a stock-style placeholder during the brief async render, and the native
                 // factory then animates the app content in - so you see CarPlay's transition, not a
                 // black box fading in.
-                // v3.87.0 ZOOM FROM THE TAPPED ICON: the container's anchor is already pinned at the
-                // tapped icon (above). Start it small there and grow to full - the stock CarPlay open
-                // motion (the app zooms OUT of its icon). Content renders inside as it grows.
+                // v3.90.0 FADE (not zoom): stock CarPlay chrome apps cross-fade in, and the display-mode
+                // transition (below, on ready) IS that fade. Show the container at full size, no zoom, so
+                // our open matches the chrome instead of using two different transition types.
                 ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
-                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.20, 0.20));
+                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity);
                 gCBRZoomDone = 1;
                 gCBRAnimTicks = 0;
-                gCBROpenAnimDone = 0;   // v3.88.0: re-arm the display-mode transition (it renders the app); zoom is separate
-                { void (^_zoom)(void) = ^{ ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity); };
-                  ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
-                      objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
-                      0.40, 0.0, (NSUInteger)(2UL<<16) /*EaseOut - zoom out of the icon like stock*/, _zoom, (void(^)(BOOL))nil); }
+                gCBROpenAnimDone = 0;   // v3.88.0: the display-mode fade renders + reveals the app
                 { int _hf=open("/var/mobile/CBR_anim_heartbeat.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_hf>=0){ char _hb2[160]; int _hn=snprintf(_hb2,sizeof(_hb2),"==== OPEN bid=%s ====\n", bid_cstr?bid_cstr:"?"); if(_hn>0)write(_hf,_hb2,(size_t)_hn); close(_hf);} }   // v3.65.0: per-open header, accumulate so working vs abrupt apps can be compared
             } @catch(...) {}
         } @catch (NSException *e) { HHF("mount EXC: %s\n", [[e reason] UTF8String]?:"?"); }
@@ -3859,7 +3856,7 @@ static void cbrCPProbeChromeGeom(void) {
     { CGFloat _best = 0; const char *_src = "none";
       // v3.82.0: contentOrigin is ground truth (the boundary CarPlay lays stock apps out against), so
       // it wins outright when found. The old heuristics remain as backstops.
-      if (_winW > 0 && _contentEdge >= _winW * 0.04 && _contentEdge <= _winW * 0.25) { _best = _contentEdge; _src = "contentOrigin"; }
+      if (cbrGate("com.cbr.gate.dynchrome", 1) && _winW > 0 && _contentEdge >= _winW * 0.04 && _contentEdge <= _winW * 0.25) { _best = _contentEdge; _src = "contentOrigin"; }
       else { _best = _sbEdge; _src = "strip";
              if (_iconEdge > _best) { _best = _iconEdge; _src = "icons"; }
              if (_safeEdge > _best) { _best = _safeEdge; _src = "safeArea"; } }
@@ -3912,8 +3909,22 @@ static void cbrCPProbeChromeGeom(void) {
 // v3.86.0: before we graft, background any native CarPlay app that is currently foregrounded, so our
 // scene takes over cleanly instead of layering on top of a still-foregrounded stock app. carplay-cast
 // method: send the dashboard a home-button CAREvent (type 1). Guarded + logged; inert if nothing is up.
+// v3.90.0 GATE: a live on/off switch backed by a darwin notify state, so features can be toggled
+// with `notifyutil -s com.cbr.gate.NAME 1` (on) / 2 (off) with no rebuild. Unset = the default.
+static int cbrGate(const char *name, int def) {
+    @try {
+        int _t = 0;
+        if (notify_register_check(name, &_t) != 0 || !_t) return def;
+        uint64_t _v = 0; notify_get_state(_t, &_v);
+        if (_v == 1) return 1;
+        if (_v == 2) return 0;
+        return def;
+    } @catch(...) {}
+    return def;
+}
 static void cbrCPCloseForegroundApp(void) {
     @try {
+        if (!cbrGate("com.cbr.gate.replace", 1)) { int _gf=open("/var/mobile/CBR_recents.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_gf>=0){ const char*_m="CLOSE-FG: gate.replace OFF - stacking allowed\n"; write(_gf,_m,strlen(_m)); close(_gf);} return; }
         id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
         id dash = (app && [app respondsToSelector:sel_registerName("_currentDashboard")]) ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("_currentDashboard")) : nil;
         if (!dash) return;
@@ -3922,26 +3933,36 @@ static void cbrCPCloseForegroundApp(void) {
         int _rf = open("/var/mobile/CBR_recents.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
         if (n == 0) { if(_rf>=0){ const char*_m="CLOSE-FG: nothing foregrounded (clean)\n"; write(_rf,_m,strlen(_m)); close(_rf);} return; }
         int _did = 0;
-        // v3.89.0: iOS 17 = DBEvent (captured live), type 1 = close-to-dashboard. Construct it and
-        // hand it to the dashboard to background the current native app before we graft ours.
-        Class evc = objc_getClass("DBEvent");
-        SEL he = sel_registerName("handleEvent:");
-        id ev = nil; const char *_ctor = "none";
-        if (evc) {
-            SEL s1 = sel_registerName("eventWithType:context:");
-            SEL s2 = sel_registerName("eventWithType:");
-            if ([evc respondsToSelector:s1]) { ev = ((id(*)(Class,SEL,long,id))objc_msgSend)(evc, s1, (long)1, @"CBR close"); _ctor = "eventWithType:context:"; }
-            else if ([evc respondsToSelector:s2]) { ev = ((id(*)(Class,SEL,long))objc_msgSend)(evc, s2, (long)1); _ctor = "eventWithType:"; }
-            else {
-                id inst = ((id(*)(Class,SEL))objc_msgSend)(evc, sel_registerName("alloc"));
-                SEL i1 = sel_registerName("initWithType:context:");
-                SEL i2 = sel_registerName("initWithType:");
-                if (inst && [inst respondsToSelector:i1]) { ev = ((id(*)(id,SEL,long,id))objc_msgSend)(inst, i1, (long)1, @"CBR close"); _ctor = "initWithType:context:"; }
-                else if (inst && [inst respondsToSelector:i2]) { ev = ((id(*)(id,SEL,long))objc_msgSend)(inst, i2, (long)1); _ctor = "initWithType:"; }
-            }
+        if (cbrGate("com.cbr.gate.panfix", 1)) {
+            // v3.90.0 NO-PAN: deactivate the foregrounded scene(s) DIRECTLY (setDeactivated:) instead of
+            // sending a home event. A home event (DBEvent type 1) navigates to the grid = the pan-to-home
+            // regression. Deactivating backgrounds the app in place, no navigation. Logs each value's class.
+            @try {
+                id vals = [fg respondsToSelector:sel_registerName("allValues")] ? ((id(*)(id,SEL))objc_msgSend)(fg, sel_registerName("allValues")) : nil;
+                NSUInteger vc = vals ? ((NSUInteger(*)(id,SEL))objc_msgSend)(vals, sel_registerName("count")) : 0;
+                void (^_deact)(id) = ^(id sc){ @try { if (sc && [sc respondsToSelector:sel_registerName("updateSettingsWithBlock:")]) {
+                        void (^_bb)(id) = ^(id ms){ @try { if ([ms respondsToSelector:sel_registerName("setDeactivated:")]) ((void(*)(id,SEL,BOOL))objc_msgSend)(ms, sel_registerName("setDeactivated:"), YES); } @catch(...) {} };
+                        ((void(*)(id,SEL,id))objc_msgSend)(sc, sel_registerName("updateSettingsWithBlock:"), _bb); } } @catch(...) {} };
+                for (NSUInteger i=0;i<vc;i++){
+                    id v = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(vals, sel_registerName("objectAtIndex:"), i);
+                    if (_rf>=0){ char _vb[120]; int _vn=snprintf(_vb,sizeof(_vb),"  fg-val[%lu]=%s\n",(unsigned long)i, v?object_getClassName(v):"nil"); if(_vn>0)write(_rf,_vb,(size_t)_vn); }
+                    id list = (v && [v respondsToSelector:sel_registerName("allObjects")]) ? ((id(*)(id,SEL))objc_msgSend)(v, sel_registerName("allObjects")) : nil;
+                    if (list && [list respondsToSelector:sel_registerName("count")]) {
+                        NSUInteger lc = ((NSUInteger(*)(id,SEL))objc_msgSend)(list, sel_registerName("count"));
+                        for (NSUInteger j=0;j<lc;j++){ _deact(((id(*)(id,SEL,NSUInteger))objc_msgSend)(list, sel_registerName("objectAtIndex:"), j)); _did++; }
+                    } else if (v && [v respondsToSelector:sel_registerName("updateSettingsWithBlock:")]) { _deact(v); _did++; }
+                }
+            } @catch(...) {}
+            if(_rf>=0){ char _b[200]; int _bn=snprintf(_b,sizeof(_b),"CLOSE-FG(no-pan): deactivated %d scene(s) of %lu fg\n",_did,(unsigned long)n); if(_bn>0)write(_rf,_b,(size_t)_bn); close(_rf);}
+        } else {
+            Class evc = objc_getClass("DBEvent");
+            SEL he = sel_registerName("handleEvent:");
+            id ev = nil; const char *_ctor = "none";
+            if (evc) { SEL s1 = sel_registerName("eventWithType:context:");
+                       if ([evc respondsToSelector:s1]) { ev = ((id(*)(Class,SEL,long,id))objc_msgSend)(evc, s1, (long)1, @"CBR close"); _ctor = "eventWithType:context:"; } }
+            if (ev && [dash respondsToSelector:he]) { ((void(*)(id,SEL,id))objc_msgSend)(dash, he, ev); _did = 1; }
+            if(_rf>=0){ char _b[200]; int _bn=snprintf(_b,sizeof(_b),"CLOSE-FG(dbevent): %lu fg sent=%d ctor=%s\n",(unsigned long)n,_did,_ctor); if(_bn>0)write(_rf,_b,(size_t)_bn); close(_rf);}
         }
-        if (ev && [dash respondsToSelector:he]) { ((void(*)(id,SEL,id))objc_msgSend)(dash, he, ev); _did = 1; }
-        if(_rf>=0){ char _b[300]; int _bn=snprintf(_b,sizeof(_b),"CLOSE-FG: %lu fg app(s) sent=%d via DBEvent(%d) ctor=%s handleEvent:=%d\n",(unsigned long)n,_did, evc?1:0, _ctor, [dash respondsToSelector:he]?1:0); if(_bn>0)write(_rf,_b,(size_t)_bn); close(_rf);}
     } @catch(...) {}
 }
 static void cbrCPAddToRecents(id bidObj) {
