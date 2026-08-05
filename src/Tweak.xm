@@ -1601,7 +1601,9 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                           if (!_mt) notify_register_check("com.cbr.sidebar.w", &_mt);
                           if (_mt) notify_get_state(_mt, &_mw);
                           if (_mw > 0) { gCBRSidebarW = (CGFloat)_mw; HHF("[v3.50.0] sidebar width MEASURED = %.0fpt\n", gCBRSidebarW); }
-                          else { gCBRSidebarW = (CGFloat)((int)(_lw * 0.10 + 0.5)); HHF("[v3.50.0] sidebar width fallback (no measurement) = %.0fpt\n", gCBRSidebarW); }
+                          // v3.81.0: measured from stock CarPlay on a 400pt unit - real chrome is 45pt
+                          // = 11.25%, so the old 10% left us 5pt ON the chrome whenever measurement failed.
+                          else { gCBRSidebarW = (CGFloat)((int)(_lw * 0.1125 + 0.5)); HHF("[v3.81.0] sidebar width fallback (no measurement) = %.0fpt (11.25%%)\n", gCBRSidebarW); }
                           // v3.77.0: live per-install scale so the scene edge can be dialed flush to the
                           // chrome with NO rebuild. The measured strip lands slightly inside the true chrome
                           // edge by a head-unit-dependent amount, so a proportional scale corrects every
@@ -1658,7 +1660,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
             // left edge extends UNDER the chrome and covers the dashboard sliver that showed in the
             // seam. 47pt landed the edge in the gap on every prior build; overlapping kills it. If
             // v3.80.0 PER-VEHICLE TRIM (replaces the old negative overlap):
-            CGFloat _chromeW = gCBRSidebarW > 0 ? gCBRSidebarW : wf.size.width * 0.11;
+            CGFloat _chromeW = gCBRSidebarW > 0 ? gCBRSidebarW : wf.size.width * 0.1125;   // v3.81.0: measured truth
             // The old -4.0 pulled the scene 4pt LEFT so it always sat ON the chrome, and one constant
             // cannot serve two head units. Default to zero overlap plus a per-vehicle trim in points,
             // keyed by THIS car's window width:   echo 8 > /var/mobile/CBR_trim_<carWidth>.txt
@@ -1725,15 +1727,19 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 // set above), which is what iOS does when an app launches. Fired synchronously at
                 // mount so not one frame of the motion is missed; the cover fades off when the app
                 // reports real content.
-                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.24, 0.24));
+                // v3.81.0: a 0.24 grow-out-of-the-icon is the iOS PHONE launch. CarPlay does not do
+                // that - it cross-fades the app in with only a slight scale.
+                ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)0.0);
+                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.94, 0.94));
                 gCBRZoomDone = 1;   // the heartbeat no longer drives any zoom
                 gCBRAnimTicks = 0;
                 { void (^_grow)(void) = ^{
+                      ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
                       ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity);
                   };
                   ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
                       objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
-                      0.50, 0.0, (NSUInteger)(2UL<<16) /*EaseOut - decelerates into place like a launch*/, _grow, (void(^)(BOOL))nil); }
+                      0.30, 0.0, (NSUInteger)(2UL<<16) /*EaseOut - CarPlay cross-fade, not an iOS launch*/, _grow, (void(^)(BOOL))nil); }
                 @try {
                     CGRect _covb = ((CGRect(*)(id,SEL))objc_msgSend)(container, sel_registerName("bounds"));
                     id _cov = ((id(*)(id,SEL,CGRect))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(UIViewCls, sel_registerName("alloc")), sel_registerName("initWithFrame:"), _covb);
@@ -3636,6 +3642,32 @@ static void cbrCPProbeChrome(void) {
         for (const char *cn : (const char*[]){"CARDashboardViewController","CARDashboardChromeViewController","CARSidebarViewController","CARDockViewController","CARStatusBarViewController","CARHomeButton","DBDashboardHomeViewController","DBDashboardViewController","CARDashboardRootViewController","CARChromeViewController", NULL}) {
             if(!cn)break; Class c=objc_getClass(cn); PC("  %s: %s\n", cn, c?"PRESENT":"absent");
         }
+        // v3.81.0 RECENTS-PROBE: hosted apps never show in the chrome's recent-apps column because
+        // CarPlay's own recents model never learns about a grafted app. Dump every class that looks
+        // like the recents/dock owner plus its app-list surface, so the next build can insert ours.
+        PC("-- RECENTS-PROBE: candidate owners + their app-list surface --\n");
+        for (const char *rn : (const char*[]){"CARRecentAppsViewController","CARRecentsViewController","CARDockViewController","CARSidebarViewController","CARAppDockViewController","CARApplicationDockViewController","CARIconListViewController","SBIconModel","CARApplicationLaunchManager","CARApplicationManager", NULL}) {
+            if(!rn) break;
+            Class rc = objc_getClass(rn);
+            if (!rc) { PC("  %s: absent\n", rn); continue; }
+            PC("  %s: PRESENT\n", rn);
+            @try {
+                unsigned int mc = 0; Method *ms = class_copyMethodList(rc, &mc);
+                for (unsigned int mi = 0; mi < mc; mi++) {
+                    const char *sn = sel_getName(method_getName(ms[mi]));
+                    if (strcasestr(sn,"recent") || strcasestr(sn,"app") || strcasestr(sn,"icon") || strcasestr(sn,"item") || strcasestr(sn,"reload") || strcasestr(sn,"insert"))
+                        PC("      -[%s %s]\n", rn, sn);
+                }
+                if (ms) free(ms);
+                unsigned int ic = 0; Ivar *iv = class_copyIvarList(rc, &ic);
+                for (unsigned int ii = 0; ii < ic; ii++) {
+                    const char *in = ivar_getName(iv[ii]);
+                    if (in && (strcasestr(in,"recent") || strcasestr(in,"app") || strcasestr(in,"icon") || strcasestr(in,"item")))
+                        PC("      ivar %s\n", in);
+                }
+                if (iv) free(iv);
+            } @catch(...) {}
+        }
     } @catch(NSException *e){ PC("PROBE EXC: %s\n", [[e reason] UTF8String]?:"?"); }
     PC("==== END ====\n");
     if(cf>=0)close(cf);
@@ -3752,7 +3784,7 @@ static void cbrCPProbeChromeGeom(void) {
       CG("candidates: strip=%.0f icons=%.0f safeArea=%.0f -> best=%.0f (win %.0fx%.0f)\n", _sbEdge, _iconEdge, _safeEdge, _best, _winW, _winH);
       if (_winW > 0) {
           CGFloat _lo = _winW * 0.04, _hi = _winW * 0.22;
-          if (_best < _lo) { _best = (CGFloat)((int)(_winW * 0.10 + 0.5)); CG("nothing credible - 10%% fallback = %.0f\n", _best); }
+          if (_best < _lo) { _best = (CGFloat)((int)(_winW * 0.1125 + 0.5)); CG("nothing credible - 11.25%% fallback = %.0f\n", _best); }   // v3.81.0: measured truth, was 10%
           else if (_best > _hi) { CG("above ceiling %.0f - clamped\n", _hi); _best = _hi; }
       }
       _sbEdge = _best; }
