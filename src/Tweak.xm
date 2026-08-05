@@ -1198,12 +1198,9 @@ static void cbrSBAnimateOpenTransition(id win);   // v3.85.0: defined below (nee
 // On the app's content-ready signal, play ONE clean Placeholder(1)->LiveContent(4) transition WITH the
 // factory - carplay-cast's exact mechanism, timed so nothing interrupts it.
 static void cbrSBCoverReadyCallback(CFNotificationCenterRef c, void *obs, CFStringRef name, const void *o, CFDictionaryRef ui) {
-    dispatch_async(dispatch_get_main_queue(), ^{ @try {
-        if (gCBROpenAnimDone) return;
-        gCBROpenAnimDone = 1;
-        id _w = gCBRRootWindow;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.06*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrSBAnimateOpenTransition(_w); });
-    } @catch(...) {} });
+    // v3.87.0: the display-mode transition is a FADE; Colin wants the zoom-from-icon (done at mount).
+    // Keep the observer but no longer drive the fade. Reference the helper so it isn't flagged unused.
+    (void)c; (void)obs; (void)name; (void)o; (void)ui; (void)cbrSBAnimateOpenTransition;
 }
 static int gCBRTruthWait = 0;     // v3.69.0: truth-wait retries THIS host session (was a process-lifetime static - once 4 were burned, every later open blind-bounced instantly)
 static id gCBRAppVC = nil;
@@ -1752,10 +1749,9 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 // LAUNCHING window growing out of the icon (what iOS shows) rather than a ghosted
                 // empty box. Content appears inside it as the grafted scene renders.
                 @try { Class _uc = objc_getClass("UIColor");
-                       // v3.86.0: CLEAR, not black - the black box flashed the whole screen before
-                       // the scene rendered. Transparent shows the dashboard during the brief render
-                       // gap (stock-like), then the app animates in over it.
-                       id _blk = _uc ? ((id(*)(Class,SEL))objc_msgSend)(_uc, sel_registerName("clearColor")) : nil;
+                       // v3.87.0: BLACK again - transparent flashed the home screen mid-render. The
+                       // zoom out of the icon (below) is the motion; black is the placeholder it grows from.
+                       id _blk = _uc ? ((id(*)(Class,SEL))objc_msgSend)(_uc, sel_registerName("blackColor")) : nil;
                        if (_blk) ((void(*)(id,SEL,id))objc_msgSend)(container, sel_registerName("setBackgroundColor:"), _blk); } @catch(...) {}
                 ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
                 // v3.80.0 LAUNCH GROW + COVER. v3.79 removed the zoom entirely so the window simply
@@ -1773,11 +1769,18 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 // background is a stock-style placeholder during the brief async render, and the native
                 // factory then animates the app content in - so you see CarPlay's transition, not a
                 // black box fading in.
+                // v3.87.0 ZOOM FROM THE TAPPED ICON: the container's anchor is already pinned at the
+                // tapped icon (above). Start it small there and grow to full - the stock CarPlay open
+                // motion (the app zooms OUT of its icon). Content renders inside as it grows.
                 ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
-                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity);
+                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.20, 0.20));
                 gCBRZoomDone = 1;
                 gCBRAnimTicks = 0;
-                gCBROpenAnimDone = 0;   // v3.85.0: arm the native open transition for this host
+                gCBROpenAnimDone = 1;   // v3.87.0: fade retired; the zoom below owns the open
+                { void (^_zoom)(void) = ^{ ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity); };
+                  ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
+                      objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
+                      0.40, 0.0, (NSUInteger)(2UL<<16) /*EaseOut - zoom out of the icon like stock*/, _zoom, (void(^)(BOOL))nil); }
                 { int _hf=open("/var/mobile/CBR_anim_heartbeat.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_hf>=0){ char _hb2[160]; int _hn=snprintf(_hb2,sizeof(_hb2),"==== OPEN bid=%s ====\n", bid_cstr?bid_cstr:"?"); if(_hn>0)write(_hf,_hb2,(size_t)_hn); close(_hf);} }   // v3.65.0: per-open header, accumulate so working vs abrupt apps can be compared
             } @catch(...) {}
         } @catch (NSException *e) { HHF("mount EXC: %s\n", [[e reason] UTF8String]?:"?"); }
@@ -3904,7 +3907,7 @@ static void cbrCPCloseForegroundApp(void) {
             id ev = ((id(*)(Class,SEL,long,id))objc_msgSend)(evc, mk, (long)1, @"CBR: close before host");
             if (ev) { ((void(*)(id,SEL,id))objc_msgSend)(dash, he, ev); _did = 1; }
         }
-        if(_rf>=0){ char _b[160]; int _bn=snprintf(_b,sizeof(_b),"CLOSE-FG: %lu foregrounded app(s) - home CAREvent sent=%d\n",(unsigned long)n,_did); if(_bn>0)write(_rf,_b,(size_t)_bn); close(_rf);}
+        if(_rf>=0){ char _b[300]; int _bn=snprintf(_b,sizeof(_b),"CLOSE-FG: %lu fg app(s) sent=%d | dash=%s CAREvent=%d eventWithType:context:=%d handleEvent:=%d\n",(unsigned long)n,_did, dash?class_getName(object_getClass(dash)):"nil", evc?1:0, (evc&&[evc respondsToSelector:mk])?1:0, [dash respondsToSelector:he]?1:0); if(_bn>0)write(_rf,_b,(size_t)_bn); close(_rf);}
     } @catch(...) {}
 }
 static void cbrCPAddToRecents(id bidObj) {
