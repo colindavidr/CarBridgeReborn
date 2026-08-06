@@ -4179,39 +4179,6 @@ static void cbrCPAddToRecents(id bidObj) {
                 CBPostLaunch(bid);   // writes pending bid file (cbrCPRenderTest reads it)
                 cbrCPAddToRecents(bidObj);   // v3.83.0: put it in the chrome's recent-apps dock
                 CBLogFmt("[CBR] Tapped bridged app: %s", bid ?: "?");
-                // v3.99.0 CARPLAY-SIDE WINDOW PROBE (default OFF): notifications/nav/Siri render in the
-                // CarPlay process on the car screen (our SpringBoard window composites above that whole
-                // layer). We are injected here too, so sample THIS process's windows + levels while a
-                // notification/Siri is up - that names the window and level so v4.00 can test raising it
-                // above our scene. Turn on: notifyutil -s com.cbr.gate.cpwinprobe 1, tap our app, trigger
-                // a nav direction / text / hold Siri, then send /var/mobile/CBR_cpwins.txt.
-                if (cbrGate("com.cbr.gate.cpwinprobe", 0)) {
-                    for (int _k = 1; _k <= 30; _k++) {
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((double)_k*2.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                            @try {
-                                int _cf = open("/var/mobile/CBR_cpwins.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
-                                if (_cf < 0) return;
-                                #define CPF(...) do{ char _b[320]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(_n>0)write(_cf,_b,(size_t)_n);}while(0)
-                                CPF("---- cp sample %d ----\n", _k);
-                                id _app2 = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
-                                id _wins = _app2 ? ((id(*)(id,SEL))objc_msgSend)(_app2, sel_registerName("windows")) : nil;
-                                unsigned long _wc = (_wins && [_wins respondsToSelector:sel_registerName("count")]) ? (unsigned long)((NSUInteger(*)(id,SEL))objc_msgSend)(_wins, sel_registerName("count")) : 0;
-                                CPF("UIApplication.windows=%lu\n", _wc);
-                                if (_wins) for (id w in _wins) { @try {
-                                    id _scr = [w respondsToSelector:sel_registerName("screen")] ? ((id(*)(id,SEL))objc_msgSend)(w, sel_registerName("screen")) : nil;
-                                    int _car = (_scr && [_scr respondsToSelector:sel_registerName("_isCarScreen")]) ? ((BOOL(*)(id,SEL))objc_msgSend)(_scr, sel_registerName("_isCarScreen")) : -1;
-                                    double _lvl = ((double(*)(id,SEL))objc_msgSend)(w, sel_registerName("windowLevel"));
-                                    int _hid = ((BOOL(*)(id,SEL))objc_msgSend)(w, sel_registerName("isHidden"));
-                                    CGRect _fr = ((CGRect(*)(id,SEL))objc_msgSend)(w, sel_registerName("frame"));
-                                    CPF("  %s car=%d level=%.1f hidden=%d frame=%.0f,%.0f %.0fx%.0f\n", class_getName(object_getClass(w)), _car, _lvl, _hid, _fr.origin.x,_fr.origin.y,_fr.size.width,_fr.size.height);
-                                } @catch(...) {} }
-                                CPF("\n");
-                                #undef CPF
-                                close(_cf);
-                            } @catch(...) {}
-                        });
-                    }
-                }
                 handled = YES;
             }
         }
@@ -5638,6 +5605,63 @@ static int cbrShouldHidePill(id v) {
 %end
 %end
 
+// v4.0.0 CP ON-DEMAND DUMP: notifications/nav/Siri are drawn by THIS (CarPlay) process; our SpringBoard
+// window composites above the whole layer. To find their window/view + level we must look while one is
+// on screen, so this is fired by `notifyutil -p com.cbr.probe.now`. connectedScenes is the enumeration
+// that works in CarPlayApp (UIApplication.windows is empty here). Walks scene->window->view tree, prints
+// everything to depth 3 and flags (***) any siri/notif/banner/bulletin/alert/floating class at any depth.
+static void cbrCPDumpViewTree(id v, int depth, int fd) {
+    if (!v || depth > 9) return;
+    @try {
+        const char *cn = class_getName(object_getClass(v));
+        int flag = (strcasestr(cn,"siri")||strcasestr(cn,"notif")||strcasestr(cn,"banner")||strcasestr(cn,"bulletin")||strcasestr(cn,"alert")||strcasestr(cn,"floating")) ? 1 : 0;
+        if (flag || depth <= 3) {
+            CGRect fr = ((CGRect(*)(id,SEL))objc_msgSend)(v, sel_registerName("frame"));
+            int hid = ((BOOL(*)(id,SEL))objc_msgSend)(v, sel_registerName("isHidden"));
+            double zp = 0; @try { id ly = ((id(*)(id,SEL))objc_msgSend)(v, sel_registerName("layer")); if (ly) zp = ((double(*)(id,SEL))objc_msgSend)(ly, sel_registerName("zPosition")); } @catch(...) {}
+            char _b[300]; int _n=snprintf(_b,sizeof(_b),"%*s%s%s f=%.0f,%.0f %.0fx%.0f hid=%d z=%.1f\n", depth*2, "", flag?"*** ":"", cn, fr.origin.x,fr.origin.y,fr.size.width,fr.size.height, hid, zp); if(_n>0)write(fd,_b,(size_t)_n);
+        }
+        id subs = ((id(*)(id,SEL))objc_msgSend)(v, sel_registerName("subviews"));
+        NSUInteger sc = subs ? [subs count] : 0;
+        for (NSUInteger i=0;i<sc;i++) cbrCPDumpViewTree([subs objectAtIndex:i], depth+1, fd);
+    } @catch(...) {}
+}
+static void cbrCPDumpNow(void) {
+    int cf = open("/var/mobile/CBR_cpwins.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+    if (cf < 0) return;
+    #define DN(...) do{ char _b[320]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(_n>0)write(cf,_b,(size_t)_n);}while(0)
+    DN("==== CP DUMP NOW (triggered) ====\n");
+    @try {
+        id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+        id conns = app ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("connectedScenes")) : nil;
+        id all = conns ? ((id(*)(id,SEL))objc_msgSend)(conns, sel_registerName("allObjects")) : nil;
+        NSUInteger cnt = all ? [all count] : 0;
+        DN("connectedScenes=%lu\n", (unsigned long)cnt);
+        for (NSUInteger i=0;i<cnt;i++){
+            id sc = [all objectAtIndex:i];
+            DN("scene[%lu] %s\n", (unsigned long)i, class_getName(object_getClass(sc)));
+            @try {
+                id wins = [sc respondsToSelector:sel_registerName("windows")] ? ((id(*)(id,SEL))objc_msgSend)(sc, sel_registerName("windows")) : nil;
+                NSUInteger wc = wins ? [wins count] : 0;
+                DN("  windows=%lu\n", (unsigned long)wc);
+                for (NSUInteger j=0;j<wc;j++){
+                    id w=[wins objectAtIndex:j];
+                    double lvl=((double(*)(id,SEL))objc_msgSend)(w,sel_registerName("windowLevel"));
+                    int hid=((BOOL(*)(id,SEL))objc_msgSend)(w,sel_registerName("isHidden"));
+                    CGRect wf=((CGRect(*)(id,SEL))objc_msgSend)(w,sel_registerName("frame"));
+                    DN("  WIN %s level=%.1f hidden=%d frame=%.0fx%.0f\n", class_getName(object_getClass(w)), lvl, hid, wf.size.width, wf.size.height);
+                    cbrCPDumpViewTree(w, 2, cf);
+                }
+            } @catch(...) { DN("  (windows threw)\n"); }
+        }
+    } @catch(...) { DN("(dump threw)\n"); }
+    DN("==== END ====\n");
+    #undef DN
+    close(cf);
+}
+static void cbrCPDumpNowCB(CFNotificationCenterRef c, void *o, CFStringRef n, const void *ob, CFDictionaryRef ui) {
+    dispatch_async(dispatch_get_main_queue(), ^{ cbrCPDumpNow(); });
+}
 %ctor {
     // PURE C — no ObjC whatsoever
     // v3.20.47: UNCONDITIONAL beacon - log the progname of EVERY process we inject into.
@@ -5659,6 +5683,9 @@ static int cbrShouldHidePill(id v) {
         unlink("/var/mobile/CBR_live.txt");
         gLogFD = open("/var/mobile/CBR_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666);
         %init(CARPLAY);
+        // v4.0.0: on-demand CarPlay hierarchy dump - fire with `notifyutil -p com.cbr.probe.now` while a
+        // notification/Siri is on screen, then read /var/mobile/CBR_cpwins.txt.
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrCPDumpNowCB, CFSTR("com.cbr.probe.now"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         // v3.57.0 DISCONNECT PROBE: the screenshot phantom needs teardown on CarPlay disconnect, and
         // UIScreenDidDisconnect never fired in SpringBoard. Observe the likely signals in the CarPlay
         // process + log which fires on unplug (CBR_disconnect_probe.txt).
