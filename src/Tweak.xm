@@ -4179,6 +4179,39 @@ static void cbrCPAddToRecents(id bidObj) {
                 CBPostLaunch(bid);   // writes pending bid file (cbrCPRenderTest reads it)
                 cbrCPAddToRecents(bidObj);   // v3.83.0: put it in the chrome's recent-apps dock
                 CBLogFmt("[CBR] Tapped bridged app: %s", bid ?: "?");
+                // v3.99.0 CARPLAY-SIDE WINDOW PROBE (default OFF): notifications/nav/Siri render in the
+                // CarPlay process on the car screen (our SpringBoard window composites above that whole
+                // layer). We are injected here too, so sample THIS process's windows + levels while a
+                // notification/Siri is up - that names the window and level so v4.00 can test raising it
+                // above our scene. Turn on: notifyutil -s com.cbr.gate.cpwinprobe 1, tap our app, trigger
+                // a nav direction / text / hold Siri, then send /var/mobile/CBR_cpwins.txt.
+                if (cbrGate("com.cbr.gate.cpwinprobe", 0)) {
+                    for (int _k = 1; _k <= 30; _k++) {
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((double)_k*2.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                            @try {
+                                int _cf = open("/var/mobile/CBR_cpwins.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+                                if (_cf < 0) return;
+                                #define CPF(...) do{ char _b[320]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(_n>0)write(_cf,_b,(size_t)_n);}while(0)
+                                CPF("---- cp sample %d ----\n", _k);
+                                id _app2 = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+                                id _wins = _app2 ? ((id(*)(id,SEL))objc_msgSend)(_app2, sel_registerName("windows")) : nil;
+                                unsigned long _wc = (_wins && [_wins respondsToSelector:sel_registerName("count")]) ? (unsigned long)((NSUInteger(*)(id,SEL))objc_msgSend)(_wins, sel_registerName("count")) : 0;
+                                CPF("UIApplication.windows=%lu\n", _wc);
+                                if (_wins) for (id w in _wins) { @try {
+                                    id _scr = [w respondsToSelector:sel_registerName("screen")] ? ((id(*)(id,SEL))objc_msgSend)(w, sel_registerName("screen")) : nil;
+                                    int _car = (_scr && [_scr respondsToSelector:sel_registerName("_isCarScreen")]) ? ((BOOL(*)(id,SEL))objc_msgSend)(_scr, sel_registerName("_isCarScreen")) : -1;
+                                    double _lvl = ((double(*)(id,SEL))objc_msgSend)(w, sel_registerName("windowLevel"));
+                                    int _hid = ((BOOL(*)(id,SEL))objc_msgSend)(w, sel_registerName("isHidden"));
+                                    CGRect _fr = ((CGRect(*)(id,SEL))objc_msgSend)(w, sel_registerName("frame"));
+                                    CPF("  %s car=%d level=%.1f hidden=%d frame=%.0f,%.0f %.0fx%.0f\n", class_getName(object_getClass(w)), _car, _lvl, _hid, _fr.origin.x,_fr.origin.y,_fr.size.width,_fr.size.height);
+                                } @catch(...) {} }
+                                CPF("\n");
+                                #undef CPF
+                                close(_cf);
+                            } @catch(...) {}
+                        });
+                    }
+                }
                 handled = YES;
             }
         }
