@@ -1777,14 +1777,22 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 // background is a stock-style placeholder during the brief async render, and the native
                 // factory then animates the app content in - so you see CarPlay's transition, not a
                 // black box fading in.
-                // v3.90.0 FADE (not zoom): stock CarPlay chrome apps cross-fade in, and the display-mode
-                // transition (below, on ready) IS that fade. Show the container at full size, no zoom, so
-                // our open matches the chrome instead of using two different transition types.
+                // v3.92.0 ZOOM restored + gated (Colin: the fade left no visible transition = abrupt
+                // black). gate.zoom=1 (default) grows the container out of the tapped icon (anchor set
+                // above); =2 is the plain fade (identity, no zoom).
                 ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
-                ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity);
                 gCBRZoomDone = 1;
                 gCBRAnimTicks = 0;
-                gCBROpenAnimDone = 0;   // v3.88.0: the display-mode fade renders + reveals the app
+                gCBROpenAnimDone = 0;
+                if (cbrGate("com.cbr.gate.zoom", 1)) {
+                    ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.20, 0.20));
+                    { void (^_zoom)(void) = ^{ ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity); };
+                      ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
+                          objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
+                          0.40, 0.0, (NSUInteger)(2UL<<16) /*EaseOut - zoom out of the icon*/, _zoom, (void(^)(BOOL))nil); }
+                } else {
+                    ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity);
+                }
                 { int _hf=open("/var/mobile/CBR_anim_heartbeat.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_hf>=0){ char _hb2[160]; int _hn=snprintf(_hb2,sizeof(_hb2),"==== OPEN bid=%s ====\n", bid_cstr?bid_cstr:"?"); if(_hn>0)write(_hf,_hb2,(size_t)_hn); close(_hf);} }   // v3.65.0: per-open header, accumulate so working vs abrupt apps can be compared
             } @catch(...) {}
         } @catch (NSException *e) { HHF("mount EXC: %s\n", [[e reason] UTF8String]?:"?"); }
@@ -4022,14 +4030,22 @@ static void cbrCPAddToRecents(id bidObj) {
                 const char *bid = ((const char*(*)(id,SEL))objc_msgSend)(bidObj,
                     sel_registerName("UTF8String"));
                 CBCarLogFmt("[CBR-CP] tap(launchInfo) -> %s", bid ?: "?");
-                gCBRLaunchingOurApp = 1;   // v3.91.0: swallow the dashboard's launch-nav (pan) for the next ~2s
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ gCBRLaunchingOurApp = 0; });
-                cbrCPCloseForegroundApp();   // v3.86.0: background any foregrounded native app first, so our scene isn't layered on top
-                CBPostLaunch(bid);   // writes pending bid file (cbrCPRenderTest reads it)
-                cbrCPAddToRecents(bidObj);   // v3.83.0: put it in the chrome's recent-apps dock
-                CBLogFmt("[CBR] Tapped bridged app: %s", bid ?: "?");
-                // cbrCPRenderTest(); // v3.20.2 disabled for stability isolation - in-process car-scene window test
-                handled = YES;
+                // v3.92.0 RE-TAP NO-OP: re-tapping an app that is ALREADY the hosted one must do nothing
+                // (stock CarPlay no-ops the foreground app); re-grafting it locks up the dock. If the
+                // host-state hash already matches this bid, suppress the native launch but DON'T re-graft.
+                uint64_t _rhs = cbrReadHostState();
+                if (cbrGate("com.cbr.gate.retap", 1) && _rhs != 0 && bid && cbrBidHash(bid) == _rhs) {
+                    CBCarLogFmt("[CBR-CP] re-tap of already-hosted %s -> no-op (avoid dock lockup)", bid);
+                    handled = YES;
+                } else {
+                    gCBRLaunchingOurApp = 1;   // v3.91.0: swallow the dashboard's launch-nav (pan) for the next ~2s
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ gCBRLaunchingOurApp = 0; });
+                    cbrCPCloseForegroundApp();   // v3.86.0: background any foregrounded native app first, so our scene isn't layered on top
+                    CBPostLaunch(bid);   // writes pending bid file (cbrCPRenderTest reads it)
+                    cbrCPAddToRecents(bidObj);   // v3.83.0: put it in the chrome's recent-apps dock
+                    CBLogFmt("[CBR] Tapped bridged app: %s", bid ?: "?");
+                    handled = YES;
+                }
             }
         }
     } @catch(...) { handled = NO; }
