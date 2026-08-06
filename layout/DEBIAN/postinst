@@ -1,30 +1,20 @@
 #!/bin/sh
-# CarBridgeReborn postinst - minimal + NON-BLOCKING (v3.77.0).
-#
-# CRITICAL: never run injection SYNCHRONOUSLY from here. dpkg waits on this script, and that wait
-# is what wedged the package manager in v3.70-3.74 ("dpkg interrupted", survived reboot). The
-# auto-injector below is spawned FULLY DETACHED - setsid + background + stdin/stdout/stderr all
-# redirected - so dpkg does not wait on it and this script always returns immediately.
-/var/jb/usr/bin/cbr-refresh-prefs 2>/dev/null || /usr/bin/cbr-refresh-prefs 2>/dev/null || true
-
-INJ=/var/jb/usr/libexec/cbr-autoinject
-[ -x "$INJ" ] || INJ=/usr/libexec/cbr-autoinject
-if [ -x "$INJ" ]; then
-  if command -v setsid >/dev/null 2>&1; then
-    setsid "$INJ" --delay 20 </dev/null >/dev/null 2>&1 &
-  else
-    "$INJ" --delay 20 </dev/null >/dev/null 2>&1 &
-  fi
+# CarBridgeReborn postinst - FULLY non-blocking. dpkg waits on this script's stdout/stderr pipe, so ANY
+# child that keeps that pipe open wedges dpkg at "Setting up ..." (-> the recurring dpkg lock). So ALL
+# work runs in one setsid-detached subshell with stdin/stdout/stderr redirected to /dev/null, and the
+# script returns immediately. Nothing synchronous; nothing can hold dpkg's pipe.
+_bg='
+  /var/jb/usr/bin/cbr-refresh-prefs || /usr/bin/cbr-refresh-prefs || true
+  INJ=/var/jb/usr/libexec/cbr-autoinject; [ -x "$INJ" ] || INJ=/usr/libexec/cbr-autoinject
+  [ -x "$INJ" ] && "$INJ" --delay 20 || true
+  LCTL=/var/jb/bin/launchctl; [ -x "$LCTL" ] || LCTL=/bin/launchctl
+  PL=/var/jb/Library/LaunchDaemons/com.carbridgereborn.autoinject.plist
+  [ -f "$PL" ] && [ -x "$LCTL" ] && "$LCTL" load -w "$PL" || true
+'
+if command -v setsid >/dev/null 2>&1; then
+  setsid /bin/sh -c "$_bg" </dev/null >/dev/null 2>&1 &
+else
+  /bin/sh -c "$_bg" </dev/null >/dev/null 2>&1 &
 fi
-
-# Opportunistic only: NathanLR is a semi-jailbreak with no launchd hook, so it may never load
-# daemons. Harmless if ignored - the detached spawn above is the path that always runs.
-LCTL=/var/jb/bin/launchctl; [ -x "$LCTL" ] || LCTL=/bin/launchctl
-PL=/var/jb/Library/LaunchDaemons/com.carbridgereborn.autoinject.plist
-if [ -f "$PL" ] && [ -x "$LCTL" ]; then
-  ( "$LCTL" load -w "$PL" </dev/null >/dev/null 2>&1 & ) 2>/dev/null || true
-fi
-
-echo "[CBR] Installed. Enabled apps auto-inject in the background (~20s)."
-echo "[CBR] Progress: /var/mobile/CBR_autoinject.log   Disable: touch /var/mobile/.cbr_noautoinject"
+echo "[CBR] Installed. Background setup (prefs + auto-inject ~20s) running detached."
 exit 0
