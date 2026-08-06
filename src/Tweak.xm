@@ -3560,7 +3560,7 @@ static void cbrCPSnapshotNotif(id win) {
         if (!win) return;
         CGRect b = ((CGRect(*)(id,SEL))objc_msgSend)(win, sel_registerName("bounds"));
         if (b.size.width < 2 || b.size.height < 2) return;
-        UIGraphicsBeginImageContextWithOptions(b.size, NO, 0.0);
+        UIGraphicsBeginImageContextWithOptions(b.size, NO, 3.0);   // v4.0.3: capture at 3x for a crisp banner
         BOOL ok = ((BOOL(*)(id,SEL,CGRect,BOOL))objc_msgSend)(win, sel_registerName("drawViewHierarchyInRect:afterScreenUpdates:"), b, NO);
         id img = UIGraphicsGetImageFromCurrentImageContext();
         UIGraphicsEndImageContext();
@@ -3609,14 +3609,20 @@ static void cbrSBShowNotifOverlay(void) {
         id img = ((id(*)(Class,SEL,id))objc_msgSend)(objc_getClass("UIImage"), sel_registerName("imageWithData:"), data);
         if (!img) return;
         CGRect hb = ((CGRect(*)(id,SEL))objc_msgSend)(host, sel_registerName("bounds"));
+        // v4.0.3 SCROLL FIX: cover ONLY the top banner strip, never the whole scene. A full-size overlay
+        // occludes the app scene (CBR sets setIgnoresOcclusions:NO) and the system then stops delivering
+        // touches to it = the scroll break. The banner lives at the top, so a top strip is also correct.
+        CGRect strip = CGRectMake(0, 0, hb.size.width, hb.size.height * 0.45);
         if (gCBRNotifOverlay) {
             ((void(*)(id,SEL,id))objc_msgSend)(gCBRNotifOverlay, sel_registerName("setImage:"), img);
-            ((void(*)(id,SEL,CGRect))objc_msgSend)(gCBRNotifOverlay, sel_registerName("setFrame:"), hb);
+            ((void(*)(id,SEL,CGRect))objc_msgSend)(gCBRNotifOverlay, sel_registerName("setFrame:"), strip);
             ((void(*)(id,SEL,id))objc_msgSend)(host, sel_registerName("bringSubviewToFront:"), gCBRNotifOverlay);
             return;
         }
         id iv = ((id(*)(id,SEL,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIImageView"), sel_registerName("alloc")), sel_registerName("initWithImage:"), img);
-        ((void(*)(id,SEL,CGRect))objc_msgSend)(iv, sel_registerName("setFrame:"), hb);
+        ((void(*)(id,SEL,CGRect))objc_msgSend)(iv, sel_registerName("setFrame:"), strip);
+        ((void(*)(id,SEL,NSInteger))objc_msgSend)(iv, sel_registerName("setContentMode:"), (NSInteger)12);   // UIViewContentModeTop: show the banner (top of the snapshot) at natural size
+        ((void(*)(id,SEL,BOOL))objc_msgSend)(iv, sel_registerName("setClipsToBounds:"), YES);
         ((void(*)(id,SEL,BOOL))objc_msgSend)(iv, sel_registerName("setUserInteractionEnabled:"), NO);
         ((void(*)(id,SEL,id))objc_msgSend)(host, sel_registerName("addSubview:"), iv);
         ((void(*)(id,SEL,id))objc_msgSend)(host, sel_registerName("bringSubviewToFront:"), iv);
