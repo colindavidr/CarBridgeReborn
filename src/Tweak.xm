@@ -1581,6 +1581,14 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
     { int _lf=open("/var/mobile/CBR_lifecycle.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_lf>=0){ char _lb[240]; int _ln=snprintf(_lb,sizeof(_lb),"[HOST-START] bid=%s prevRootWin=%d prevScene=%d keepAlive=%lu\n", bid_cstr, gCBRRootWindow?1:0, gCBRSceneHandle?1:0, (unsigned long)(gCBRKeepAlive?[gCBRKeepAlive count]:0)); if(_ln>0)write(_lf,_lb,(size_t)_ln); close(_lf);} }   // v3.60.0 lifecycle probe
     // v3.20.3: don't blind-toggle on a possibly-stale global. Tear down old window and
     // continue hosting the freshly-tapped app. Fixes "worked once, black after".
+    // v3.95.0 RE-TAP NO-OP: re-tapping the app we are already hosting must do nothing (stock CarPlay
+    // just flashes the icon shadow). Re-hosting = teardown + re-mount = the double scene and ~10s black
+    // dash Colin saw. gCBRLastBidStr still holds the currently-hosted bid here (reassigned just below),
+    // and gCBRRootWindow proves a host is live, so bail before any teardown when the bid matches.
+    if (gCBRRootWindow && gCBRLastBidStr) {
+        const char *_curbid = ((const char*(*)(id,SEL))objc_msgSend)(gCBRLastBidStr, sel_registerName("UTF8String"));
+        if (_curbid && strcmp(_curbid, bid_cstr) == 0) { HH("re-tap of live app -> no-op (no re-host)\n"); if(fd>=0)close(fd); return; }
+    }
     if (gCBRRootWindow) { HH("was hosting -> dismiss old, re-host fresh\n"); gCBRHardDismiss = 1; cbrSBHostDismiss(); }
     HHF("bid: %s\n", bid_cstr);
         @try { gCBRLastBidStr = [NSString stringWithUTF8String:bid_cstr]; } @catch(...) {}
@@ -3967,7 +3975,10 @@ static void cbrCPCloseForegroundApp(void) {
                 id vals = [fg respondsToSelector:sel_registerName("allValues")] ? ((id(*)(id,SEL))objc_msgSend)(fg, sel_registerName("allValues")) : nil;
                 NSUInteger vc = vals ? ((NSUInteger(*)(id,SEL))objc_msgSend)(vals, sel_registerName("count")) : 0;
                 void (^_deact)(id) = ^(id sc){ @try { if (sc && [sc respondsToSelector:sel_registerName("updateSettingsWithBlock:")]) {
-                        void (^_bb)(id) = ^(id ms){ @try { if ([ms respondsToSelector:sel_registerName("setDeactivated:")]) ((void(*)(id,SEL,BOOL))objc_msgSend)(ms, sel_registerName("setDeactivated:"), YES); } @catch(...) {} };
+                        void (^_bb)(id) = ^(id ms){ @try { if ([ms respondsToSelector:sel_registerName("setDeactivated:")]) ((void(*)(id,SEL,BOOL))objc_msgSend)(ms, sel_registerName("setDeactivated:"), YES);
+                                // v3.95.0: setDeactivated:YES alone did NOT background Maps (log: 2 FBScenes deactivated, still on top).
+                                // The working bounce also sets a non-zero deactivation reason - without it the scene manager keeps the app live.
+                                if ([ms respondsToSelector:sel_registerName("setDeactivationReasons:")]) ((void(*)(id,SEL,NSUInteger))objc_msgSend)(ms, sel_registerName("setDeactivationReasons:"), (NSUInteger)0x2); } @catch(...) {} };
                         ((void(*)(id,SEL,id))objc_msgSend)(sc, sel_registerName("updateSettingsWithBlock:"), _bb); } } @catch(...) {} };
                 for (NSUInteger i=0;i<vc;i++){
                     id v = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(vals, sel_registerName("objectAtIndex:"), i);
