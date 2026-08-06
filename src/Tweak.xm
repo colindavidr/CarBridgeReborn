@@ -3609,20 +3609,21 @@ static void cbrSBShowNotifOverlay(void) {
         id img = ((id(*)(Class,SEL,id))objc_msgSend)(objc_getClass("UIImage"), sel_registerName("imageWithData:"), data);
         if (!img) return;
         CGRect hb = ((CGRect(*)(id,SEL))objc_msgSend)(host, sel_registerName("bounds"));
-        // v4.0.3 SCROLL FIX: cover ONLY the top banner strip, never the whole scene. A full-size overlay
-        // occludes the app scene (CBR sets setIgnoresOcclusions:NO) and the system then stops delivering
-        // touches to it = the scroll break. The banner lives at the top, so a top strip is also correct.
-        CGRect strip = CGRectMake(0, 0, hb.size.width, hb.size.height * 0.45);
+        // v4.0.5: RESTORE the full-size 1:1 overlay (v4.0.2 - the position + scale Colin confirmed were
+        // correct; the banner lands exactly where CarPlay drew it). Scroll broke in v4.0.2 because a
+        // full-size overlay OCCLUDES the app scene and CBR sets setIgnoresOcclusions:NO, so the system
+        // suspends touch delivery. The v4.0.3 top-strip mis-positioned the banner. Correct fix: keep
+        // full-size + userInteraction=NO (touches pass through) and tell the scene to IGNORE occlusions
+        // while the banner is up so it stays active and scrollable. Restored to NO on hide.
+        if (gCBRAppVC) { @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRAppVC, sel_registerName("setIgnoresOcclusions:"), YES); } @catch(...) {} }
         if (gCBRNotifOverlay) {
             ((void(*)(id,SEL,id))objc_msgSend)(gCBRNotifOverlay, sel_registerName("setImage:"), img);
-            ((void(*)(id,SEL,CGRect))objc_msgSend)(gCBRNotifOverlay, sel_registerName("setFrame:"), strip);
+            ((void(*)(id,SEL,CGRect))objc_msgSend)(gCBRNotifOverlay, sel_registerName("setFrame:"), hb);
             ((void(*)(id,SEL,id))objc_msgSend)(host, sel_registerName("bringSubviewToFront:"), gCBRNotifOverlay);
             return;
         }
         id iv = ((id(*)(id,SEL,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIImageView"), sel_registerName("alloc")), sel_registerName("initWithImage:"), img);
-        ((void(*)(id,SEL,CGRect))objc_msgSend)(iv, sel_registerName("setFrame:"), strip);
-        ((void(*)(id,SEL,NSInteger))objc_msgSend)(iv, sel_registerName("setContentMode:"), (NSInteger)12);   // UIViewContentModeTop: show the banner (top of the snapshot) at natural size
-        ((void(*)(id,SEL,BOOL))objc_msgSend)(iv, sel_registerName("setClipsToBounds:"), YES);
+        ((void(*)(id,SEL,CGRect))objc_msgSend)(iv, sel_registerName("setFrame:"), hb);
         ((void(*)(id,SEL,BOOL))objc_msgSend)(iv, sel_registerName("setUserInteractionEnabled:"), NO);
         ((void(*)(id,SEL,id))objc_msgSend)(host, sel_registerName("addSubview:"), iv);
         ((void(*)(id,SEL,id))objc_msgSend)(host, sel_registerName("bringSubviewToFront:"), iv);
@@ -3630,7 +3631,10 @@ static void cbrSBShowNotifOverlay(void) {
     } @catch(...) {}
 }
 static void cbrSBHideNotifOverlay(void) {
-    @try { if (gCBRNotifOverlay) { ((void(*)(id,SEL))objc_msgSend)(gCBRNotifOverlay, sel_registerName("removeFromSuperview")); gCBRNotifOverlay = nil; } } @catch(...) {}
+    @try {
+        if (gCBRNotifOverlay) { ((void(*)(id,SEL))objc_msgSend)(gCBRNotifOverlay, sel_registerName("removeFromSuperview")); gCBRNotifOverlay = nil; }
+        if (gCBRAppVC) { @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRAppVC, sel_registerName("setIgnoresOcclusions:"), NO); } @catch(...) {} }
+    } @catch(...) {}
 }
 static void cbrSBNotifShowCB(CFNotificationCenterRef c, void *o, CFStringRef n, const void *ob, CFDictionaryRef ui) {
     dispatch_async(dispatch_get_main_queue(), ^{ cbrSBShowNotifOverlay(); });
