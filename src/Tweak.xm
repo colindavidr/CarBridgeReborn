@@ -4006,12 +4006,20 @@ static void cbrCPCloseForegroundApp(void) {
             @try {
                 id vals = [fg respondsToSelector:sel_registerName("allValues")] ? ((id(*)(id,SEL))objc_msgSend)(fg, sel_registerName("allValues")) : nil;
                 NSUInteger vc = vals ? ((NSUInteger(*)(id,SEL))objc_msgSend)(vals, sel_registerName("count")) : 0;
-                void (^_deact)(id) = ^(id sc){ @try { if (sc && [sc respondsToSelector:sel_registerName("updateSettingsWithBlock:")]) {
-                        void (^_bb)(id) = ^(id ms){ @try { if ([ms respondsToSelector:sel_registerName("setDeactivated:")]) ((void(*)(id,SEL,BOOL))objc_msgSend)(ms, sel_registerName("setDeactivated:"), YES);
-                                // v3.95.0: setDeactivated:YES alone did NOT background Maps (log: 2 FBScenes deactivated, still on top).
-                                // The working bounce also sets a non-zero deactivation reason - without it the scene manager keeps the app live.
-                                if ([ms respondsToSelector:sel_registerName("setDeactivationReasons:")]) ((void(*)(id,SEL,NSUInteger))objc_msgSend)(ms, sel_registerName("setDeactivationReasons:"), (NSUInteger)0x2); } @catch(...) {} };
-                        ((void(*)(id,SEL,id))objc_msgSend)(sc, sel_registerName("updateSettingsWithBlock:"), _bb); } } @catch(...) {} };
+                // v3.97.0 REAL BACKGROUND: the CBR_dash.txt probe showed FBScene exposes real
+                // -deactivateWithTransitionContext: and -deactivate: methods. updateSettingsWithBlock:{setDeactivated:}
+                // only flips a settings flag the dashboard re-activates (why Maps stayed on top through v3.95/96).
+                // Call the real deactivate transition instead - nil context = immediate, no pan. Log which fired.
+                void (^_deact)(id) = ^(id sc){ @try {
+                        if (!sc) return;
+                        int _m = 0;
+                        if ([sc respondsToSelector:sel_registerName("deactivateWithTransitionContext:")]) {
+                            ((void(*)(id,SEL,id))objc_msgSend)(sc, sel_registerName("deactivateWithTransitionContext:"), (id)nil); _m = 2;
+                        } else if ([sc respondsToSelector:sel_registerName("deactivate:")]) {
+                            ((void(*)(id,SEL,id))objc_msgSend)(sc, sel_registerName("deactivate:"), (id)nil); _m = 1;
+                        }
+                        if (_rf>=0){ char _mb[96]; int _mn2=snprintf(_mb,sizeof(_mb),"  bg-scene %s via m%d\n", object_getClassName(sc), _m); if(_mn2>0)write(_rf,_mb,(size_t)_mn2); }
+                } @catch(...) {} };
                 for (NSUInteger i=0;i<vc;i++){
                     id v = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(vals, sel_registerName("objectAtIndex:"), i);
                     if (_rf>=0){ char _vb[120]; int _vn=snprintf(_vb,sizeof(_vb),"  fg-val[%lu]=%s\n",(unsigned long)i, v?object_getClassName(v):"nil"); if(_vn>0)write(_rf,_vb,(size_t)_vn); }
