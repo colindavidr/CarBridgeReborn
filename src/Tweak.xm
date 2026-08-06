@@ -4004,6 +4004,14 @@ static void cbrCPProbeChromeGeom(void) {
 // with `notifyutil -s com.cbr.gate.NAME 1` (on) / 2 (off) with no rebuild. Unset = the default.
 static int cbrGate(const char *name, int def) {
     @try {
+        // v4.0.1: notifyutil is absent on this device, so FILE overrides are the real control:
+        //   ON  -> touch /var/mobile/CBR_gate_on/<name>    OFF -> touch /var/mobile/CBR_gate_off/<name>
+        //   (rm the file to fall back to the default). <name> is the full id, e.g. com.cbr.gate.zoom
+        char _gp[256];
+        snprintf(_gp, sizeof(_gp), "/var/mobile/CBR_gate_off/%s", name);
+        if (access(_gp, F_OK) == 0) return 0;
+        snprintf(_gp, sizeof(_gp), "/var/mobile/CBR_gate_on/%s", name);
+        if (access(_gp, F_OK) == 0) return 1;
         int _t = 0;
         if (notify_register_check(name, &_t) != 0 || !_t) return def;
         uint64_t _v = 0; notify_get_state(_t, &_v);
@@ -5662,6 +5670,17 @@ static void cbrCPDumpNow(void) {
 static void cbrCPDumpNowCB(CFNotificationCenterRef c, void *o, CFStringRef n, const void *ob, CFDictionaryRef ui) {
     dispatch_async(dispatch_get_main_queue(), ^{ cbrCPDumpNow(); });
 }
+// v4.0.1: notifyutil is absent, so ALSO trigger the dump from a FILE - `touch /var/mobile/CBR_dump_trigger`
+// over SSH while a notification/Siri is on screen; this poll fires the dump then clears the trigger.
+static void cbrCPTriggerPoll(void) {
+    @try {
+        if (access("/var/mobile/CBR_dump_trigger", F_OK) == 0) {
+            unlink("/var/mobile/CBR_dump_trigger");
+            cbrCPDumpNow();
+        }
+    } @catch(...) {}
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.5*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrCPTriggerPoll(); });
+}
 %ctor {
     // PURE C — no ObjC whatsoever
     // v3.20.47: UNCONDITIONAL beacon - log the progname of EVERY process we inject into.
@@ -5686,6 +5705,7 @@ static void cbrCPDumpNowCB(CFNotificationCenterRef c, void *o, CFStringRef n, co
         // v4.0.0: on-demand CarPlay hierarchy dump - fire with `notifyutil -p com.cbr.probe.now` while a
         // notification/Siri is on screen, then read /var/mobile/CBR_cpwins.txt.
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrCPDumpNowCB, CFSTR("com.cbr.probe.now"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        cbrCPTriggerPoll();   // v4.0.1: file-trigger fallback (notifyutil absent) - touch /var/mobile/CBR_dump_trigger
         // v3.57.0 DISCONNECT PROBE: the screenshot phantom needs teardown on CarPlay disconnect, and
         // UIScreenDidDisconnect never fired in SpringBoard. Observe the likely signals in the CarPlay
         // process + log which fires on unplug (CBR_disconnect_probe.txt).
