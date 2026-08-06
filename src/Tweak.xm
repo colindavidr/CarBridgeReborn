@@ -1217,6 +1217,7 @@ static NSMutableSet *gCBRKeepAlive = nil;  // v3.20.18: bundle IDs whose scenes 
 // v3.42.0 globals.
 static NSString *gCBRPendingHostBid = nil;  // bid being hosted - matched by the BORN-LANDSCAPE create hook
 static int gCBRHostStateToken = 0;          // notify token: state 3 = hosting (apps read it SYNCHRONOUSLY at ctor)
+static int gCBRLaunchingOurApp = 0;         // v3.91.0: 1 during our app's launch window (swallow dash nav = no pan)
 static int gCBRTruthTokenSB = 0;            // v3.47.0: notify token for com.cbr.app.truth (app publishes its REAL scene orientation)
 static int gCBRBounceCount = 0;             // tap-replay attempts this host session
 static int gCBRBlindBounce = 0;             // v3.51.0: no-truth blind edges this host session (max 2)
@@ -3542,12 +3543,21 @@ static double gCBRHomeDownMs = 0;   // v3.58.0: DBStatusBarHomeButton press-star
 // for apps being unopenable until a stock app is tapped). Log-only, always %orig - cannot change nav.
 %hook DBDashboard
 - (void)handleEvent:(id)event {
+    long _et = -1;
     @try {
-        long _et = (event && [event respondsToSelector:sel_registerName("type")]) ? ((long(*)(id,SEL))objc_msgSend)(event, sel_registerName("type")) : -1;
+        _et = (event && [event respondsToSelector:sel_registerName("type")]) ? ((long(*)(id,SEL))objc_msgSend)(event, sel_registerName("type")) : -1;
         uint64_t _hs = cbrReadHostState();
         int _f = open("/var/mobile/CBR_dbevent.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
-        if (_f >= 0) { char _b[240]; int _n = snprintf(_b,sizeof(_b),"[DBDashboard handleEvent] type=%ld hosting=%d event=%s\n", _et, _hs!=0?1:0, event?object_getClassName(event):"nil"); if(_n>0) write(_f,_b,(size_t)_n); close(_f); }
+        if (_f >= 0) { char _b[240]; int _n = snprintf(_b,sizeof(_b),"[DBDashboard handleEvent] type=%ld hosting=%d launching=%d event=%s\n", _et, _hs!=0?1:0, gCBRLaunchingOurApp, event?object_getClassName(event):"nil"); if(_n>0) write(_f,_b,(size_t)_n); close(_f); }
     } @catch(...) {}
+    // v3.91.0 DASH-NAV SWALLOW: while WE are launching one of our apps, swallow CarPlay's launch-nav
+    // events (type 1/4) so the dashboard stays on the app grid instead of panning to the home pane.
+    // Scoped to our ~2s launch window + gated, so the home button and stock launches are untouched.
+    if (gCBRLaunchingOurApp && (_et == 1 || _et == 4) && cbrGate("com.cbr.gate.dashnav", 1)) {
+        int _sf = open("/var/mobile/CBR_dbevent.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+        if (_sf >= 0) { const char *_sm = "  -> SWALLOWED (dash-nav during our launch = no pan)\n"; write(_sf,_sm,strlen(_sm)); close(_sf); }
+        return;   // swallow - keep the dashboard on the app grid
+    }
     %orig;
 }
 %end
@@ -4012,6 +4022,8 @@ static void cbrCPAddToRecents(id bidObj) {
                 const char *bid = ((const char*(*)(id,SEL))objc_msgSend)(bidObj,
                     sel_registerName("UTF8String"));
                 CBCarLogFmt("[CBR-CP] tap(launchInfo) -> %s", bid ?: "?");
+                gCBRLaunchingOurApp = 1;   // v3.91.0: swallow the dashboard's launch-nav (pan) for the next ~2s
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ gCBRLaunchingOurApp = 0; });
                 cbrCPCloseForegroundApp();   // v3.86.0: background any foregrounded native app first, so our scene isn't layered on top
                 CBPostLaunch(bid);   // writes pending bid file (cbrCPRenderTest reads it)
                 cbrCPAddToRecents(bidObj);   // v3.83.0: put it in the chrome's recent-apps dock
