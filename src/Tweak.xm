@@ -1632,6 +1632,62 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 }
             } @catch(...) {}
           }); }
+        // v3.98.0 COLD-BOOT RENDER RETRY: on a cold boot the app cold-launches, so its content-ready
+        // signal can fire before the graft is live (or be missed) - the display mode never reaches
+        // LiveContent and the scene is black until you exit + reopen. Fix: if the app has not armed
+        // shortly after mount (cold/slow start), poll truth; the moment it arms (content really ready),
+        // drive one clean open transition to LiveContent - the automatic version of the manual reopen.
+        if (cbrGate("com.cbr.gate.renderretry", 1)) {
+            id _rrwin = rootWindow;
+            __block int _rrDone = 0;
+            for (int _s = 2; _s <= 9; _s++) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((double)_s*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    @try {
+                        if (gCBRRootWindow != _rrwin || _rrDone) return;
+                        uint64_t _t = 0; if (gCBRTruthTokenSB) notify_get_state(gCBRTruthTokenSB, &_t);
+                        if (_t == 0) return;   // not armed yet - a later tick will catch it
+                        _rrDone = 1;
+                        if (_s >= 3) {   // armed LATE (>=3s) = cold/slow start; a <3s arm is a normal warm open, leave it
+                            gCBROpenAnimDone = 0;   // clear any stale ready flag so the transition actually runs
+                            cbrSBAnimateOpenTransition(_rrwin);
+                            { int _lf=open("/var/mobile/CBR_lifecycle.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_lf>=0){ char _b[96]; int _n=snprintf(_b,sizeof(_b),"[RENDER-RETRY] app armed ~%ds late - drove LiveContent\n",_s); if(_n>0)write(_lf,_b,(size_t)_n); close(_lf);} }
+                        }
+                    } @catch(...) {}
+                });
+            }
+        }
+        // v3.98.0 NOTIFICATION-LAYER PROBE (default OFF): notifications/nav/Siri render BEHIND our scene.
+        // Cross-process (Siri is a DBDashboard/CarPlay-side view), so before changing any window level -
+        // which could hide our app behind the dashboard - capture the real car-screen window topology
+        // WHILE a notification/Siri is up. Turn on: notifyutil -s com.cbr.gate.winprobe 1
+        if (cbrGate("com.cbr.gate.winprobe", 0)) {
+            id _wpwin = rootWindow;
+            for (int _k = 1; _k <= 30; _k++) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((double)_k*2.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    @try {
+                        if (gCBRRootWindow != _wpwin) return;
+                        int _wf = open("/var/mobile/CBR_winlayers.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+                        if (_wf < 0) return;
+                        #define WPF(...) do{ char _b[300]; int _n=snprintf(_b,sizeof(_b),__VA_ARGS__); if(_n>0)write(_wf,_b,(size_t)_n);}while(0)
+                        double _ourl = 0; @try { _ourl = ((double(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("windowLevel")); } @catch(...) {}
+                        WPF("---- sample %d (our level=%.1f) ----\n", _k, _ourl);
+                        id _screen = [gCBRRootWindow respondsToSelector:sel_registerName("screen")] ? ((id(*)(id,SEL))objc_msgSend)(gCBRRootWindow, sel_registerName("screen")) : nil;
+                        id _app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+                        id _wins = _app ? ((id(*)(id,SEL))objc_msgSend)(_app, sel_registerName("windows")) : nil;
+                        if (_wins) for (id w in _wins) { @try {
+                            id _ws = [w respondsToSelector:sel_registerName("screen")] ? ((id(*)(id,SEL))objc_msgSend)(w, sel_registerName("screen")) : nil;
+                            if (_ws != _screen) continue;
+                            double _lvl = ((double(*)(id,SEL))objc_msgSend)(w, sel_registerName("windowLevel"));
+                            int _hid = ((BOOL(*)(id,SEL))objc_msgSend)(w, sel_registerName("isHidden"));
+                            WPF("  %s level=%.1f hidden=%d\n", class_getName(object_getClass(w)), _lvl, _hid);
+                        } @catch(...) {} }
+                        WPF("\n");
+                        #undef WPF
+                        close(_wf);
+                    } @catch(...) {}
+                });
+            }
+        }
         // v3.20.77 GAMBLE: host at the car screen's TRUE landscape size instead of portrait 281x472.
         @try {
             id _scr=((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIScreen"),sel_registerName("screens"));
@@ -4013,10 +4069,12 @@ static void cbrCPCloseForegroundApp(void) {
                 void (^_deact)(id) = ^(id sc){ @try {
                         if (!sc) return;
                         int _m = 0;
-                        if ([sc respondsToSelector:sel_registerName("deactivateWithTransitionContext:")]) {
+                        if (cbrGate("com.cbr.gate.bgreal", 1)) {   // v3.98.0 gate the real background (Colin: gate it)
+                          if ([sc respondsToSelector:sel_registerName("deactivateWithTransitionContext:")]) {
                             ((void(*)(id,SEL,id))objc_msgSend)(sc, sel_registerName("deactivateWithTransitionContext:"), (id)nil); _m = 2;
-                        } else if ([sc respondsToSelector:sel_registerName("deactivate:")]) {
+                          } else if ([sc respondsToSelector:sel_registerName("deactivate:")]) {
                             ((void(*)(id,SEL,id))objc_msgSend)(sc, sel_registerName("deactivate:"), (id)nil); _m = 1;
+                          }
                         }
                         if (_rf>=0){ char _mb[96]; int _mn2=snprintf(_mb,sizeof(_mb),"  bg-scene %s via m%d\n", object_getClassName(sc), _m); if(_mn2>0)write(_rf,_mb,(size_t)_mn2); }
                 } @catch(...) {} };
