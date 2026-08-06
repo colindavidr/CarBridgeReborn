@@ -4005,7 +4005,21 @@ static void cbrCPAddToRecents(id bidObj) {
         id dock = root && [root respondsToSelector:sel_registerName("appDockViewController")] ? ((id(*)(id,SEL))objc_msgSend)(root, sel_registerName("appDockViewController")) : nil;
         int _didRefresh = 0;
         if (dock && [dock respondsToSelector:sel_registerName("_refreshAppDock")]) { ((void(*)(id,SEL))objc_msgSend)(dock, sel_registerName("_refreshAppDock")); _didRefresh = 1; }
-        { int _rf=open("/var/mobile/CBR_recents.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_rf>=0){ const char*_bc=((const char*(*)(id,SEL))objc_msgSend)(bidObj,sel_registerName("UTF8String")); char _rb[220]; int _rn=snprintf(_rb,sizeof(_rb),"RECENTS %s: didBecomeVisible=%d dock=%s refreshed=%d\n", _bc?_bc:"?", _didVis, dock?class_getName(object_getClass(dock)):"nil", _didRefresh); if(_rn>0)write(_rf,_rb,(size_t)_rn); close(_rf);} }
+        // v3.93.0 DOCK LOCKUP: hosting our (non-scene) app can leave CarPlay's dock DISABLED so no other
+        // app is clickable. carplay-cast re-enables it via setDockEnabled:. Do the same (gated), and dump
+        // the dock's enable/interaction methods once so the right iOS17 selector is known if this absent.
+        int _dockEn = 0;
+        if (dock) {
+            if ([dock respondsToSelector:sel_registerName("setDockEnabled:")] && cbrGate("com.cbr.gate.dockenable", 1)) { ((void(*)(id,SEL,BOOL))objc_msgSend)(dock, sel_registerName("setDockEnabled:"), YES); _dockEn = 1; }
+            static int _dmp = 0;
+            if (!_dmp) { _dmp = 1; int _df=open("/var/mobile/CBR_dock.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
+                if (_df>=0){ char _h[100]; int _hn=snprintf(_h,sizeof(_h),"dock=%s enable/interaction methods:\n",class_getName(object_getClass(dock))); if(_hn>0)write(_df,_h,(size_t)_hn);
+                    unsigned int _mc=0; Method *_ms=class_copyMethodList(object_getClass(dock), &_mc);
+                    for (unsigned int _mi=0;_mi<_mc;_mi++){ const char *_sn=sel_getName(method_getName(_ms[_mi]));
+                        if (_sn && (strcasestr(_sn,"enab")||strcasestr(_sn,"dock")||strcasestr(_sn,"interact")||strcasestr(_sn,"lock")||strcasestr(_sn,"user")||strcasestr(_sn,"touch"))) { char _mb[180]; int _mn=snprintf(_mb,sizeof(_mb),"  %s\n",_sn); if(_mn>0)write(_df,_mb,(size_t)_mn); } }
+                    if (_ms) free(_ms); close(_df); } }
+        }
+        { int _rf=open("/var/mobile/CBR_recents.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_rf>=0){ const char*_bc=((const char*(*)(id,SEL))objc_msgSend)(bidObj,sel_registerName("UTF8String")); char _rb[240]; int _rn=snprintf(_rb,sizeof(_rb),"RECENTS %s: didBecomeVisible=%d dock=%s refreshed=%d dockEnabled=%d\n", _bc?_bc:"?", _didVis, dock?class_getName(object_getClass(dock)):"nil", _didRefresh, _dockEn); if(_rn>0)write(_rf,_rb,(size_t)_rn); close(_rf);} }
     } @catch(...) {}
 }
 
@@ -4030,22 +4044,13 @@ static void cbrCPAddToRecents(id bidObj) {
                 const char *bid = ((const char*(*)(id,SEL))objc_msgSend)(bidObj,
                     sel_registerName("UTF8String"));
                 CBCarLogFmt("[CBR-CP] tap(launchInfo) -> %s", bid ?: "?");
-                // v3.92.0 RE-TAP NO-OP: re-tapping an app that is ALREADY the hosted one must do nothing
-                // (stock CarPlay no-ops the foreground app); re-grafting it locks up the dock. If the
-                // host-state hash already matches this bid, suppress the native launch but DON'T re-graft.
-                uint64_t _rhs = cbrReadHostState();
-                if (cbrGate("com.cbr.gate.retap", 1) && _rhs != 0 && bid && cbrBidHash(bid) == _rhs) {
-                    CBCarLogFmt("[CBR-CP] re-tap of already-hosted %s -> no-op (avoid dock lockup)", bid);
-                    handled = YES;
-                } else {
-                    gCBRLaunchingOurApp = 1;   // v3.91.0: swallow the dashboard's launch-nav (pan) for the next ~2s
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ gCBRLaunchingOurApp = 0; });
-                    cbrCPCloseForegroundApp();   // v3.86.0: background any foregrounded native app first, so our scene isn't layered on top
-                    CBPostLaunch(bid);   // writes pending bid file (cbrCPRenderTest reads it)
-                    cbrCPAddToRecents(bidObj);   // v3.83.0: put it in the chrome's recent-apps dock
-                    CBLogFmt("[CBR] Tapped bridged app: %s", bid ?: "?");
-                    handled = YES;
-                }
+                gCBRLaunchingOurApp = 1;   // v3.91.0: swallow the dashboard's launch-nav (pan) for the next ~2s
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ gCBRLaunchingOurApp = 0; });
+                cbrCPCloseForegroundApp();   // v3.86.0: background any foregrounded native app first, so our scene isn't layered on top
+                CBPostLaunch(bid);   // writes pending bid file (cbrCPRenderTest reads it)
+                cbrCPAddToRecents(bidObj);   // v3.83.0: put it in the chrome's recent-apps dock
+                CBLogFmt("[CBR] Tapped bridged app: %s", bid ?: "?");
+                handled = YES;
             }
         }
     } @catch(...) { handled = NO; }
