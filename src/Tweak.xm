@@ -1585,7 +1585,7 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
     // just flashes the icon shadow). Re-hosting = teardown + re-mount = the double scene and ~10s black
     // dash Colin saw. gCBRLastBidStr still holds the currently-hosted bid here (reassigned just below),
     // and gCBRRootWindow proves a host is live, so bail before any teardown when the bid matches.
-    if (gCBRRootWindow && gCBRLastBidStr) {
+    if (cbrGate("com.cbr.gate.retap", 1) && gCBRRootWindow && gCBRLastBidStr) {   // v3.96.0 gated
         const char *_curbid = ((const char*(*)(id,SEL))objc_msgSend)(gCBRLastBidStr, sel_registerName("UTF8String"));
         if (_curbid && strcmp(_curbid, bid_cstr) == 0) { HH("re-tap of live app -> no-op (no re-host)\n"); if(fd>=0)close(fd); return; }
     }
@@ -1791,14 +1791,15 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 gCBRAnimTicks = 0;
                 gCBROpenAnimDone = 0;
                 int _fromDock = 0; { static int _lst2 = 0; if (!_lst2) notify_register_check("com.cbr.launch.fromdock", &_lst2); uint64_t _lv = 0; if (_lst2) notify_get_state(_lst2, &_lv); _fromDock = (_lv == 1); }
-                if (_fromDock) {
+                int _txgate = cbrGate("com.cbr.gate.transition", 1);   // v3.96.0 master gate: OFF = instant open (no fade, no zoom)
+                if (_txgate && _fromDock) {
                     ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity);
                     ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)0.0);
                     { void (^_fade)(void) = ^{ ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0); };
                       ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
                           objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
                           0.35, 0.0, (NSUInteger)(2UL<<16) /*EaseOut fade*/, _fade, (void(^)(BOOL))nil); }
-                } else if (cbrGate("com.cbr.gate.zoom", 1)) {
+                } else if (_txgate && cbrGate("com.cbr.gate.zoom", 1)) {
                     ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
                     ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.20, 0.20));
                     { void (^_zoom)(void) = ^{ ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity); };
@@ -3966,6 +3967,37 @@ static void cbrCPCloseForegroundApp(void) {
         NSUInteger n = fg ? ((NSUInteger(*)(id,SEL))objc_msgSend)(fg, sel_registerName("count")) : 0;
         int _rf = open("/var/mobile/CBR_recents.txt",O_WRONLY|O_CREAT|O_APPEND,0644);
         if (n == 0) { if(_rf>=0){ const char*_m="CLOSE-FG: nothing foregrounded (clean)\n"; write(_rf,_m,strlen(_m)); close(_rf);} return; }
+        // v3.96.0 BACKGROUND PROBE: 2 blind scene-deactivation attempts failed to background Maps, so
+        // dump DBDashboard + the foreground scene's REAL method lists ONCE to /var/mobile/CBR_dash.txt.
+        // The dump names the actual iOS 17 "background this app" call so the next build stops guessing.
+        { static int _dd = 0; if (!_dd && access("/var/mobile/CBR_dash.txt", F_OK) != 0) { _dd = 1;
+            int _df = open("/var/mobile/CBR_dash.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+            if (_df >= 0) {
+                #define DDF(...) do{ char _b[400]; int _dn=snprintf(_b,sizeof(_b),__VA_ARGS__); if(_dn>0)write(_df,_b,(size_t)_dn);}while(0)
+                DDF("==== DBDashboard/scene method dump (v3.96.0) ====\n");
+                Class _dc = object_getClass(dash);
+                DDF("-- dashboard class: %s --\n", class_getName(_dc));
+                unsigned int _dm = 0; Method *_dl = class_copyMethodList(_dc, &_dm);
+                DDF("-- dashboard methods (%u) --\n", _dm);
+                for (unsigned int i=0;i<_dm;i++) DDF("  -%s\n", sel_getName(method_getName(_dl[i])));
+                if (_dl) free(_dl);
+                @try { id _keys = [fg respondsToSelector:sel_registerName("allKeys")] ? ((id(*)(id,SEL))objc_msgSend)(fg, sel_registerName("allKeys")) : nil;
+                       NSUInteger _kc = _keys ? ((NSUInteger(*)(id,SEL))objc_msgSend)(_keys, sel_registerName("count")) : 0;
+                       for (NSUInteger k=0;k<_kc;k++){ id _kk = ((id(*)(id,SEL,NSUInteger))objc_msgSend)(_keys, sel_registerName("objectAtIndex:"), k);
+                           const char *_ks = (_kk && [_kk respondsToSelector:sel_registerName("UTF8String")]) ? ((const char*(*)(id,SEL))objc_msgSend)(_kk, sel_registerName("UTF8String")) : "?";
+                           DDF("  fg-key[%lu]=%s\n",(unsigned long)k, _ks?_ks:"?"); } } @catch(...) {}
+                @try { id _vv = [fg respondsToSelector:sel_registerName("allValues")] ? ((id(*)(id,SEL))objc_msgSend)(fg, sel_registerName("allValues")) : nil;
+                       id _v0 = (_vv && ((NSUInteger(*)(id,SEL))objc_msgSend)(_vv, sel_registerName("count"))>0) ? ((id(*)(id,SEL,NSUInteger))objc_msgSend)(_vv, sel_registerName("objectAtIndex:"), 0) : nil;
+                       if (_v0) { Class _vc = object_getClass(_v0); DDF("-- fg-scene class: %s --\n", class_getName(_vc));
+                           unsigned int _vmn = 0; Method *_vl = class_copyMethodList(_vc, &_vmn);
+                           DDF("-- fg-scene methods (%u) --\n", _vmn);
+                           for (unsigned int i=0;i<_vmn;i++) DDF("  -%s\n", sel_getName(method_getName(_vl[i])));
+                           if (_vl) free(_vl); } } @catch(...) {}
+                DDF("==== END DUMP ====\n");
+                #undef DDF
+                close(_df);
+            }
+        } }
         int _did = 0;
         if (cbrGate("com.cbr.gate.panfix", 1)) {
             // v3.90.0 NO-PAN: deactivate the foregrounded scene(s) DIRECTLY (setDeactivated:) instead of
