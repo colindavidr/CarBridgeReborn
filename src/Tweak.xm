@@ -1218,6 +1218,7 @@ static NSMutableSet *gCBRKeepAlive = nil;  // v3.20.18: bundle IDs whose scenes 
 static NSString *gCBRPendingHostBid = nil;  // bid being hosted - matched by the BORN-LANDSCAPE create hook
 static int gCBRHostStateToken = 0;          // notify token: state 3 = hosting (apps read it SYNCHRONOUSLY at ctor)
 static int gCBRLaunchingOurApp = 0;         // v3.91.0: 1 during our app's launch window (swallow dash nav = no pan)
+static int gCBRFromDock = 0;                // v3.94.0: 1 if the pending launch came from the chrome dock (fade, not zoom)
 static int gCBRTruthTokenSB = 0;            // v3.47.0: notify token for com.cbr.app.truth (app publishes its REAL scene orientation)
 static int gCBRBounceCount = 0;             // tap-replay attempts this host session
 static int gCBRBlindBounce = 0;             // v3.51.0: no-truth blind edges this host session (max 2)
@@ -1777,20 +1778,27 @@ static void cbrSBHostScene(const char *bid_cstr, id handle) {
                 // background is a stock-style placeholder during the brief async render, and the native
                 // factory then animates the app content in - so you see CarPlay's transition, not a
                 // black box fading in.
-                // v3.92.0 ZOOM restored + gated (Colin: the fade left no visible transition = abrupt
-                // black). gate.zoom=1 (default) grows the container out of the tapped icon (anchor set
-                // above); =2 is the plain fade (identity, no zoom).
-                ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
+                // v3.94.0 TWO TRANSITIONS (stock CarPlay): chrome/DOCK apps FADE, dash-grid apps ZOOM.
                 gCBRZoomDone = 1;
                 gCBRAnimTicks = 0;
                 gCBROpenAnimDone = 0;
-                if (cbrGate("com.cbr.gate.zoom", 1)) {
+                int _fromDock = 0; { static int _lst2 = 0; if (!_lst2) notify_register_check("com.cbr.launch.fromdock", &_lst2); uint64_t _lv = 0; if (_lst2) notify_get_state(_lst2, &_lv); _fromDock = (_lv == 1); }
+                if (_fromDock) {
+                    ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity);
+                    ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)0.0);
+                    { void (^_fade)(void) = ^{ ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0); };
+                      ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
+                          objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
+                          0.35, 0.0, (NSUInteger)(2UL<<16) /*EaseOut fade*/, _fade, (void(^)(BOOL))nil); }
+                } else if (cbrGate("com.cbr.gate.zoom", 1)) {
+                    ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
                     ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformMakeScale(0.20, 0.20));
                     { void (^_zoom)(void) = ^{ ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity); };
                       ((void(*)(Class,SEL,double,double,NSUInteger,void(^)(void),void(^)(BOOL)))objc_msgSend)(
                           objc_getClass("UIView"), sel_registerName("animateWithDuration:delay:options:animations:completion:"),
-                          0.40, 0.0, (NSUInteger)(2UL<<16) /*EaseOut - zoom out of the icon*/, _zoom, (void(^)(BOOL))nil); }
+                          0.40, 0.0, (NSUInteger)(2UL<<16) /*EaseOut zoom*/, _zoom, (void(^)(BOOL))nil); }
                 } else {
+                    ((void(*)(id,SEL,CGFloat))objc_msgSend)(container, sel_registerName("setAlpha:"), (CGFloat)1.0);
                     ((void(*)(id,SEL,CGAffineTransform))objc_msgSend)(container, sel_registerName("setTransform:"), CGAffineTransformIdentity);
                 }
                 { int _hf=open("/var/mobile/CBR_anim_heartbeat.txt",O_WRONLY|O_CREAT|O_APPEND,0644); if(_hf>=0){ char _hb2[160]; int _hn=snprintf(_hb2,sizeof(_hb2),"==== OPEN bid=%s ====\n", bid_cstr?bid_cstr:"?"); if(_hn>0)write(_hf,_hb2,(size_t)_hn); close(_hf);} }   // v3.65.0: per-open header, accumulate so working vs abrupt apps can be compared
@@ -4023,6 +4031,16 @@ static void cbrCPAddToRecents(id bidObj) {
     } @catch(...) {}
 }
 
+// v3.94.0: a launch from the chrome DOCK should fade (stock CarPlay fades dock apps); a dash-grid
+// launch should zoom. Flag dock launches here - the launch intercept below publishes the source.
+%hook DBAppDockViewController
+- (void)_dockButtonPressed:(id)arg1 {
+    gCBRFromDock = 1;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.5*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ gCBRFromDock = 0; });
+    %orig;
+}
+%end
+
 %hook DBApplicationLaunchInfo
 
 + (id)launchInfoForApplication:(id)appInfo withActivationSettings:(id)settings {
@@ -4046,6 +4064,8 @@ static void cbrCPAddToRecents(id bidObj) {
                 CBCarLogFmt("[CBR-CP] tap(launchInfo) -> %s", bid ?: "?");
                 gCBRLaunchingOurApp = 1;   // v3.91.0: swallow the dashboard's launch-nav (pan) for the next ~2s
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ gCBRLaunchingOurApp = 0; });
+                { static int _lst = 0; if (!_lst) notify_register_check("com.cbr.launch.fromdock", &_lst); if (_lst) notify_set_state(_lst, gCBRFromDock ? 1 : 2); }   // v3.94.0: dock(1)/dash(2) source for the transition
+                gCBRFromDock = 0;
                 cbrCPCloseForegroundApp();   // v3.86.0: background any foregrounded native app first, so our scene isn't layered on top
                 CBPostLaunch(bid);   // writes pending bid file (cbrCPRenderTest reads it)
                 cbrCPAddToRecents(bidObj);   // v3.83.0: put it in the chrome's recent-apps dock
