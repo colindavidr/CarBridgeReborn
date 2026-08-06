@@ -1224,6 +1224,7 @@ static int gCBRBounceCount = 0;             // tap-replay attempts this host ses
 static int gCBRBlindBounce = 0;             // v3.51.0: no-truth blind edges this host session (max 2)
 static int gCBRBounceBypass = 0;            // lets our own deactivate edge through the keep-alive hook
 static id gCBRContainerView = nil;          // inset app container (right of the dock strip)
+static id gCBRNotifOverlay = nil;           // v4.0.2: CarPlay notification snapshot, redrawn over our scene
 // v3.85.0: play one clean, uninterrupted Placeholder(1) -> LiveContent(4) display-mode transition on
 // the hosted app's SBApplicationSceneView, driven by CarPlay's own BSUIAnimationFactory - the native
 // open animation. Snap to Placeholder instantly (nil factory), then next runloop animate to Live WITH
@@ -1281,7 +1282,7 @@ static uint64_t cbrReadHostState(void) {
 static void cbrSBFinalizeTeardown(id win) {
     if (gCBRRootWindow == win) {
         @try { if (gCBROverlayWindow) { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBROverlayWindow, sel_registerName("setHidden:"), YES); } } @catch(...) {}
-        gCBRRootWindow = nil; gCBRAppVC = nil; gCBRActiveTxns = nil; gCBRSceneHandle = nil; gCBRContainerView = nil; gCBRHomeButton = nil; gCBROverlayWindow = nil;
+        gCBRRootWindow = nil; gCBRAppVC = nil; gCBRActiveTxns = nil; gCBRSceneHandle = nil; gCBRContainerView = nil; gCBRHomeButton = nil; gCBROverlayWindow = nil; gCBRNotifOverlay = nil;
         gCBRCoverView = nil;   // v3.79.0: cover dies with the container it sits in
         @try { if (gCBRKeepAlive) [gCBRKeepAlive removeAllObjects]; } @catch(...) {}   // v3.20.32: release keep-alive so the app suspends cleanly
     }
@@ -3549,6 +3550,88 @@ static void cbrCPProbeScenes(void) {
     CBLog("[CBR] CarPlayApp scene probe written to CBR_cp_scenes.txt");
 }
 static double gCBRHomeDownMs = 0;   // v3.58.0: DBStatusBarHomeButton press-start time (short vs long press)
+// v4.0.2 NOTIFICATION OVERLAY: CarPlay notifications are a DBNotificationWindow (level 6) inside the
+// CarPlay process's car scene, which our SpringBoard host window composites ABOVE (per-context ordering -
+// the probe proved a level bump cannot lift it). So mirror it: snapshot the live notification in the
+// CarPlay process, hand the PNG to SpringBoard, and redraw it INSIDE our scene on top of the app.
+// Gated com.cbr.gate.notifoverlay (default on; off -> touch /var/mobile/CBR_gate_off/com.cbr.gate.notifoverlay).
+static void cbrCPSnapshotNotif(id win) {
+    @try {
+        if (!win) return;
+        CGRect b = ((CGRect(*)(id,SEL))objc_msgSend)(win, sel_registerName("bounds"));
+        if (b.size.width < 2 || b.size.height < 2) return;
+        UIGraphicsBeginImageContextWithOptions(b.size, NO, 0.0);
+        BOOL ok = ((BOOL(*)(id,SEL,CGRect,BOOL))objc_msgSend)(win, sel_registerName("drawViewHierarchyInRect:afterScreenUpdates:"), b, NO);
+        id img = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        if (!ok || !img) return;
+        id png = UIImagePNGRepresentation(img);
+        if (!png) return;
+        ((BOOL(*)(id,SEL,id,BOOL))objc_msgSend)(png, sel_registerName("writeToFile:atomically:"), @"/var/mobile/cbr_notif.png", YES);
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.notif.show"), NULL, NULL, YES);
+    } @catch(...) {}
+}
+static void cbrCPNotifPoll(void) {
+    static int _wasShown = 0;
+    @try {
+        if (cbrGate("com.cbr.gate.notifoverlay", 1)) {
+            uint64_t _hs = 0; { static int _ht=0; if(!_ht) notify_register_check("com.cbr.orient.landscape",&_ht); if(_ht) notify_get_state(_ht,&_hs); }
+            int shown = 0; id nw = nil;
+            if (_hs != 0) {
+                id app = ((id(*)(Class,SEL))objc_msgSend)(objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+                id conns = app ? ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("connectedScenes")) : nil;
+                id alls = conns ? ((id(*)(id,SEL))objc_msgSend)(conns, sel_registerName("allObjects")) : nil;
+                NSUInteger cnt = alls ? [alls count] : 0;
+                for (NSUInteger i=0;i<cnt && !nw;i++){ id scn=[alls objectAtIndex:i];
+                    id wins = [scn respondsToSelector:sel_registerName("windows")] ? ((id(*)(id,SEL))objc_msgSend)(scn, sel_registerName("windows")) : nil;
+                    NSUInteger wc = wins ? [wins count] : 0;
+                    for (NSUInteger j=0;j<wc;j++){ id w=[wins objectAtIndex:j];
+                        if (strcmp(class_getName(object_getClass(w)),"DBNotificationWindow")==0){ nw=w; break; } }
+                }
+                if (nw) {
+                    int hid = ((BOOL(*)(id,SEL))objc_msgSend)(nw, sel_registerName("isHidden"));
+                    CGFloat al = ((CGFloat(*)(id,SEL))objc_msgSend)(nw, sel_registerName("alpha"));
+                    shown = (!hid && al > 0.05) ? 1 : 0;
+                }
+            }
+            if (shown) { cbrCPSnapshotNotif(nw); _wasShown = 1; }
+            else if (_wasShown) { CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.notif.hide"), NULL, NULL, YES); _wasShown = 0; }
+        }
+    } @catch(...) {}
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.5*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ cbrCPNotifPoll(); });
+}
+static void cbrSBShowNotifOverlay(void) {
+    @try {
+        if (!gCBRRootWindow) return;
+        id host = gCBRContainerView ? gCBRContainerView : gCBRRootWindow;
+        id data = ((id(*)(Class,SEL,id))objc_msgSend)(objc_getClass("NSData"), sel_registerName("dataWithContentsOfFile:"), @"/var/mobile/cbr_notif.png");
+        if (!data) return;
+        id img = ((id(*)(Class,SEL,id))objc_msgSend)(objc_getClass("UIImage"), sel_registerName("imageWithData:"), data);
+        if (!img) return;
+        CGRect hb = ((CGRect(*)(id,SEL))objc_msgSend)(host, sel_registerName("bounds"));
+        if (gCBRNotifOverlay) {
+            ((void(*)(id,SEL,id))objc_msgSend)(gCBRNotifOverlay, sel_registerName("setImage:"), img);
+            ((void(*)(id,SEL,CGRect))objc_msgSend)(gCBRNotifOverlay, sel_registerName("setFrame:"), hb);
+            ((void(*)(id,SEL,id))objc_msgSend)(host, sel_registerName("bringSubviewToFront:"), gCBRNotifOverlay);
+            return;
+        }
+        id iv = ((id(*)(id,SEL,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIImageView"), sel_registerName("alloc")), sel_registerName("initWithImage:"), img);
+        ((void(*)(id,SEL,CGRect))objc_msgSend)(iv, sel_registerName("setFrame:"), hb);
+        ((void(*)(id,SEL,BOOL))objc_msgSend)(iv, sel_registerName("setUserInteractionEnabled:"), NO);
+        ((void(*)(id,SEL,id))objc_msgSend)(host, sel_registerName("addSubview:"), iv);
+        ((void(*)(id,SEL,id))objc_msgSend)(host, sel_registerName("bringSubviewToFront:"), iv);
+        gCBRNotifOverlay = iv;
+    } @catch(...) {}
+}
+static void cbrSBHideNotifOverlay(void) {
+    @try { if (gCBRNotifOverlay) { ((void(*)(id,SEL))objc_msgSend)(gCBRNotifOverlay, sel_registerName("removeFromSuperview")); gCBRNotifOverlay = nil; } } @catch(...) {}
+}
+static void cbrSBNotifShowCB(CFNotificationCenterRef c, void *o, CFStringRef n, const void *ob, CFDictionaryRef ui) {
+    dispatch_async(dispatch_get_main_queue(), ^{ cbrSBShowNotifOverlay(); });
+}
+static void cbrSBNotifHideCB(CFNotificationCenterRef c, void *o, CFStringRef n, const void *ob, CFDictionaryRef ui) {
+    dispatch_async(dispatch_get_main_queue(), ^{ cbrSBHideNotifOverlay(); });
+}
 %group CARPLAY
 
 // v3.58.0 HOME BUTTON FIX (confirmed target from the v3.57 probe: DBStatusBarHomeButton on
@@ -5706,6 +5789,7 @@ static void cbrCPTriggerPoll(void) {
         // notification/Siri is on screen, then read /var/mobile/CBR_cpwins.txt.
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrCPDumpNowCB, CFSTR("com.cbr.probe.now"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         cbrCPTriggerPoll();   // v4.0.1: file-trigger fallback (notifyutil absent) - touch /var/mobile/CBR_dump_trigger
+        cbrCPNotifPoll();     // v4.0.2: mirror CarPlay notifications into our scene
         // v3.57.0 DISCONNECT PROBE: the screenshot phantom needs teardown on CarPlay disconnect, and
         // UIScreenDidDisconnect never fired in SpringBoard. Observe the likely signals in the CarPlay
         // process + log which fires on unplug (CBR_disconnect_probe.txt).
@@ -5800,6 +5884,8 @@ static void cbrCPTriggerPoll(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.loaded"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBAppsideCallback, CFSTR("com.cbr.appside.vc-orient-fired"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBCoverReadyCallback, CFSTR("com.cbr.app.ready"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);   // v3.79.0 launch cover
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBNotifShowCB, CFSTR("com.cbr.notif.show"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);   // v4.0.2 notif overlay
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, cbrSBNotifHideCB, CFSTR("com.cbr.notif.hide"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         unlink("/var/mobile/CBR_keepalive.txt");
         int _sf=open("/var/mobile/CBR_sb_init.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
         if(_sf>=0){const char*m="[CBR-SB] v3.26.5 init - v77 baseline + PORTRAIT window pin (upright dash)";write(_sf,m,strlen(m));
