@@ -4,20 +4,30 @@ on:
   workflow_dispatch:
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: macos-14
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up Theos (Linux toolchain + SDKs)
-        uses: Randomblock1/theos-action@v1
-
-      - name: Build rootless package
+      - name: Install Theos
+        run: |
+          export THEOS=$HOME/theos
+          git clone --quiet --recursive https://github.com/theos/theos.git "$THEOS"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+      - name: Install ldid
+        run: brew install ldid
+      - name: Install patched iOS 16.5 SDK (for private framework headers)
+        run: |
+          git clone -n --depth=1 --filter=tree:0 https://github.com/theos/sdks.git /tmp/sdks
+          cd /tmp/sdks
+          git sparse-checkout set --no-cone "iPhoneOS16.5.sdk"
+          git checkout --quiet
+          mkdir -p "$THEOS/sdks"
+          cp -R /tmp/sdks/iPhoneOS16.5.sdk "$THEOS/sdks/"
+          ls "$THEOS/sdks"
+      - name: Build (rootless)
         run: |
           make clean
           make THEOS_PACKAGE_SCHEME=rootless package FINALPACKAGE=1
-          echo "--- packages ---"; ls -la packages/
-
       - name: Upload .deb
         uses: actions/upload-artifact@v4
         with:

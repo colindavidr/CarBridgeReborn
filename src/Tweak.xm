@@ -3560,14 +3560,57 @@ static void cbrCPSnapshotNotif(id win) {
         if (!win) return;
         CGRect b = ((CGRect(*)(id,SEL))objc_msgSend)(win, sel_registerName("bounds"));
         if (b.size.width < 2 || b.size.height < 2) return;
-        UIGraphicsBeginImageContextWithOptions(b.size, NO, 3.0);   // v4.0.3: capture at 3x for a crisp banner
+        CGFloat scale = 3.0;
+        UIGraphicsBeginImageContextWithOptions(b.size, NO, scale);   // 3x = crisp banner
         BOOL ok = ((BOOL(*)(id,SEL,CGRect,BOOL))objc_msgSend)(win, sel_registerName("drawViewHierarchyInRect:afterScreenUpdates:"), b, NO);
         id img = UIGraphicsGetImageFromCurrentImageContext();
         UIGraphicsEndImageContext();
         if (!ok || !img) return;
-        id png = UIImagePNGRepresentation(img);
+        // v4.0.6 BANNER BBOX: cover ONLY the banner, not the full window. A full-size overlay blocks
+        // CarPlay's touch injection to the app scene = no scroll (v4.0.2/4.0.5). Find the opaque bounding
+        // box of the snapshot (the banner, wherever CarPlay drew it), crop to it, and ship the box so the
+        // overlay covers just the banner and the rest of the app stays scrollable. Falls back to full-size.
+        CGRect bbox = b;
+        @try {
+            CGImageRef cg = ((CGImageRef(*)(id,SEL))objc_msgSend)(img, sel_registerName("CGImage"));
+            if (cg) {
+                size_t W = CGImageGetWidth(cg), H = CGImageGetHeight(cg);
+                if (W && H) {
+                    unsigned char *buf = (unsigned char*)calloc(W*H*4, 1);
+                    if (buf) {
+                        CGColorSpaceRef csp = CGColorSpaceCreateDeviceRGB();
+                        CGContextRef ctx = CGBitmapContextCreate(buf, W, H, 8, W*4, csp, kCGImageAlphaPremultipliedLast);
+                        if (ctx) {
+                            CGContextTranslateCTM(ctx, 0, (CGFloat)H);      // flip so buffer row 0 = TOP (UIKit orientation)
+                            CGContextScaleCTM(ctx, 1.0, -1.0);
+                            CGContextDrawImage(ctx, CGRectMake(0,0,(CGFloat)W,(CGFloat)H), cg);
+                            size_t minx=W, miny=H, maxx=0, maxy=0; int found=0;
+                            for (size_t y=0;y<H;y++){ for (size_t x=0;x<W;x++){ if (buf[(y*W+x)*4+3] > 24){ found=1; if(x<minx)minx=x; if(x>maxx)maxx=x; if(y<miny)miny=y; if(y>maxy)maxy=y; } } }
+                            if (found && maxx>=minx && maxy>=miny)
+                                bbox = CGRectMake((CGFloat)minx/scale, (CGFloat)miny/scale, (CGFloat)(maxx-minx+1)/scale, (CGFloat)(maxy-miny+1)/scale);
+                            CGContextRelease(ctx);
+                        }
+                        CGColorSpaceRelease(csp);
+                        free(buf);
+                    }
+                }
+            }
+        } @catch(...) {}
+        id shipImg = img;
+        @try {
+            if (!CGRectEqualToRect(bbox, b) && bbox.size.width >= 1 && bbox.size.height >= 1) {
+                UIGraphicsBeginImageContextWithOptions(bbox.size, NO, scale);
+                ((void(*)(id,SEL,CGRect))objc_msgSend)(img, sel_registerName("drawInRect:"), CGRectMake(-bbox.origin.x, -bbox.origin.y, b.size.width, b.size.height));
+                id c = UIGraphicsGetImageFromCurrentImageContext();
+                UIGraphicsEndImageContext();
+                if (c) shipImg = c;
+            }
+        } @catch(...) {}
+        id png = UIImagePNGRepresentation(shipImg);
         if (!png) return;
         ((BOOL(*)(id,SEL,id,BOOL))objc_msgSend)(png, sel_registerName("writeToFile:atomically:"), @"/var/mobile/cbr_notif.png", YES);
+        { char rb[128]; int rn=snprintf(rb,sizeof(rb),"%.1f %.1f %.1f %.1f\n", (double)bbox.origin.x,(double)bbox.origin.y,(double)bbox.size.width,(double)bbox.size.height);
+          int rf=open("/var/mobile/cbr_notif.rect",O_WRONLY|O_CREAT|O_TRUNC,0644); if(rf>=0){ if(rn>0)write(rf,rb,(size_t)rn); close(rf);} }
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.cbr.notif.show"), NULL, NULL, YES);
     } @catch(...) {}
 }
@@ -3609,21 +3652,19 @@ static void cbrSBShowNotifOverlay(void) {
         id img = ((id(*)(Class,SEL,id))objc_msgSend)(objc_getClass("UIImage"), sel_registerName("imageWithData:"), data);
         if (!img) return;
         CGRect hb = ((CGRect(*)(id,SEL))objc_msgSend)(host, sel_registerName("bounds"));
-        // v4.0.5: RESTORE the full-size 1:1 overlay (v4.0.2 - the position + scale Colin confirmed were
-        // correct; the banner lands exactly where CarPlay drew it). Scroll broke in v4.0.2 because a
-        // full-size overlay OCCLUDES the app scene and CBR sets setIgnoresOcclusions:NO, so the system
-        // suspends touch delivery. The v4.0.3 top-strip mis-positioned the banner. Correct fix: keep
-        // full-size + userInteraction=NO (touches pass through) and tell the scene to IGNORE occlusions
-        // while the banner is up so it stays active and scrollable. Restored to NO on hide.
-        if (gCBRAppVC) { @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRAppVC, sel_registerName("setIgnoresOcclusions:"), YES); } @catch(...) {} }
+        // v4.0.6: place the overlay at the banner's ACTUAL bbox (written by the CarPlay side) so it covers
+        // ONLY the banner - the rest of the app stays uncovered and scrollable, and the banner sits exactly
+        // where CarPlay drew it. Fall back to full-size if the rect is missing.
+        CGRect fr = hb;
+        { int rf=open("/var/mobile/cbr_notif.rect",O_RDONLY); if(rf>=0){ char rb[128]; long n=read(rf,rb,sizeof(rb)-1); close(rf); if(n>0){ rb[n]=0; float x=0,y=0,w=0,h=0; if(sscanf(rb,"%f %f %f %f",&x,&y,&w,&h)==4 && w>=1 && h>=1){ fr=CGRectMake(x,y,w,h); } } } }
         if (gCBRNotifOverlay) {
             ((void(*)(id,SEL,id))objc_msgSend)(gCBRNotifOverlay, sel_registerName("setImage:"), img);
-            ((void(*)(id,SEL,CGRect))objc_msgSend)(gCBRNotifOverlay, sel_registerName("setFrame:"), hb);
+            ((void(*)(id,SEL,CGRect))objc_msgSend)(gCBRNotifOverlay, sel_registerName("setFrame:"), fr);
             ((void(*)(id,SEL,id))objc_msgSend)(host, sel_registerName("bringSubviewToFront:"), gCBRNotifOverlay);
             return;
         }
         id iv = ((id(*)(id,SEL,id))objc_msgSend)(((id(*)(id,SEL))objc_msgSend)(objc_getClass("UIImageView"), sel_registerName("alloc")), sel_registerName("initWithImage:"), img);
-        ((void(*)(id,SEL,CGRect))objc_msgSend)(iv, sel_registerName("setFrame:"), hb);
+        ((void(*)(id,SEL,CGRect))objc_msgSend)(iv, sel_registerName("setFrame:"), fr);
         ((void(*)(id,SEL,BOOL))objc_msgSend)(iv, sel_registerName("setUserInteractionEnabled:"), NO);
         ((void(*)(id,SEL,id))objc_msgSend)(host, sel_registerName("addSubview:"), iv);
         ((void(*)(id,SEL,id))objc_msgSend)(host, sel_registerName("bringSubviewToFront:"), iv);
@@ -3631,10 +3672,7 @@ static void cbrSBShowNotifOverlay(void) {
     } @catch(...) {}
 }
 static void cbrSBHideNotifOverlay(void) {
-    @try {
-        if (gCBRNotifOverlay) { ((void(*)(id,SEL))objc_msgSend)(gCBRNotifOverlay, sel_registerName("removeFromSuperview")); gCBRNotifOverlay = nil; }
-        if (gCBRAppVC) { @try { ((void(*)(id,SEL,BOOL))objc_msgSend)(gCBRAppVC, sel_registerName("setIgnoresOcclusions:"), NO); } @catch(...) {} }
-    } @catch(...) {}
+    @try { if (gCBRNotifOverlay) { ((void(*)(id,SEL))objc_msgSend)(gCBRNotifOverlay, sel_registerName("removeFromSuperview")); gCBRNotifOverlay = nil; } } @catch(...) {}
 }
 static void cbrSBNotifShowCB(CFNotificationCenterRef c, void *o, CFStringRef n, const void *ob, CFDictionaryRef ui) {
     dispatch_async(dispatch_get_main_queue(), ^{ cbrSBShowNotifOverlay(); });
