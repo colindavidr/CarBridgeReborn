@@ -3576,11 +3576,11 @@ static void cbrCPSnapshotNotif(id win) {
 // banner). Only treat it as shown when it actually contains a VISIBLE label with text (a real notification).
 // Cheap: property reads only, no CoreGraphics, no extra render.
 static int cbrCPViewHasText(id v, int depth) {
-    if (!v || depth > 6) return 0;
+    if (!v || depth > 16) return 0;   // v4.0.9: deeper - notification labels sit ~8-12 levels down
     @try {
         if (((BOOL(*)(id,SEL))objc_msgSend)(v, sel_registerName("isHidden"))) return 0;
         CGFloat va = ((CGFloat(*)(id,SEL))objc_msgSend)(v, sel_registerName("alpha"));
-        if (va < 0.05) return 0;
+        if (va < 0.01) return 0;   // v4.0.9: only skip fully-invisible subtrees
         if ([v isKindOfClass:objc_getClass("UILabel")]) {
             id t = ((id(*)(id,SEL))objc_msgSend)(v, sel_registerName("text"));
             if (t && ((NSUInteger(*)(id,SEL))objc_msgSend)(t, sel_registerName("length")) > 0) return 1;
@@ -5736,11 +5736,14 @@ static void cbrCPDumpViewTree(id v, int depth, int fd) {
     @try {
         const char *cn = class_getName(object_getClass(v));
         int flag = (strcasestr(cn,"siri")||strcasestr(cn,"notif")||strcasestr(cn,"banner")||strcasestr(cn,"bulletin")||strcasestr(cn,"alert")||strcasestr(cn,"floating")) ? 1 : 0;
-        if (flag || depth <= 3) {
+        int isLbl = [v isKindOfClass:objc_getClass("UILabel")] ? 1 : 0;   // v4.0.9: always surface labels (+text) at any depth
+        if (flag || isLbl || depth <= 3) {
             CGRect fr = ((CGRect(*)(id,SEL))objc_msgSend)(v, sel_registerName("frame"));
             int hid = ((BOOL(*)(id,SEL))objc_msgSend)(v, sel_registerName("isHidden"));
             double zp = 0; @try { id ly = ((id(*)(id,SEL))objc_msgSend)(v, sel_registerName("layer")); if (ly) zp = ((double(*)(id,SEL))objc_msgSend)(ly, sel_registerName("zPosition")); } @catch(...) {}
-            char _b[300]; int _n=snprintf(_b,sizeof(_b),"%*s%s%s f=%.0f,%.0f %.0fx%.0f hid=%d z=%.1f\n", depth*2, "", flag?"*** ":"", cn, fr.origin.x,fr.origin.y,fr.size.width,fr.size.height, hid, zp); if(_n>0)write(fd,_b,(size_t)_n);
+            char _txt[96]; _txt[0]=0;
+            if (isLbl) { @try { id t = ((id(*)(id,SEL))objc_msgSend)(v, sel_registerName("text")); const char *ts = (t && [t respondsToSelector:sel_registerName("UTF8String")]) ? ((const char*(*)(id,SEL))objc_msgSend)(t, sel_registerName("UTF8String")) : NULL; if (ts && ts[0]) snprintf(_txt,sizeof(_txt)," text=\"%.72s\"", ts); } @catch(...) {} }
+            char _b[420]; int _n=snprintf(_b,sizeof(_b),"%*s%s%s f=%.0f,%.0f %.0fx%.0f hid=%d z=%.1f%s\n", depth*2, "", flag?"*** ":"", cn, fr.origin.x,fr.origin.y,fr.size.width,fr.size.height, hid, zp, _txt); if(_n>0)write(fd,_b,(size_t)_n);
         }
         id subs = ((id(*)(id,SEL))objc_msgSend)(v, sel_registerName("subviews"));
         NSUInteger sc = subs ? [subs count] : 0;
